@@ -1,5 +1,39 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Compressed-pass fundamental scorer** (fundamental rubric v1.0.0,
+  `compressed_snapshot_pass`): `scripts/score_fundamental.py` is the
+  ALWAYS-AVAILABLE fundamental path (design spec §8.1 "FSI absent" branch) — when
+  the deep FSI initiation / model reuse is not applied, the composite still gets a
+  disclosed, snapshot-only fundamental score instead of a blank dimension. Scores
+  two dimensions off an existing snapshot bundle: **Quality** (50 — revenue growth
+  15, gross+operating margins 8+7, returns-on-capital/roe 10 with a
+  **percent-vs-fraction normalization** where a `roe` value >3 is read as a percent
+  and divided by 100 with that normalization labeled in the arithmetic, and FCF
+  margin = `fcf_ttm / rev_ttm` 10) and **Valuation** (50 — fwd P/E vs the ticker's
+  own 5-yr median 20, PEG 15, FCF yield 15). The pe-vs-history component carries the
+  snapshot's `valuation.pe_median_method` label (`approx_current_eps`) into its
+  arithmetic string so the median's approximation is disclosed wherever it scores.
+  Consumes the **snapshot only** (no dependency on other module JSON or the ladder,
+  scores no price levels). Writes `<bundle>/module_fundamental.json` with a
+  top-level `fundamental_mode: "compressed_snapshot_pass"` + `mode_note` so a reader
+  always knows this was the snapshot-only pass (not the deep model), per-subscore
+  arithmetic strings (the actual numbers), verbatim `quality` and `valuation`
+  tables, empty `flags` (this pass is fully mechanical — no judgment flags), and
+  `signal: null` (the LLM writes the one-line signal in the brief, never numbers).
+  Whole-dimension null inputs renormalize the 0-100 score over the remaining max and
+  flag `renormalized: true`. CLI: `python3 scripts/score_fundamental.py --bundle
+  <dir> [--out <path>]`. SINGLE-MAPPING SPLIT (spec §2): balance-sheet SOLVENCY
+  (`fundamentals.net_cash_defined.net`) stays OWNED by risk-analytics and
+  EPS-REVISIONS (`fundamentals.revisions_90d`) stay OWNED by sentiment-positioning —
+  neither is scored here; `valuation.pe_5yr_median` is scored HERE (risk uses it
+  only as an unscored downside-map level, no collision). Files:
+  `scripts/score_fundamental.py`, `tests/test_score_fundamental.py`;
+  `tests/test_single_mapping.py` now runs its two governance checks 4-way across
+  technical/risk/sentiment/fundamental (INPUT_FIELDS verified pairwise disjoint).
+
 ## 0.2.0 — 2026-07-16 · Phase 2: Evidence Skills
 
 Gate 2 (validation on the three Gate-1 bundles, fresh agents executing the

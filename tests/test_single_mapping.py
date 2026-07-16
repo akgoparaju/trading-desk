@@ -13,10 +13,10 @@ declared field sets -- it does no scoring of its own.
 
 import unittest
 
-from scripts import score_technical, score_risk, score_sentiment
+from scripts import score_technical, score_risk, score_sentiment, score_fundamental
 
 SKILLS = {"technical": score_technical, "risk": score_risk,
-          "sentiment": score_sentiment}
+          "sentiment": score_sentiment, "fundamental": score_fundamental}
 
 
 class TestSingleMapping(unittest.TestCase):
