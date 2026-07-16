@@ -2,6 +2,30 @@
 
 ## Unreleased — Phase 4: Assembly
 
+### Fixed
+- **Report-QC number provenance hardened** (`scripts/report_qc.py`, `tests/test_report_renderer.py`):
+  (1) string-leaf numeric scanning is no longer global — it is now restricted to a WHITELIST of
+  bundle string paths the renderer echoes / the LLM cites (snapshot `meta.qc` + `meta.api_tier_notes`
+  + `sentiment.insider_method`; tradeplan sizing/hedge/executability/invalidation strings; options
+  structure `arithmetic`/`pop_method`/`declined[].reason`/`warnings_global`/`liquidity_verdict`/
+  vol `disclosure`; composite `renormalization_note` + thesis subscore arithmetic; each evidence
+  module's `renormalization_note` **and** `subscores[].arithmetic`). Numeric-leaf scanning stays
+  global. Closes the channel where prose could cite a number that only appeared inside an unrelated
+  arithmetic string. (2) Dates and versions are now EXACT-MATCH-allowed against the bundle's own
+  dates/versions instead of being blindly shape-scrubbed — a fabricated date (`2031-01-01`) or bogus
+  version (`v9.99.99`) in prose now orphans. (3) Only the three exact page headers render_report
+  emits are treated as chrome; digits in any other `## Page N` line (e.g. `## Page 777`) now orphan.
+  (4) `is_allowed` returns False (not True) for an unparseable token. The evidence-module
+  `subscores[].arithmetic` whitelist path was forced by re-running the fixed QC against the real V1
+  AAPL report (it legitimately cites `19.9%`, `28.6%`, `1.67x`, `59.6%` from those strings); no
+  genuine fabrication was found. 12 new regression tests; V1 report still exits 0.
+
+### Changed
+- **composite-score SKILL** (`skills/composite-score/SKILL.md`): after running `score_fundamental.py`,
+  the step now also writes `<bundle>/brief_fundamental.md` (same ≤120-word evidence-brief format as
+  technical/sentiment/risk, mode disclosure included). Fundamental has no standalone skill, so the
+  composite step owns its brief — this completes the report-renderer's evidence-brief inputs.
+
 ### Added
 - **Full-trade-analysis orchestrator** (`skills/full-trade-analysis/SKILL.md`, no scripts): the
   **L5 orchestrator** — a phase-gated prompt that coordinates the other eight skills end to end.

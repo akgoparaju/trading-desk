@@ -766,6 +766,113 @@ class TestReportQCNumberProvenance(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# report_qc hardening: whitelisted string paths + exact-match dates/versions +
+# anchored page headers (Findings 1 & 2). End-to-end through the CLI on a real
+# skeleton so the whole allowed-set construction is exercised.
+# --------------------------------------------------------------------------- #
+
+class TestReportQCProvenanceHardening(unittest.TestCase):
+    """Numbers that appear ONLY inside a non-whitelisted string leaf, and
+    date/version/page-header shapes that used to be blindly scrubbed, must now
+    orphan; legitimate bundle-backed citations must still pass."""
+
+    def _prep(self, d):
+        _mk_bundle(d)
+        _render(d)
+        report = _find_report(d)
+        return report
+
+    def test_prose_number_not_a_numeric_leaf_fails(self):
+        # "a 72 multiple and RSI 58" -- 72 and 58 are NOT numeric leaves of the
+        # bundle and do not live inside any whitelisted string -> both orphan.
+        # (58 does appear only inside _technical_doc's momentum arithmetic
+        # "rsi 58"; that subscore arithmetic string IS whitelisted, so 58 is
+        # in-bundle. 72 appears nowhere -> it must orphan. Use two clearly-absent
+        # integers to make the assertion robust regardless of fixture drift.)
+        with tempfile.TemporaryDirectory() as d:
+            report = self._prep(d)
+            _fill_slots(report, overrides={
+                "tension": "Targets a 7231 multiple and a 6197 handle."})
+            rc, out, err = _qc(d, report)
+            self.assertEqual(rc, 1, out + err)
+            self.assertIn("number_provenance", out)
+            self.assertIn("7231", out)
+            self.assertIn("6197", out)
+
+    def test_number_only_in_arithmetic_string_but_not_whitelisted_fails(self):
+        # A number that lives ONLY inside a NON-whitelisted string leaf must
+        # orphan. _snapshot_doc's price.prev_close is 98.0 (a numeric leaf, so
+        # allowed); pick an integer that appears in no leaf and no whitelisted
+        # string: 4444 is nowhere in the bundle.
+        with tempfile.TemporaryDirectory() as d:
+            report = self._prep(d)
+            _fill_slots(report, overrides={
+                "brief_technical": "A resistance shelf sits near 4444 on the tape."})
+            rc, out, err = _qc(d, report)
+            self.assertEqual(rc, 1, out + err)
+            self.assertIn("4444", out)
+
+    def test_bogus_version_in_prose_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            report = self._prep(d)
+            _fill_slots(report, overrides={
+                "tension": "Scored under rubric v9.99.99 for this run."})
+            rc, out, err = _qc(d, report)
+            self.assertEqual(rc, 1, out + err)
+            self.assertIn("number_provenance", out)
+            self.assertIn("v9.99.99", out)
+
+    def test_fake_date_in_prose_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            report = self._prep(d)
+            _fill_slots(report, overrides={
+                "tension": "The real catalyst lands 2031-01-01, far out."})
+            rc, out, err = _qc(d, report)
+            self.assertEqual(rc, 1, out + err)
+            self.assertIn("number_provenance", out)
+            self.assertIn("2031-01-01", out)
+
+    def test_bogus_page_header_in_prose_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            report = self._prep(d)
+            _fill_slots(report, overrides={
+                "tension": "\n\n## Page 777 — Hidden\n\nsecret content"})
+            rc, out, err = _qc(d, report)
+            self.assertEqual(rc, 1, out + err)
+            self.assertIn("number_provenance", out)
+            self.assertIn("777", out)
+
+    def test_legit_citations_still_pass(self):
+        # A real bundle expiry date, a real rubric version, a numeric-leaf number,
+        # and a whitelisted-string number (technical arithmetic "rsi 58") all
+        # cited in prose -> pass.
+        with tempfile.TemporaryDirectory() as d:
+            report = self._prep(d)
+            _fill_slots(report, overrides={
+                "brief_technical": ("Chain dated 2026-08-21 under rubric v1.0.0; "
+                                    "entry near 95 with momentum at rsi 58."),
+            })
+            rc, out, err = _qc(d, report)
+            self.assertEqual(rc, 0, out + err)
+            self.assertIn("PASS", out)
+
+    def test_footer_attestation_and_api_tier_numbers_pass(self):
+        # The scripted footer echoes snapshot meta.qc.attestation ("8 passed ...")
+        # and api_tier_notes ("75 req/min") verbatim; those numbers must be
+        # in-bundle (whitelisted) so a clean fill passes.
+        with tempfile.TemporaryDirectory() as d:
+            report = self._prep(d)
+            _fill_slots(report)
+            text = _read_file(report)
+            # Sanity: the footer really carries the attestation / api-tier numbers.
+            self.assertIn("8 passed", text)
+            self.assertIn("75 req/min", text)
+            rc, out, err = _qc(d, report)
+            self.assertEqual(rc, 0, out + err)
+            self.assertIn("PASS", out)
+
+
+# --------------------------------------------------------------------------- #
 # report_qc: composite_arithmetic catches a corrupt composite.
 # --------------------------------------------------------------------------- #
 
@@ -873,6 +980,50 @@ class TestNumberExtraction(unittest.TestCase):
     def test_orphan_not_allowed(self):
         allowed = rq.build_allowed_set({"a": 95.0})
         self.assertFalse(rq.is_allowed("123.45", allowed))
+
+    def test_unparseable_token_is_not_allowed(self):
+        # Finding 3: is_allowed returns False for an unparseable token
+        # (belt-and-braces; extract_numbers already prefilters parseable tokens).
+        allowed = rq.build_allowed_set({"a": 95.0})
+        self.assertFalse(rq.is_allowed("--", allowed))
+        self.assertFalse(rq.is_allowed("$", allowed))
+
+    def test_numeric_leaves_do_not_scan_strings(self):
+        # A number that lives only inside an arbitrary (non-whitelisted) string
+        # leaf is NOT admitted by the numeric-leaf scan anymore.
+        allowed = rq.build_allowed_set({"note": "target is 777.5 someday"})
+        self.assertFalse(rq.is_allowed("777.5", allowed))
+
+    def test_whitelisted_string_numbers_admitted(self):
+        # A number inside a whitelisted path (options declined[].reason) is
+        # admitted via _iter_whitelisted_string_numbers.
+        docs = {"module_options": {"declined": [
+            {"name": "csp", "reason": "excluded at 33.7% IV rank"}]}}
+        nums = set(rq._iter_whitelisted_string_numbers(docs))
+        self.assertIn(33.7, nums)
+
+    def test_allowed_dates_collects_bundle_dates(self):
+        docs = {
+            "snapshot": {"meta": {"as_of_utc": "2026-07-16T00:00:00Z"}},
+            "module_options": {"selected_expiry": "2026-08-21"},
+        }
+        dates = rq.build_allowed_dates(docs)
+        self.assertIn("2026-07-16", dates)
+        self.assertIn("2026-08-21", dates)
+        self.assertNotIn("2031-01-01", dates)
+
+    def test_allowed_versions_raw_and_v_forms(self):
+        docs = {
+            "snapshot": {"meta": {"schema_version": "0.2.1"}},
+            "module_technical": {"rubric_version": "1.0.0"},
+            "module_tradeplan": {"expression": {"rule_version": "expression-v1.0.0"}},
+        }
+        vers = rq.build_allowed_versions(docs)
+        self.assertIn("1.0.0", vers)
+        self.assertIn("v1.0.0", vers)
+        self.assertIn("0.2.1", vers)
+        self.assertIn("v0.2.1", vers)
+        self.assertNotIn("9.99.99", vers)
 
 
 if __name__ == "__main__":

@@ -12,8 +12,13 @@ CLI: python3 scripts/report_qc.py --bundle <dir> --report <md path>
 
 CHECKS (waiver mechanics mirror qc_gate.py):
  1. number_provenance   -- every numeric token in the report must trace to a
-                           snapshot/module numeric leaf (with rounding + %-form
-                           tolerances). Orphans FAIL (list capped at 20).
+                           snapshot/module numeric leaf (global) or to a number
+                           inside one of the WHITELISTED bundle strings the
+                           renderer echoes (with rounding + %-form tolerances).
+                           Date- and version-shaped tokens are matched EXACTLY
+                           against the bundle's own dates/versions (a fake date or
+                           bogus version orphans); only the three exact page
+                           headers are chrome. Orphans FAIL (list capped at 20).
  2. composite_arithmetic-- Σ(weight × score) == composite score ±0.01; each
                            contribution consistent.
  3. ev_consistency      -- scenario probs sum 1 ±1e-6; ev_at_current recomputed
@@ -62,13 +67,23 @@ _NUM_RE = re.compile(r"\$?-?\d[\d,]*\.?\d*%?")
 # ISO date substrings (YYYY-MM-DD) are stripped before number extraction so a date
 # never contributes three orphan integers.
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
-# Markdown table separators / rubric-version artifacts to strip.
-_VERSION_RE = re.compile(r"v\d+\.\d+\.\d+")
-# Fixed report labels/headers that embed a literal number (report chrome, not
-# data): the "52-Week"/"52wk" column label and the "## Page N" section headers.
-# Stripped before number extraction so their digits never register as orphans.
-_LABEL_RE = re.compile(r"52[\s-]?wk|52[\s-]?week|^#+\s*Page\s*\d+",
-                       re.IGNORECASE | re.MULTILINE)
+# A semver-shaped version token (rubric/expression/schema/plugin versions), with or
+# without a leading 'v'. Matched EXACTLY against the bundle's own versions in
+# number_provenance -- an out-of-bundle version (e.g. v9.99.99) orphans.
+_VERSION_TOKEN_RE = re.compile(r"v?\d+\.\d+\.\d+")
+# Fixed report labels that embed a literal number (report chrome, not data): the
+# "52-Week"/"52wk" column label. Stripped before number extraction so its digits
+# never register as orphans. NOTE: page headers are handled separately by
+# _strip_allowed_page_headers -- ONLY the three exact headers render_report emits
+# are chrome; any other "## Page N" line's digits are treated as ordinary numbers.
+_LABEL_RE = re.compile(r"52[\s-]?wk|52[\s-]?week", re.IGNORECASE)
+# The three EXACT page headers render_report emits. Their trailing digit (1/2/3) is
+# report chrome; digits in any OTHER "## Page ..." line are ordinary numeric tokens.
+_ALLOWED_PAGE_HEADERS = (
+    "## Page 1 — Decision",
+    "## Page 2 — Evidence",
+    "## Page 3 — Context & Protocol",
+)
 
 
 def _result(name, passed, detail):
@@ -102,13 +117,19 @@ def _canonical(tok):
 def extract_numbers(text):
     """Every numeric token in ``text`` as a list of raw string tokens.
 
-    Dates (YYYY-MM-DD), rubric version strings (vX.Y.Z), and the word-count line
-    are stripped first so they never register as orphan numbers. Returns the raw
-    matched strings (e.g. '$95.00', '8.5%', '0.175') so the caller can report the
-    orphan exactly as it appears.
+    Dates (YYYY-MM-DD), semver-shaped version strings (vX.Y.Z), and the "52-Week"
+    label are stripped first so they never register as orphan numbers. Returns the
+    raw matched strings (e.g. '$95.00', '8.5%', '0.175') so the caller can report
+    the orphan exactly as it appears.
+
+    NOTE: this is the GENERIC extractor used to mine numbers from bundle strings
+    (allowed-set construction). The report side of number_provenance does its own
+    date/version/page-header handling (exact-match, not blind scrub) so that an
+    out-of-bundle date or version in prose ORPHANS rather than being silently
+    scrubbed away; see check_number_provenance.
     """
     scrubbed = _DATE_RE.sub(" ", text)
-    scrubbed = _VERSION_RE.sub(" ", scrubbed)
+    scrubbed = _VERSION_TOKEN_RE.sub(" ", scrubbed)
     scrubbed = _LABEL_RE.sub(" ", scrubbed)
     out = []
     for m in _NUM_RE.finditer(scrubbed):
@@ -120,13 +141,14 @@ def extract_numbers(text):
 
 
 def _iter_numeric_leaves(obj):
-    """Yield every numeric leaf across a nested dict/list.
+    """Yield every NUMERIC (non-bool) leaf across a nested dict/list.
 
-    Numeric (non-bool) leaves yield directly. STRING leaves are ALSO scanned for
-    embedded numeric tokens (the footer echoes bundle strings verbatim -- the QC
-    attestation "8 passed", api_tier_notes "75 req/min", arithmetic strings, and
-    method labels all carry numbers that legitimately appear in the report), so a
-    number that lives only inside a bundle string is still in-bundle.
+    String leaves are NOT scanned here. Scanning every string leaf for embedded
+    numbers was too permissive: prose could cite a number that only ever appears
+    inside an arithmetic string or method label and never in a scripted table, and
+    a random integer passed ~27% of the time. Numeric-leaf scanning stays global;
+    string-leaf numbers are admitted only from a WHITELIST of paths the renderer
+    actually echoes (see _iter_whitelisted_string_numbers).
     """
     if isinstance(obj, bool):
         return
@@ -134,10 +156,6 @@ def _iter_numeric_leaves(obj):
         yield float(obj)
         return
     if isinstance(obj, str):
-        for tok in extract_numbers(obj):
-            val = _canonical(tok)
-            if val is not None:
-                yield val
         return
     if isinstance(obj, dict):
         for v in obj.values():
@@ -147,8 +165,106 @@ def _iter_numeric_leaves(obj):
             yield from _iter_numeric_leaves(v)
 
 
+def _strings_at(obj):
+    """Yield every string leaf under ``obj`` (recursing dicts/lists)."""
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from _strings_at(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _strings_at(v)
+
+
+def _dig(obj, *path):
+    """Follow a key path through nested dicts; None if any hop is absent."""
+    cur = obj
+    for key in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    return cur
+
+
+def _iter_whitelisted_string_numbers(docs):
+    """Yield numbers found inside the WHITELISTED bundle strings only.
+
+    Each path below is a string (or nest of strings) that render_report echoes
+    into the report body OR that is the designated evidence-brief / prose source
+    the LLM cites from -- so a number living only inside one of these strings is
+    legitimately in-bundle. Every other string leaf is NOT admitted, closing the
+    fabrication channel where prose cited a number that appears only inside some
+    unrelated arithmetic string. Paths verified against render_report.py; absent
+    paths simply contribute nothing.
+    """
+    snapshot = docs.get("snapshot") or {}
+    meta = snapshot.get("meta") or {}
+
+    sources = []
+
+    # snapshot meta.qc -- the attestation is printed verbatim in the footer
+    # ("QC attestation: ..."); check details back the LLM's integrity prose.
+    sources.append(meta.get("qc"))
+    # snapshot meta.api_tier_notes -- printed verbatim in the footer.
+    sources.append(meta.get("api_tier_notes"))
+    # snapshot sentiment.insider_method -- the labeled method the smart-money prose cites.
+    sources.append(_dig(snapshot, "sentiment", "insider_method"))
+
+    tp = docs.get("module_tradeplan") or {}
+    sp = tp.get("stock_plan") or {}
+    sources.append(_dig(sp, "sizing", "arithmetic"))
+    sources.append(_dig(sp, "hedge", "trigger"))
+    sources.append(_dig(tp, "expression", "executability_note"))
+    # invalidation fundamental_leg strings (metric/threshold/justification text).
+    sources.append(_dig(sp, "invalidation", "fundamental_leg"))
+
+    opts = docs.get("module_options") or {}
+    for st in (opts.get("recommended_structures") or []):
+        if isinstance(st, dict):
+            sources.append(st.get("arithmetic"))
+            sources.append(st.get("pop_method"))
+    for dec in (opts.get("declined") or []):
+        if isinstance(dec, dict):
+            sources.append(dec.get("reason"))
+    sources.append(opts.get("warnings_global"))
+    sources.append(opts.get("liquidity_verdict"))
+    sources.append(_dig(opts, "vol_dashboard", "disclosure"))
+
+    comp = docs.get("module_composite") or {}
+    sources.append(comp.get("renormalization_note"))
+    # thesis subscore arithmetic strings (the conviction rationale the thesis prose cites).
+    sources.append(_dig(comp, "thesis_conviction", "subscores"))
+
+    # Each evidence module's renormalization_note plus its per-subscore
+    # ``arithmetic`` strings. The subscore arithmetic is the scoring rationale the
+    # evidence-brief prose cites verbatim (e.g. technical "ext 19.9%", fundamental
+    # "fcf_margin ... = 0.2861" -> "28.6%", "pe_fwd/pe_5yr_median = 1.6684" ->
+    # "1.67x", sentiment "buy_pct 59.6%"); the real V1 report forced this path.
+    for key in ("module_technical", "module_risk", "module_sentiment",
+                "module_fundamental"):
+        m = docs.get(key)
+        if isinstance(m, dict):
+            sources.append(m.get("renormalization_note"))
+            for sub in (m.get("subscores") or []):
+                if isinstance(sub, dict):
+                    sources.append(sub.get("arithmetic"))
+
+    for src in sources:
+        if src is None:
+            continue
+        for s in _strings_at(src):
+            for tok in extract_numbers(s):
+                val = _canonical(tok)
+                if val is not None:
+                    yield val
+
+
 def build_allowed_set(*objs):
-    """Build the ALLOWED numeric set from every numeric leaf across ``objs``.
+    """Build the ALLOWED numeric set from every NUMERIC leaf across ``objs``.
+
+    String leaves are NOT scanned here (see _iter_numeric_leaves); whitelisted
+    string numbers are folded in separately by check_number_provenance.
 
     Each allowed value ``v`` contributes several tolerance-expanded forms:
       - v itself, and v rounded to 0/1/2 dp (abs);
@@ -186,7 +302,8 @@ def is_allowed(token, allowed):
     """
     val = _canonical(token)
     if val is None:
-        return True  # unparseable -> not our concern
+        return False  # unparseable -> not provably in-bundle (belt-and-braces;
+        #               extract_numbers already prefilters parseable tokens)
     key = round(abs(val), 2)
     # direct 2-dp membership.
     if key in allowed:
@@ -211,6 +328,67 @@ def _page_sections(report_text):
     parts = re.split(r"^## Page ", report_text, flags=re.MULTILINE)
     # parts[0] is the preamble (title); the rest are the three pages.
     return parts[1:]
+
+
+# --------------------------------------------------------------------------- #
+# Exact-match allowance sets for dates and versions (fabrication-channel close).
+# --------------------------------------------------------------------------- #
+
+def build_allowed_dates(*docs_list):
+    """Every date-shaped (YYYY-MM-DD) string anywhere in the given bundle docs.
+
+    Collected from BOTH keys and values across the whole nested structure (as_of,
+    expiries, fiscal/transaction/sample dates, catalyst dates, retrieved_utc
+    timestamps...) plus the report's own date derived from each snapshot's as_of.
+    A date-shaped token in the report that is not in this set is an ORPHAN (a
+    fabricated date can no longer hide by being shape-scrubbed away).
+    """
+    dates = set()
+    for docs in docs_list:
+        if docs is None:
+            continue
+        blob = json.dumps(docs)
+        dates.update(_DATE_RE.findall(blob))
+        snap = docs.get("snapshot") if isinstance(docs, dict) else None
+        as_of = _dig(snap or {}, "meta", "as_of_utc")
+        if isinstance(as_of, str) and len(as_of) >= 10:
+            m = _DATE_RE.match(as_of)
+            if m:
+                dates.add(m.group(0))
+    return dates
+
+
+def build_allowed_versions(*docs_list):
+    """Every version string the bundle carries, in both raw and 'v'-prefixed form.
+
+    Sources: each module's rubric_version, the expression rule_version, the
+    snapshot schema_version, and the plugin version. render_report renders these
+    as 'v1.0.0' (rubric), 'expression-v1.0.0' (rule), 'snapshot schema 0.2.1'
+    (raw), and the plugin '0.3.0' (raw), so both the raw 'X.Y.Z' and the 'vX.Y.Z'
+    rendering are admitted. A version-shaped token not in this set is an ORPHAN.
+    """
+    versions = set()
+
+    def add(ver):
+        if not isinstance(ver, str):
+            return
+        for m in _VERSION_TOKEN_RE.findall(ver):
+            core = m[1:] if m.startswith("v") else m
+            versions.add(core)
+            versions.add("v" + core)
+
+    for docs in docs_list:
+        if docs is None:
+            continue
+        for key, m in docs.items():
+            if key.startswith("module_") and isinstance(m, dict):
+                add(m.get("rubric_version"))
+        tp = docs.get("module_tradeplan") or {}
+        add(_dig(tp, "expression", "rule_version"))
+        snap = docs.get("snapshot") or {}
+        add(_dig(snap, "meta", "schema_version"))
+    add(render_report._plugin_version())
+    return versions
 
 
 # --------------------------------------------------------------------------- #
@@ -242,30 +420,85 @@ def derived_delta_values(old_docs, new_docs):
     return vals
 
 
-def check_number_provenance(report_text, docs, extra_values=None):
-    """Every numeric token in the report traces to an allowed bundle value.
+def check_number_provenance(report_text, docs, extra_values=None,
+                            previous_docs=None):
+    """Every numeric / date / version token in the report traces to the bundle.
 
-    ``extra_values`` is an optional list of additional allowed numbers (used in
-    delta mode for the script-computed Δ columns, which are not bundle leaves).
+    Three orthogonal allowance sets are built from the bundle (and, in delta mode,
+    the previous bundle):
+
+      * NUMBERS -- every numeric leaf (global) plus numbers inside the WHITELISTED
+        bundle strings the renderer echoes / the LLM cites. A prose number that
+        appears only inside some other (non-whitelisted) string now ORPHANS.
+      * DATES -- every date-shaped string in the bundle plus the report's own
+        date. A date-shaped token not in the set ORPHANS (fake dates can no longer
+        pass by being shape-scrubbed).
+      * VERSIONS -- every rubric/expression/schema/plugin version (raw + 'v'-form).
+        A version-shaped token not in the set ORPHANS (e.g. v9.99.99).
+
+    Page headers: only the three EXACT headers render_report emits are chrome;
+    their digits are stripped before scanning. Any other "## Page N" line keeps
+    its digits, so "## Page 777" surfaces 777 as an ordinary numeric orphan.
+
+    ``extra_values`` is an optional list of additional allowed numbers (delta mode:
+    the script-computed Δ columns, which are not bundle leaves).
     """
+    docs_for_dv = [docs] + ([previous_docs] if previous_docs else [])
+
     allowed = build_allowed_set(
         docs.get("snapshot"),
         *[docs.get(k) for k in docs if k.startswith("module_")])
+    allowed |= build_allowed_set(list(_iter_whitelisted_string_numbers(docs)))
+    if previous_docs:
+        allowed |= build_allowed_set(
+            previous_docs.get("snapshot"),
+            *[previous_docs.get(k) for k in previous_docs
+              if k.startswith("module_")])
+        allowed |= build_allowed_set(
+            list(_iter_whitelisted_string_numbers(previous_docs)))
     if extra_values:
         allowed |= build_allowed_set(list(extra_values))
-    # Exclude fixed structural constants that are report-format artifacts, not
-    # data: "/100" score denominators and "1.0" composite total weight.
-    format_constants = {"100", "1.0", "1", "0"}
+
+    allowed_dates = build_allowed_dates(*docs_for_dv)
+    allowed_versions = build_allowed_versions(*docs_for_dv)
+
     orphans = []
-    for tok in extract_numbers(report_text):
-        canon = _canonical(tok)
-        if canon is None:
+
+    # 1) Page headers: strip ONLY the three exact chrome headers, leaving any
+    #    other "## Page ..." line (and its digits) in place for the numeric scan.
+    scanned = report_text
+    for header in _ALLOWED_PAGE_HEADERS:
+        scanned = scanned.replace(header, " ")
+
+    # 2) Version tokens: exact-match, then remove so their digit fragments do not
+    #    re-enter the numeric scan.
+    for m in _VERSION_TOKEN_RE.findall(scanned):
+        core = m[1:] if m.startswith("v") else m
+        if core not in allowed_versions and m not in allowed_versions:
+            orphans.append(m)
+    scanned = _VERSION_TOKEN_RE.sub(" ", scanned)
+
+    # 3) Date tokens: exact-match, then remove so their integers do not re-enter.
+    for m in _DATE_RE.findall(scanned):
+        if m not in allowed_dates:
+            orphans.append(m)
+    scanned = _DATE_RE.sub(" ", scanned)
+
+    # 4) Numeric tokens on what remains (52-Week label scrubbed inside
+    #    extract_numbers). Exclude fixed structural constants that are report
+    #    format artifacts, not data: "/100" denominators, "1.0" total weight.
+    format_constants = {"100", "1.0", "1", "0"}
+    scanned = _LABEL_RE.sub(" ", scanned)
+    for m in _NUM_RE.finditer(scanned):
+        tok = m.group(0)
+        if _canonical(tok) is None:
             continue
         raw = tok.strip().lstrip("$").rstrip("%").replace(",", "").lstrip("-")
         if raw in format_constants:
             continue
         if not is_allowed(tok, allowed):
             orphans.append(tok)
+
     # de-dupe preserving order.
     seen = set()
     uniq = [o for o in orphans if not (o in seen or seen.add(o))]
@@ -273,8 +506,9 @@ def check_number_provenance(report_text, docs, extra_values=None):
         shown = uniq[:_ORPHAN_CAP]
         more = f" (+{len(uniq) - len(shown)} more)" if len(uniq) > len(shown) else ""
         return _result("number_provenance", False,
-                       f"{len(uniq)} orphan number(s): " + ", ".join(shown) + more)
-    return _result("number_provenance", True, "all report numbers trace to the bundle")
+                       f"{len(uniq)} orphan token(s): " + ", ".join(shown) + more)
+    return _result("number_provenance", True,
+                   "all report numbers, dates, and versions trace to the bundle")
 
 
 def check_composite_arithmetic(docs):
@@ -530,16 +764,19 @@ def run_report_qc(bundle, report_path, delta=False, previous=None):
     is_delta = _is_delta_report(report_path, delta)
 
     if is_delta:
-        # Fold the old bundle's leaves + the script-computed Δ columns into the
-        # allowed set so a delta report's old-value and Δ columns are in-bundle.
+        # Fold the old bundle (numeric + whitelisted strings + dates + versions)
+        # and the script-computed Δ columns into the allowed sets so a delta
+        # report's old-value and Δ columns are in-bundle. ``previous_docs`` gives
+        # number_provenance the old bundle's dates/versions too (the Comparison
+        # header prints the old as_of).
         extra = []
+        old_docs = None
         if previous and os.path.isdir(previous):
             old_docs = render_report.load_bundle(previous)
             extra.extend(derived_delta_values(old_docs, docs))
-            for v in _iter_numeric_leaves(old_docs):
-                extra.append(v)
         return [
-            check_number_provenance(report_text, docs, extra_values=extra),
+            check_number_provenance(report_text, docs, extra_values=extra,
+                                    previous_docs=old_docs),
             check_footer_integrity(report_text, docs),
             check_no_empty_slots(report_text),
         ]

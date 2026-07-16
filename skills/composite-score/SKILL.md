@@ -37,6 +37,14 @@ ls -dt ./td_bundle_<TICKER>_* 2>/dev/null | head -1
     ```
     This is the snapshot-only compressed pass (deep FSI initiation/model reuse not applied) — **note that mode disclosure in your brief** (the module carries `fundamental_mode: "compressed_snapshot_pass"`).
 
+    Then **write `<bundle>/brief_fundamental.md`** — fundamental has no standalone skill, so the composite step owns its evidence brief. Read `module_fundamental.json` directly and write the brief in the **same format as the other evidence briefs** (technical / sentiment / risk), in order:
+      1. **Score headline** — `## Fundamental Score: <score>/100`. Copy `score` verbatim. If `renormalized` is true, add a one-line note quoting `renormalization_note`.
+      2. **A single paragraph, ≤120 words.** Cite ONLY numbers present in `module_fundamental.json` (the `subscores[].arithmetic` strings and `inputs`) or the snapshot — zero computed-in-prose numbers. Walk the sub-dimensions (quality, valuation), naming the points each earned and why, using the `arithmetic` strings as your source of truth. **State the mode disclosure**: if `fundamental_mode` is `compressed_snapshot_pass`, say the pass was snapshot-only (deep model reuse not applied).
+      3. **One-line signal** — your single-sentence read of the fundamentals (prose, never a number).
+      4. **Footer** — `_Rubric v<rubric_version> · as of <as_of>_` using the JSON's fields.
+
+    This keeps the report-renderer's evidence-brief inputs complete: all four evidence dimensions (technical, sentiment, risk, fundamental) now have a `brief_<dimension>.md`.
+
 Each present module JSON only needs its final `score`; the composite reads nothing else from them. A **missing** module is not fatal on its own — the script excludes that dimension, rescales the remaining weights to sum 1, and discloses it. But if **≥ 3 of the 5 dimensions** are missing (i.e. ≥ 2 of the 4 evidence modules absent), the script exits 2 ("insufficient evidence modules") — run the missing evidence skills first.
 
 ---
