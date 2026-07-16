@@ -3,6 +3,25 @@
 ## Unreleased — Phase 4: Assembly
 
 ### Added
+- **Full-trade-analysis orchestrator** (`skills/full-trade-analysis/SKILL.md`, no scripts): the
+  **L5 orchestrator** — a phase-gated prompt that coordinates the other eight skills end to end.
+  Phase 0 scope (profile/horizon/position-context-only-if-offered/FSI-depth, one-line echo);
+  Phase 1 snapshot + BLOCKING `qc_gate.py` (only full stop); Phase 2 evidence via **parallel
+  Agent subagents** (wave 1 = {technical, sentiment}, wave 2 = {risk} after the ladder exists;
+  fundamental compressed pass left to composite-score) with per-subagent prompts carrying
+  bundle path + exact SKILL.md path + judgment-flag protocol + single-snapshot/no-arithmetic
+  rules + score/path/≤5-line-summary return contract + sonnet-or-opus (never frontier) model
+  guidance; Phase 3 composite; Phase 4 trade-plan (pass 1 → options-strategy pipeline → pass 2
+  synthesize); Phase 5 report-renderer + BLOCKING `report_qc.py`; Phase 6 register + monitor
+  (embedded thesis-entry template filled from module JSONs, soft `thesis-tracker` registration,
+  OFFER-only re-score via `schedule`/`CronCreate`, mandatory completeness statement). Degradation
+  policy: any module failure → n/a + renormalize + disclose; a failed snapshot gate is the only
+  full stop; the report always ships with the completeness statement. Contract-cross-checked
+  against all eight skill SKILL.md files and the `trade_plan.py` / `render_report.py` /
+  `report_qc.py` / `score_fundamental.py` CLIs before writing.
+- README: all nine skills marked available; `full trade analysis NVDA` usage example added;
+  Status bumped (Phases 1–4 shipped, acceptance V1–V6 in progress).
+
 - **Report renderer + blocking report QC** (report-renderer skill): `scripts/render_report.py`
   + `scripts/report_qc.py` + `skills/report-renderer/SKILL.md` — the **L4 output layer**, the
   3-page trade decision report. Architecture kills LLM-number leakage **by construction**:

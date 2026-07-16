@@ -6,7 +6,7 @@ A Claude Code plugin that produces short (≈3-page) trade decision reports buil
 
 ## Status
 
-**Phase 1 — data engine.** The `market-snapshot` skill (L1 data engine) is shipped: it builds and QC-gates the snapshot that everything else depends on. The evidence, decision, and report skills listed below are planned.
+**Phases 1–4 shipped.** The full pipeline is wired end to end: the `market-snapshot` data engine (L1), the four evidence modules (technical, sentiment, risk, and a compressed fundamental pass), the `composite-score` decision layer (L3), the `trade-plan` + `options-strategy` execution layer, the `report-renderer` 3-page output with its blocking QC gate (L4), and the `full-trade-analysis` orchestrator (L5) that runs them all through phase gates. Acceptance validation V1–V6 (end-to-end runs across a handful of names to review grade distribution and calibrate the provisional weights/bands) is in progress.
 
 ## Install
 
@@ -33,14 +33,16 @@ Deep fundamental and valuation work can reuse the `equity-research` and `financi
 | Skill | Status |
 |-------|--------|
 | `market-snapshot` | available |
-| `technical-analysis` | planned |
-| `sentiment-positioning` | planned |
-| `risk-analytics` | planned |
-| `composite-score` | planned |
-| `trade-plan` | planned |
-| `options-strategy` | planned |
-| `report-renderer` | planned |
-| `full-trade-analysis` | planned |
+| `technical-analysis` | available |
+| `sentiment-positioning` | available |
+| `risk-analytics` | available |
+| `composite-score` | available |
+| `trade-plan` | available |
+| `options-strategy` | available |
+| `report-renderer` | available |
+| `full-trade-analysis` | available |
+
+Run the whole pipeline in one shot: **`full trade analysis NVDA`** — snapshot → evidence → composite → plan + options → 3-page report → thesis + re-score offer.
 
 ## Data & provenance
 
