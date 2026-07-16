@@ -1,5 +1,54 @@
 # Changelog
 
+## Unreleased — Phase 4: Assembly
+
+### Added
+- **Report renderer + blocking report QC** (report-renderer skill): `scripts/render_report.py`
+  + `scripts/report_qc.py` + `skills/report-renderer/SKILL.md` — the **L4 output layer**, the
+  3-page trade decision report. Architecture kills LLM-number leakage **by construction**:
+  `render_report.py` generates the ENTIRE report skeleton (every table, header, and number)
+  from the bundle's module JSONs; LLM prose fills ONLY the marked `<!-- SLOT:... -->` slots.
+  `report_qc.py` then verifies the FINAL document numerically against the bundle (blocking
+  §12 gate) so a report can never ship with a number that is not in the bundle.
+  - **`render_report.py`** (FULL mode requires snapshot + all seven module JSONs; a missing
+    file → exit 2 naming it): **Page 1 — Decision** (header block; the call `grade — action`
+    + composite score + tension slot; composite table with scripted band-reads
+    strong/constructive/mixed/weak + sensitivity row bolded when profile grades differ;
+    trade-plan table entries/exits/both-leg invalidation/size/hedge/expression; event-playbook
+    skeleton with implied move + slot). **Page 2 — Evidence** (per dimension: scripted score
+    headline + brief slot + scripted mini-table [ladder top-3-below/above, subscores,
+    positioning subset, top-5 downside map, EV scenarios] + signal slot). **Page 3 — Context &
+    Protocol** (full S/R ladder + downside map with options-basis; catalyst calendar + slot;
+    scenario & EV table; options expression block [vol verdict, structures, declined, hedge,
+    3-profile matrix]; monitoring protocol + slot; data-integrity footer [as_of, per-source
+    retrieved stamps, QC attestation, api tier notes, missing disclosures, every module
+    rubric_version + expression rule version + snapshot schema + plugin version read from
+    `../.claude-plugin/plugin.json`]; disclaimer). **Delta mode** (`--delta --previous
+    <old_bundle>`, both need module_composite): composite delta table (old/new/Δ, grade change
+    bolded), EV delta, level changes, structures added/removed, interpretation slot; a module
+    absent in either bundle → "n/a (module absent in {which})".
+  - **`report_qc.py`** (§12, BLOCKING; waiver mechanics mirror `qc_gate.py`): 11 checks —
+    **number_provenance** (every numeric token traces to a snapshot/module numeric leaf,
+    including numbers embedded in bundle STRINGS like the QC attestation and api notes, with
+    rounding + %-form + ±0.01 tolerances; orphans capped at 20), composite_arithmetic,
+    ev_consistency, invalidation_both_legs, sizing_within_cap, strikes_in_chain (SKIP if no
+    structures), pop_method_labeled, expression_consistency, footer_integrity, word_cap (≤2100),
+    no_empty_slots. Delta reports auto-run checks {1, 9, 11} only; `--previous` folds the old
+    bundle's leaves + the script-computed Δ columns into the allowed set.
+- **Tests**: `tests/test_report_renderer.py` (30 tests) — realistic minimal bundle via
+  `_mk_bundle()`; render exit 0 + all SLOT markers; 6+ scripted values trace to module JSONs;
+  missing module → exit 2 naming it; delta old/new/Δ + structures added/removed + clean delta
+  QC; unfilled skeleton FAILS no_empty_slots; clean fill PASSES all checks; rogue `$123.45`
+  FAILS number_provenance; corrupt composite FAILS composite_arithmetic; stripped fundamental
+  leg FAILS invalidation; 2200-word slot FAILS word_cap; waiver flips a failure; determinism.
+
+### Notes
+- number_provenance number-extraction: raw tokens are captured verbatim (so an orphan reports
+  exactly as it appears, e.g. `$95.00`, `8.5%`); ISO dates, `vX.Y.Z` version strings, the
+  `## Page N` section headers, and the `52-Week`/`52wk` column label are scrubbed before
+  extraction so their digits never register as orphans; `100`/`1.0`/`1`/`0` are treated as
+  report-format constants. No §12 check was weakened to be implementable.
+
 ## 0.3.0 — 2026-07-16 · Phase 3: Decision Layer
 
 Gate 3 (full decision chain on the three validated bundles): 3/3 PASS — all
