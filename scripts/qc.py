@@ -28,6 +28,8 @@ _NET_CASH_TOL = 1e6         # +-$1M reconciliation
 _PC_TOL = 0.15              # |pc_full_chain - pc_realtime| max spread
 
 # Top-level snapshot blocks whose presence must be provenance-accounted-for.
+# "macro" is intentionally excluded: it is context (risk-free rate), never a
+# scored input, and its single source (treasury_yield) is still staleness-checked.
 _PROVENANCE_BLOCKS = [
     "price", "technicals", "benchmark", "fundamentals",
     "valuation", "sentiment", "options", "events",

@@ -552,13 +552,18 @@ def _nearest_expiry(expiries_list, as_of_date, target_days):
 
 
 def build_options(chain_path, chain_path_manifest, price, next_earnings_date,
-                  rv20_ann, as_of_date):
+                  rv20_ann, as_of_date, last_ohlcv_date=None):
     """Options block from the on-disk chain (never loaded into LLM context)."""
     contracts = chain.load_contracts(chain_path)
     spot = price.get("last")
     exps = chain.expiries(contracts)
 
     chain_as_of = _chain_date(chain_path)
+    if chain_as_of is None:
+        # An EOD chain with no per-contract date is, by definition, as of the
+        # latest trading day — using file mtime here would be the *build* day
+        # and would falsely trip qc.check_options_freshness.
+        chain_as_of = last_ohlcv_date
     if chain_as_of is None:
         try:
             mtime = os.path.getmtime(chain_path)
@@ -908,7 +913,8 @@ def build_snapshot(bundle, ticker):
             try:
                 options, contracts, iv30 = build_options(
                     chain_path, chain_entry["path"], price, next_earnings_date,
-                    technicals["rv20_ann"], as_of_date)
+                    technicals["rv20_ann"], as_of_date,
+                    last_ohlcv_date=technicals.get("last_ohlcv_date"))
             except ValueError:
                 options, contracts, iv30 = None, None, None
 

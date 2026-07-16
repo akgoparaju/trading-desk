@@ -542,6 +542,21 @@ class TestOptionalMissing(unittest.TestCase):
         for key in ("news_sentiment", "options_chain", "short_interest"):
             self.assertIn(key, snap["meta"]["missing"])
 
+    def test_chain_without_date_falls_back_to_last_ohlcv_date(self):
+        # A dateless EOD chain must be stamped with the last trading day,
+        # NOT file mtime (which is build day and trips check_options_freshness).
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        b.add_chain(with_date=False)
+        b.write_manifest()
+        proc = _run_build(self.dir)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        out = os.path.join(self.dir, f"snapshot_MU_{AS_OF_DATE}.json")
+        with open(out) as fh:
+            snap = json.load(fh)
+        self.assertEqual(snap["options"]["chain_as_of"],
+                         snap["technicals"]["last_ohlcv_date"])
+
 
 class TestRequiredMissing(unittest.TestCase):
     def setUp(self):
