@@ -1,6 +1,6 @@
 ---
 name: market-snapshot
-description: Build a verified, QC-gated market data snapshot for a ticker from Alpha Vantage (single source of truth for all downstream trade-decision skills). Use when the user says "snapshot [ticker]", "market snapshot", "build data snapshot", or when any trade-decision skill needs market data. Schema v0.2.0.
+description: Build a verified, QC-gated market data snapshot for a ticker from Alpha Vantage (single source of truth for all downstream trade-decision skills). Use when the user says "snapshot [ticker]", "market snapshot", "build data snapshot", or when any trade-decision skill needs market data. Schema v0.2.1.
 ---
 
 # Market Snapshot (L1 Data Engine)

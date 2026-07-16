@@ -46,7 +46,7 @@ Run the whole pipeline in one shot: **`full trade analysis NVDA`** — snapshot 
 
 ## Data & provenance
 
-Every number in a snapshot traces to an Alpha Vantage endpoint or a public web source, each recorded with its retrieval timestamp under `meta.sources`. The blocking QC gate reconciles internal consistency (market cap, P/E, net cash, MA ordering, ranges, spot-check tolerance, options freshness, staleness) and stamps an attestation into `meta.qc`. Snapshot schema version: **v0.2.0**.
+Every number in a snapshot traces to an Alpha Vantage endpoint or a public web source, each recorded with its retrieval timestamp under `meta.sources`. The blocking QC gate reconciles internal consistency (market cap, P/E, net cash, MA ordering, ranges, spot-check tolerance, options freshness, staleness) and stamps an attestation into `meta.qc`. Snapshot schema version: **v0.2.1**.
 
 ## Development
 
