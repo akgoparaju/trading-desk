@@ -3,6 +3,54 @@
 ## [Unreleased]
 
 ### Added
+- **Composite-score decision skill** (composite rubric v1.0.0): `scripts/score_composite.py`
+  + `skills/composite-score/SKILL.md` — the **L3 decision layer**. It CONSUMES the
+  four evidence module JSONs' final scores (`module_technical.json`,
+  `module_fundamental.json`, `module_sentiment.json`, `module_risk.json`) — it does
+  NOT re-read the snapshot's scored fields — adds a fifth **thesis-conviction**
+  dimension it computes in-script, applies **FIXED per-profile weights** (spec §9.3,
+  never hand-tuned), and produces the composite (0-100), a letter grade, an action,
+  and an expected-value block. **Thesis conviction** (0-100): EV asymmetry (max 40,
+  mechanical — `ev / hurdle` banded, where `ev = ev_kelly.ev_at(scenarios, last)` and
+  `hurdle_total = 0.08 × horizon_years` with horizon convention trader 0.5 / balanced
+  1.5 / long-term 4.0) + variant perception (`strong|some|none` 20/12/4) + catalyst
+  clarity (`clear|partial|vague` 20/12/4) + invalidation quality
+  (`both-legs|one-leg|none` 20/10/0). All four judgment flags are REQUIRED with no
+  defaults and each carries a mandatory justification — conviction is asserted, never
+  assumed; the scenario set (with mandatory `--scenario-reasoning`) is REQUIRED too
+  (a missing scenario file, a probability sum ≠ 1 via `ev_kelly.scenario_ev`, a
+  missing flag, or a missing justification is exit 2). **Weights** (renormalized over
+  PRESENT dimensions, disclosed): balanced .25/.25/.20/.15/.15,
+  trader .35/.10/.25/.15/.15, long-term .10/.40/.15/.15/.20 across
+  technical/fundamental/sentiment/risk/thesis_conviction. A missing evidence module
+  excludes that dimension and rescales the remaining weights to sum 1; ≥ 3 of 5
+  dimensions missing → exit 2 ("insufficient evidence modules"). **Grades** (fixed):
+  A ≥80 Buy/Add; B 60-79 Hold/Accumulate-on-weakness; C 45-59 Hold/Trim; D <45
+  Reduce/Avoid. **EV block**: `ev_at_current`, `hurdle_total`,
+  `horizon_years_convention`, `ev_breakeven_entry = Σ(p·target)/(1+hurdle_total)` (the
+  entry at which EV exactly clears the hurdle — derivation in code), and repeatable
+  `--entry-level` → `ev_at_levels`. **Sensitivity** recomputes the FULL composite —
+  including EV asymmetry re-banded per each profile's own hurdle — for all three
+  profiles, so the same name can grade B under one lens and C under another. All EV
+  math is delegated to `scripts/ev_kelly.py` (`ev_at`, `scenario_ev`); the module
+  scores NO snapshot field directly (`INPUT_FIELDS = set()`, reads `price.last` only
+  as an EV reference), so single-mapping is preserved by construction and it is added
+  to the `tests/test_single_mapping.py` SKILLS dict (governance checks stay green
+  trivially). Writes `<bundle>/module_composite.json` with per-dimension rows (score,
+  weight, weight_renormalized, contribution, source), the thesis-conviction subscore
+  arithmetic strings, the EV block, the three-profile sensitivity, all judgment
+  flags, `renormalization_note`, and `tension: null`/`signal: null` (LLM prose slots
+  — the one-line tension sentence and any signal live only in the brief, never as
+  numbers in the JSON). CLI: `python3 scripts/score_composite.py --bundle <dir>
+  --scenarios <path> --scenario-reasoning "…" --variant X --variant-justification "…"
+  --catalyst-clarity X --catalyst-clarity-justification "…" --invalidation X
+  --invalidation-justification "…" [--profile P] [--entry-level N]... [--out <path>]`.
+  Test coverage: `tests/test_score_composite.py` (39 tests — thesis-conviction bands
+  per profile, fixed weighting + renormalization, fixed grade bands, EV block +
+  break-even + entry-level EV, three-profile sensitivity, and CLI end-to-end incl.
+  every exit-2 gate + determinism). Files: `scripts/score_composite.py`,
+  `skills/composite-score/SKILL.md`, `tests/test_score_composite.py`,
+  `tests/test_single_mapping.py`.
 - **Compressed-pass fundamental scorer** (fundamental rubric v1.0.0,
   `compressed_snapshot_pass`): `scripts/score_fundamental.py` is the
   ALWAYS-AVAILABLE fundamental path (design spec §8.1 "FSI absent" branch) — when
