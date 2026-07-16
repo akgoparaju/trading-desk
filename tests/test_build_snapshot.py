@@ -290,10 +290,14 @@ class BundleBuilder:
         puts = sum(r["open_interest"] and float(r["open_interest"]) for r in chain if r["type"] == "put")
         calls = sum(float(r["open_interest"]) for r in chain if r["type"] == "call")
         self.chain_pc = puts / calls
+        # volume-based P/C (the realtime comparand): puts volume / calls volume
+        put_vol = sum(float(r["volume"]) for r in chain if r["type"] == "put")
+        call_vol = sum(float(r["volume"]) for r in chain if r["type"] == "call")
+        self.chain_pc_volume = put_vol / call_vol
 
     def add_pc(self):
-        # realtime full chain within 0.15 of chain-computed P/C
-        rt = round(self.chain_pc + 0.05, 4)
+        # realtime P/C is volume-based: within 0.15 of the chain's VOLUME P/C
+        rt = round(self.chain_pc_volume + 0.05, 4)
         self._add("pc_ratio_realtime", "pc.json", {
             "symbol": self.ticker,
             "put_call_ratio_full_chain": f"{rt}",
@@ -484,6 +488,8 @@ class TestBuildSnapshotFull(unittest.TestCase):
     def test_sentiment_pc_and_iv(self):
         s = self.snap["sentiment"]
         self.assertAlmostEqual(s["put_call_ratio_full_chain"], self.b.chain_pc, places=4)
+        self.assertAlmostEqual(s["put_call_ratio_full_chain_volume"],
+                               self.b.chain_pc_volume, places=4)
         self.assertIsNotNone(s["put_call_ratio_realtime"])
         self.assertTrue(len(s["put_call_by_expiry"]) >= 1)
         self.assertIsNotNone(s["iv30"])

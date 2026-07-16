@@ -650,8 +650,10 @@ def build_sentiment(overview, price, pc_realtime, short_interest, news,
     last = price.get("last")
     pt_vs = (consensus_pt / last - 1) if (consensus_pt is not None and last) else None
 
-    # Full-chain P/C from the on-disk chain.
+    # Full-chain P/C from the on-disk chain: OI-based for positioning,
+    # volume-based for like-for-like comparison with vendor realtime P/C.
     pc_full = chain.put_call_ratio(contracts) if contracts else None
+    pc_full_volume = chain.put_call_ratio_volume(contracts) if contracts else None
 
     # Realtime P/C + by-expiry from the pc file.
     pc_rt = None
@@ -686,6 +688,7 @@ def build_sentiment(overview, price, pc_realtime, short_interest, news,
         "si_trend": si.get("si_trend") if si else None,
         "si_as_of": si.get("as_of") if si else None,
         "put_call_ratio_full_chain": pc_full,
+        "put_call_ratio_full_chain_volume": pc_full_volume,
         "put_call_ratio_realtime": pc_rt,
         "put_call_by_expiry": pc_by_expiry,
         "iv30": iv30,

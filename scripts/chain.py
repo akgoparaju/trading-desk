@@ -339,6 +339,23 @@ def put_call_ratio(contracts, expiry=None):
     return put_oi / call_oi
 
 
+def put_call_ratio_volume(contracts, expiry=None):
+    """Put/call VOLUME ratio for ``expiry`` (all expiries if None).
+
+    Formula: sum(put volume) / sum(call volume). Returns None if call volume
+    totals zero. Vendor "realtime" P/C ratios are volume-based, so this is the
+    like-for-like figure for cross-checking them (validation finding, MU
+    2026-07-16: OI-based vs volume-based P/C legitimately diverge on big-move
+    days — 1.29 vs 0.93 — and must not be compared to each other).
+    """
+    legs = _for_expiry(contracts, expiry)
+    put_vol = sum(c.get("volume") or 0 for c in legs if c.get("type") == "put")
+    call_vol = sum(c.get("volume") or 0 for c in legs if c.get("type") == "call")
+    if call_vol == 0:
+        return None
+    return put_vol / call_vol
+
+
 def skew_25d(contracts, spot, expiry):
     """25-delta skew = IV(25d put) - IV(25d call) at ``expiry``.
 

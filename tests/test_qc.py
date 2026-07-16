@@ -70,7 +70,8 @@ def make_snapshot():
             "pe_fwd": 100.0 / 5.5,
         },
         "sentiment": {
-            "put_call_ratio_full_chain": 0.85,
+            "put_call_ratio_full_chain": 1.25,          # OI-based; never compared to realtime
+            "put_call_ratio_full_chain_volume": 0.85,   # volume-based; the realtime comparand
             "put_call_ratio_realtime": 0.90,
             "iv30": 0.32,
         },
@@ -183,6 +184,22 @@ class TestPerCheckMutations(unittest.TestCase):
     def test_options_freshness_fails(self):
         def m(s): s["options"]["chain_as_of"] = "2020-01-01"
         self.assertIs(self._run_one(m, "check_options_freshness")["passed"], False)
+
+    def test_options_freshness_compares_volume_pc_not_oi_pc(self):
+        # OI-based P/C way off realtime must NOT fail (methodology mismatch)...
+        def m(s): s["sentiment"]["put_call_ratio_full_chain"] = 2.50
+        self.assertIs(self._run_one(m, "check_options_freshness")["passed"], True)
+        # ...but volume-based P/C off realtime by > 0.15 must fail.
+        def m2(s): s["sentiment"]["put_call_ratio_full_chain_volume"] = 1.50
+        self.assertIs(self._run_one(m2, "check_options_freshness")["passed"], False)
+
+    def test_options_freshness_skips_pc_leg_without_volume_pc(self):
+        # No volume-based figure -> pc leg suppressed (never OI-vs-volume);
+        # the verified date leg still carries the check to PASS, skip disclosed.
+        def m(s): s["sentiment"]["put_call_ratio_full_chain_volume"] = None
+        r = self._run_one(m, "check_options_freshness")
+        self.assertIs(r["passed"], True)
+        self.assertIn("methodology mismatch", r["detail"])
 
     def test_provenance_fails_on_empty_sources(self):
         def m(s): s["meta"]["sources"] = []

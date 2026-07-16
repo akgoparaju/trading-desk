@@ -48,6 +48,8 @@ select:mcp__alphavantage__GLOBAL_QUOTE,mcp__alphavantage__COMPANY_OVERVIEW,mcp__
 
 Pass **`return_full_data=true` on EVERY Alpha Vantage call** — the AV MCP server otherwise silently truncates any mid-size response into a `{"preview": true, ...}` stub (validation caught BALANCE_SHEET reduced to 2 quarters, which corrupts TTM sums). With it set, small results arrive whole and large ones are offloaded to files by the harness.
 
+Also pass **`datatype=json` on every call that accepts it** — some endpoints (GLOBAL_QUOTE, HISTORICAL_OPTIONS, TREASURY_YIELD) default to CSV, which the builder and `scripts/chain.py` do not parse (validation caught `load_contracts` failing on a CSV chain).
+
 For results that arrive in context: save the payload **VERBATIM** to `raw/<key>.json` — do not reformat, do not transcribe any number by hand. For results the harness offloads to a file: do NOT copy them; record the offloaded file's absolute path as the manifest `path`. Manifest keys are in parentheses.
 
 1. `GLOBAL_QUOTE` symbol=`<T>` → (`global_quote`)

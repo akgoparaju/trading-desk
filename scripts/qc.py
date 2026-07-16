@@ -288,9 +288,12 @@ def check_net_cash(s):
 def check_options_freshness(s):
     """Options-block internal freshness/agreement (skip if options block absent).
 
-    options.chain_as_of must equal technicals.last_ohlcv_date. If
-    sentiment.put_call_ratio_realtime is present, the full-chain and realtime
-    put/call ratios must agree within +-0.15. Skips entirely if the options
+    options.chain_as_of must equal technicals.last_ohlcv_date. The P/C
+    agreement leg compares LIKE WITH LIKE: the chain's VOLUME-based P/C vs the
+    vendor realtime P/C (also volume-based), within +-0.15. The OI-based chain
+    P/C is a positioning metric and legitimately diverges from volume P/C on
+    big-move days (validation finding, MU 2026-07-16: 1.29 OI vs 0.93 volume)
+    — it is never compared against realtime. Skips entirely if the options
     block is missing or null.
     """
     options = _get(s, "options")
@@ -306,21 +309,33 @@ def check_options_freshness(s):
         problems.append(f"chain_as_of {chain_as_of} != last_ohlcv_date {last_ohlcv}")
 
     sent = _get(s, "sentiment")
-    pc_full = _get(sent, "put_call_ratio_full_chain")
+    pc_vol = _get(sent, "put_call_ratio_full_chain_volume")
     pc_rt = _get(sent, "put_call_ratio_realtime")
-    if _is_num(pc_full) and _is_num(pc_rt):
-        spread = abs(pc_full - pc_rt)
+    if _is_num(pc_vol) and _is_num(pc_rt):
+        spread = abs(pc_vol - pc_rt)
         if spread > _PC_TOL:
-            problems.append(f"pc_full {pc_full} vs pc_realtime {pc_rt}: "
+            problems.append(f"pc_chain_volume {pc_vol} vs pc_realtime {pc_rt}: "
                             f"spread {spread:.3f} (tol {_PC_TOL})")
+    elif _is_num(pc_rt):
+        problems.append("SKIP-leg: volume-based chain P/C absent; OI-vs-volume "
+                        "comparison suppressed (methodology mismatch)")
+
+    date_leg_verified = (chain_as_of is not None and last_ohlcv is not None
+                         and chain_as_of == last_ohlcv)
+    pc_leg_verified = _is_num(pc_vol) and _is_num(pc_rt)
 
     hard_fails = [p for p in problems if not p.startswith("SKIP-leg")]
     if hard_fails:
         return _result("check_options_freshness", False, "; ".join(problems))
-    if problems:  # only skip-legs, nothing verifiable
+    if not (date_leg_verified or pc_leg_verified):  # nothing verifiable
         return _result("check_options_freshness", None, "; ".join(problems))
-    return _result("check_options_freshness", True,
-                   f"chain_as_of == last_ohlcv_date ({chain_as_of}); pc spread ok")
+    detail_bits = []
+    if date_leg_verified:
+        detail_bits.append(f"chain_as_of == last_ohlcv_date ({chain_as_of})")
+    if pc_leg_verified:
+        detail_bits.append("pc spread ok (volume-based)")
+    detail_bits.extend(p for p in problems if p.startswith("SKIP-leg"))
+    return _result("check_options_freshness", True, "; ".join(detail_bits))
 
 
 def check_provenance(s):
