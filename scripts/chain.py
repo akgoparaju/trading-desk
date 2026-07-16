@@ -199,6 +199,9 @@ def nearest_strike(contracts, spot, expiry, opt_type):
 def atm_iv(contracts, spot, expiry):
     """Mean of call-IV and put-IV at the nearest strike to spot for ``expiry``.
 
+    The nearest strike is resolved PER LEG (call and put independently), so on
+    an asymmetric strike grid the legs may sit at different strikes — intentional:
+    degrades gracefully when one side of the chain is sparse.
     Skips legs with missing or zero iv. Returns None if neither leg has iv.
     """
     ivs = []

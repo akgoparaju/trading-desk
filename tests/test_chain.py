@@ -42,6 +42,11 @@ class TestChain(unittest.TestCase):
         self.assertAlmostEqual(em["one_sigma"], 9.35)         # 0.85 x 11
         self.assertAlmostEqual(em["range_high"], 109.35)
 
+    def test_atm_iv_per_leg_on_asymmetric_grid(self):
+        # spot 106: nearest call strike is 110 (iv 0.48), nearest put strike is 100 (iv 0.55)
+        cs = C.load_contracts(self._write(CHAIN))
+        self.assertAlmostEqual(C.atm_iv(cs, 106.0, "2026-08-21"), (0.48 + 0.55) / 2)
+
     def test_max_pain(self):
         cs = C.load_contracts(self._write(CHAIN))
         # payouts at candidates: S=90 -> puts (100-90)*1000 = 10000; S=100 -> 0; S=110 -> calls (110-100)*800 = 8000
