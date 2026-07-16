@@ -3,6 +3,54 @@
 ## Unreleased — Phase 2: Evidence Skills
 
 ### Added
+- **`sentiment-positioning` evidence skill** (rubric v1.0.0):
+  `scripts/score_sentiment.py` scores five dimensions off an existing snapshot
+  bundle — street view (25, analyst buy% + PT-vs-price + a `--rating-actions`
+  judgment flag; **spec §5.2: a below-price consensus target caps the WHOLE
+  dimension at 10/25**), revisions momentum (20, 90-day EPS-revision band + an
+  up/down-30d count adjustment capped/floored to the band), smart money & insiders
+  (20, a `--inst-flow` 13F judgment flag defaulting to `unknown`/0 with the 45-day
+  lag disclosed + insider net-90d, where non-positive net reads 8 pts "routine"
+  under the default `--insider-baseline normal` or 2 pts under `unusual`),
+  positioning & derivatives (20, short interest with a **complacency guard** —
+  `si <1.5%` AND `rsi14 >70` scores 2 not bullish — evaluated before the normal SI
+  bands, + full-chain put/call, + 1-yr IV percentile with a hedges-cheap note when
+  <25), and price momentum (15, 12m + 3m relative-to-SPY + 6m absolute). Consumes
+  the **snapshot only** — no dependency on `module_technical.json` or the ladder
+  (it scores no price levels). Writes `<bundle>/module_sentiment.json` with
+  per-subscore arithmetic strings (the actual numbers), a verbatim `positioning`
+  table (realtime P/C + iv30 + implied move are unscored context), a
+  `momentum_vs_spy` table (rel_3m/rel_12m computed in-script), a `hedging_cost_note`
+  (set when IV percentile <25), the three judgment flags, and `signal: null` (the
+  LLM writes the one-line signal in the brief, never numbers). Whole-dimension null
+  inputs renormalize the 0-100 score over the remaining max and flag
+  `renormalized: true`. Each non-default judgment flag (`--rating-actions` ≠
+  neutral, `--inst-flow` ≠ unknown, `--insider-baseline` = unusual) requires a
+  justification or the CLI exits 2. SINGLE-MAPPING SPLIT (spec §2): options
+  *sentiment* fields (P/C, IV percentile, skew) score HERE; options-derived *levels*
+  score in technical-analysis. PT-upside scores HERE (street view), not in
+  risk-analytics (which documents that reallocation). `INPUT_FIELDS` declares the
+  twelve scored snapshot fields; `GUARD_FIELDS` = `{technicals.rsi14}` (it
+  gates/caps the complacency guard here but is scored only in technical-analysis —
+  guard fields may gate/cap here but score elsewhere); `price.last` and the ladder
+  are shared reference infrastructure, deliberately excluded.
+  `skills/sentiment-positioning/SKILL.md` forms the three judgment flags from
+  snapshot text/context only, runs the script, and writes prose only (score
+  headline → ≤120-word paragraph → momentum/positioning mini-table → hedging-cost
+  note → one-line signal → rubric-version footer).
+- **`tests/test_single_mapping.py`** (governance): imports the three scorer modules
+  and asserts (a) their `INPUT_FIELDS` are pairwise disjoint — no snapshot fact is
+  scored in two modules — and (b) no scorer scores its own `GUARD_FIELDS`. Pins the
+  spec's single-mapping rule ("each snapshot fact scores in exactly one module")
+  mechanically. No overlaps found across technical / risk / sentiment.
+- **88 unit tests** (`tests/test_score_sentiment.py` + `tests/test_single_mapping.py`):
+  every scoring branch pinned to a hand-computed value (buy_pct bands; PT bands +
+  the PT-below-price dimension cap; revisions bands + up/down adjustment cap/floor;
+  inst-flow incl. unknown→0; insider normal/unusual/positive/null; the complacency
+  guard firing at si 1.2/rsi 74→2 vs not at si 1.2/rsi 55→6; SI percent-unit bands
+  incl. 26.23→3; P/C + IV-percentile bands + the hedging note; momentum rel bands;
+  renormalization; determinism), plus the three justification-required CLI exits and
+  an end-to-end CLI run against a real fabricated bundle.
 - **`risk-analytics` evidence skill** (rubric v1.0.0): `scripts/score_risk.py`
   scores four dimensions off an existing snapshot bundle — volatility state (25,
   rv30-vs-10yr percentile + benchmark beta), drawdown profile (25, max 10-yr
