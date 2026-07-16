@@ -24,6 +24,10 @@ import io
 import json
 import os
 import sys
+
+if sys.version_info < (3, 10):  # statistics.covariance/correlation need 3.10
+    sys.exit("trade-decision requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
+
 from datetime import date, datetime, timedelta, timezone
 
 # Allow direct invocation (``python3 scripts/build_snapshot.py``): ensure the

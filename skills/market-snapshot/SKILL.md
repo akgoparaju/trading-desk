@@ -63,10 +63,10 @@ For results that arrive in context: save the payload **VERBATIM** to `raw/<key>.
 9. `EARNINGS_ESTIMATES` symbol=`<T>` → (`earnings_estimates`)
 10. `NEWS_SENTIMENT` tickers=`<T>`, limit=50 → (`news_sentiment`)
 11. `INSIDER_TRANSACTIONS` symbol=`<T>`, **from_date = as-of − 90 days** → (`insider_transactions`). The from_date keeps the response inside the 90-day window the builder uses (without it the default response may omit most of the window).
-12. `HISTORICAL_OPTIONS` symbol=`<T>` → (`options_chain`). The full chain is ~2M tokens; the harness offloads it to a file. Record that file path. **NEVER Read this file, never paste any part of it — `scripts/chain.py` is the only reader.**
+12. `HISTORICAL_OPTIONS` symbol=`<T>` → (`options_chain`). The full chain is ~2M tokens; the harness offloads it to a file. Per the general rule above, `cp` it into `raw/options_chain.json` (Bash copy only). **NEVER Read this file, never paste any part of it — `scripts/chain.py` is the only reader.**
 13. `REALTIME_PUT_CALL_RATIO` symbol=`<T>` → (`pc_ratio_realtime`)
 14. `EARNINGS_CALENDAR` symbol=`<T>`, horizon=6month → (`earnings_calendar`). Returns CSV text inside `{"result": "..."}`; save as-is. ⚠ Known to return header-only/empty for valid tickers → use the Step 3c fallback.
-15. `TREASURY_YIELD` interval=daily, maturity=10year, datatype=json → (`treasury_yield`). Full history is ~350k tokens, offloaded; the builder takes the latest row.
+15. `TREASURY_YIELD` interval=daily, maturity=10year, datatype=json → (`treasury_yield`). Full history is ~350k tokens, offloaded — `cp` it into `raw/treasury_yield.json`; the builder takes the latest row.
 
 **Rate limit:** premium tier = 75 req/min. This pass is ~15 calls — no pacing needed.
 
