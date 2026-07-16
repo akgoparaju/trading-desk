@@ -38,7 +38,7 @@ if _REPO_ROOT not in sys.path:
 
 from scripts import chain, indicators
 
-SCHEMA_VERSION = "0.2.0"
+SCHEMA_VERSION = "0.2.1"
 
 # Files that MUST be present; their absence aborts the build.
 REQUIRED = ("global_quote", "overview", "daily_adjusted", "spy_daily_adjusted")
@@ -277,6 +277,7 @@ def build_technicals(rows):
         "rsi14": indicators.rsi(adj, 14),
         "macd": macd["macd"] if macd else None,
         "macd_signal": macd["signal"] if macd else None,
+        "ret_15d": indicators.pct_return(adj, 15),
         "ret_1m": indicators.pct_return(adj, _W1M),
         "ret_3m": indicators.pct_return(adj, _W3M),
         "ret_6m": indicators.pct_return(adj, _W6M),

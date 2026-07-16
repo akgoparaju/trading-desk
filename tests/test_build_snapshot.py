@@ -398,7 +398,7 @@ class TestBuildSnapshotFull(unittest.TestCase):
         m = self.snap["meta"]
         self.assertEqual(m["ticker"], "MU")
         self.assertEqual(m["as_of_utc"], AS_OF)
-        self.assertEqual(m["schema_version"], "0.2.0")
+        self.assertEqual(m["schema_version"], "0.2.1")
         self.assertEqual(m["missing"], [])
         self.assertIn("qc", m)
         self.assertTrue(len(m["sources"]) >= 4)
@@ -462,6 +462,17 @@ class TestBuildSnapshotFull(unittest.TestCase):
         self.assertIsNotNone(t["ma200"])
         self.assertGreater(t["rv20_ann"], 0)
         self.assertIsInstance(t["drawdowns_by_year"], list)
+
+    def test_ret_15d_matches_pct_return(self):
+        # schema 0.2.1 adds technicals.ret_15d for the Phase-2 vertical-rally
+        # penalty (15 sessions, distinct from ret_1m's 21). Assert it equals
+        # indicators.pct_return over the fixture's adjusted closes at lookback 15.
+        from scripts import indicators
+        adj = [r["adj"] for r in self.b.stock_rows]  # adj == close in fixture
+        expected = indicators.pct_return(adj, 15)
+        self.assertIsNotNone(expected)
+        self.assertAlmostEqual(self.snap["technicals"]["ret_15d"], expected,
+                               places=9)
 
     def test_benchmark(self):
         bm = self.snap["benchmark"]
