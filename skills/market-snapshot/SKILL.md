@@ -100,8 +100,8 @@ If the cache is absent OR its newest sample is more than 14 days old, refresh it
 
 ```bash
 python3 - "<offloaded_chain_file>" "<spot>" "<sample_date>" <<'PY'
-import sys, datetime
-sys.path.insert(0, "${CLAUDE_PLUGIN_ROOT}")
+import os, sys, datetime
+sys.path.insert(0, os.environ["CLAUDE_PLUGIN_ROOT"])  # plugin install dir (env var set at skill runtime)
 from scripts import chain
 path, spot, sample = sys.argv[1], float(sys.argv[2]), sys.argv[3]
 cs = chain.load_contracts(path)
