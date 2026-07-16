@@ -160,6 +160,10 @@ def score_thesis_conviction(scenarios, scenario_reasoning, last, profile,
                             invalidation, invalidation_justification) -> dict:
     """Compute the thesis-conviction dimension (0-100) for the given profile.
 
+    ``scenario_reasoning`` is accepted for signature parity with build_ev_block
+    (both take the full scenario context); the reasoning text is recorded in the
+    EV block, not here — this function scores arithmetic only.
+
     EV asymmetry (max 40, mechanical):
         ev = ev_kelly.ev_at(scenarios, last)  -- prob-weighted expected return.
         hurdle_total = 0.08 * horizon_years[profile].

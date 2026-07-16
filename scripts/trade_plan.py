@@ -625,7 +625,12 @@ def synthesize(plan, options_module):
         })
 
     hedge_required = bool(plan.get("stock_plan", {}).get("hedge", {}).get("required"))
-    hedge_structure = options_module.get("hedge") if hedge_required else None
+    # The options module's contract names this key "hedge_structure"; accept the
+    # legacy "hedge" as a fallback so older module files still synthesize.
+    hedge_structure = None
+    if hedge_required:
+        hedge_structure = options_module.get("hedge_structure",
+                                             options_module.get("hedge"))
 
     plan["expression"]["synthesized"] = True
     plan["expression"]["structures_selected"] = structures_selected
