@@ -1,4 +1,4 @@
-"""Options-chain file parser for the trade-decision plugin.
+"""Options-chain file parser for the trading-desk plugin.
 
 WHY THIS MODULE EXISTS: Alpha Vantage HISTORICAL_OPTIONS full chains are
 ~2M tokens / ~13k contracts. The Claude harness offloads such tool results

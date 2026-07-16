@@ -1,4 +1,4 @@
-"""Expected-value and Kelly position-sizing library for the trade-decision plugin.
+"""Expected-value and Kelly position-sizing library for the trading-desk plugin.
 
 WHY THIS MODULE EXISTS: Position sizing must be arithmetic, not vibes. The LLM
 layer proposes probability-weighted price-target scenarios; this module turns

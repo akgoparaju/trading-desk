@@ -1,4 +1,4 @@
-"""Risk-analytics evidence module for the trade-decision plugin.
+"""Risk-analytics evidence module for the trading-desk plugin.
 
 WHY THIS MODULE EXISTS: this is the SECOND scored evidence skill, and like
 technical-analysis its arithmetic IS the rubric of record (risk rubric v1.0.0).
@@ -56,7 +56,7 @@ import os
 import sys
 
 if sys.version_info < (3, 10):
-    sys.exit("trade-decision requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
+    sys.exit("trading-desk requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
 
 # Allow direct invocation (``python3 scripts/score_risk.py``): ensure the repo
 # root is importable so ``from scripts import ...`` resolves the package.

@@ -1,4 +1,4 @@
-"""Snapshot builder CLI for the trade-decision plugin.
+"""Snapshot builder CLI for the trading-desk plugin.
 
 WHY THIS MODULE EXISTS: This is the ONLY path from raw Alpha Vantage response
 files to the numeric fields the LLM later reasons over. Every price, ratio,
@@ -26,7 +26,7 @@ import os
 import sys
 
 if sys.version_info < (3, 10):  # statistics.covariance/correlation need 3.10
-    sys.exit("trade-decision requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
+    sys.exit("trading-desk requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
 
 from datetime import date, datetime, timedelta, timezone
 

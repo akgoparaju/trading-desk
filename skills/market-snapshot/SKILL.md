@@ -1,11 +1,11 @@
 ---
 name: market-snapshot
-description: Build a verified, QC-gated market data snapshot for a ticker from Alpha Vantage (single source of truth for all downstream trade-decision skills). Use when the user says "snapshot [ticker]", "market snapshot", "build data snapshot", or when any trade-decision skill needs market data. Schema v0.2.1.
+description: Build a verified, QC-gated market data snapshot for a ticker from Alpha Vantage (single source of truth for all downstream trading-desk skills). Use when the user says "snapshot [ticker]", "market snapshot", "build data snapshot", or when any trading-desk skill needs market data. Schema v0.2.1.
 ---
 
 # Market Snapshot (L1 Data Engine)
 
-Build one verified `snapshot.json` for a ticker: fetch raw Alpha Vantage responses, gap-fill from the web, then let tested in-repo Python compute every number. This snapshot is the **single source of truth** — all downstream trade-decision skills read it and never re-fetch market data.
+Build one verified `snapshot.json` for a ticker: fetch raw Alpha Vantage responses, gap-fill from the web, then let tested in-repo Python compute every number. This snapshot is the **single source of truth** — all downstream trading-desk skills read it and never re-fetch market data.
 
 **Non-negotiables:**
 - **Never do arithmetic in text.** Every price, ratio, return, drawdown, and multiple comes from `scripts/build_snapshot.py`. Your only edits to the snapshot are qualitative TEXT slots.

@@ -1,4 +1,4 @@
-"""Options-strategy decision skill (L3) for the trade-decision plugin.
+"""Options-strategy decision skill (L3) for the trading-desk plugin.
 
 WHY THIS MODULE EXISTS: the composite says WHETHER a name is a buy; the trade-plan says
 HOW to put the stock position on and picks the EXPRESSION (stock vs options). This
@@ -38,7 +38,7 @@ import sys
 from datetime import date
 
 if sys.version_info < (3, 10):
-    sys.exit("trade-decision requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
+    sys.exit("trading-desk requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
 
 # Allow direct invocation (``python3 scripts/options_strategy.py``): ensure the repo
 # root is importable so ``from scripts import ...`` resolves the package.

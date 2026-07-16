@@ -1,4 +1,4 @@
-"""Snapshot quality-control gate for the trade-decision plugin.
+"""Snapshot quality-control gate for the trading-desk plugin.
 
 WHY THIS MODULE EXISTS: This is the central rigor mechanism of the whole system.
 Before any snapshot is allowed to drive a trade decision, it must pass a BLOCKING

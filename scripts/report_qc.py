@@ -1,4 +1,4 @@
-"""Report QC gate (§12, BLOCKING) for the trade-decision plugin.
+"""Report QC gate (§12, BLOCKING) for the trading-desk plugin.
 
 WHY THIS MODULE EXISTS: render_report.py writes the report SKELETON from the
 bundle (every number script-minted). After the LLM fills the prose slots, this
@@ -49,7 +49,7 @@ import re
 import sys
 
 if sys.version_info < (3, 10):
-    sys.exit("trade-decision requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
+    sys.exit("trading-desk requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:

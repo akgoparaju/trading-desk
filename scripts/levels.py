@@ -1,4 +1,4 @@
-"""Support/resistance ladder builder for the trade-decision plugin.
+"""Support/resistance ladder builder for the trading-desk plugin.
 
 WHY THIS MODULE EXISTS: The ladder is the SHARED level vocabulary for every
 Phase-2 evidence skill. technical-analysis scores price action against it,
@@ -26,7 +26,7 @@ import os
 import sys
 
 if sys.version_info < (3, 10):
-    sys.exit("trade-decision requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
+    sys.exit("trading-desk requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
 
 # Allow direct invocation (``python3 scripts/levels.py``): ensure the repo root
 # is importable so ``from scripts import ...`` resolves the package.

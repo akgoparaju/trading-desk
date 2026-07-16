@@ -1,4 +1,4 @@
-"""Indicator math library for the trade-decision plugin.
+"""Indicator math library for the trading-desk plugin.
 
 Pure-function, stdlib-only (math, statistics) technical-indicator arithmetic.
 This module is the ONLY place indicator arithmetic lives; the LLM layer never

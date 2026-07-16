@@ -1,4 +1,4 @@
-"""Compressed-pass fundamental scorer for the trade-decision plugin.
+"""Compressed-pass fundamental scorer for the trading-desk plugin.
 
 WHY THIS MODULE EXISTS: this is the ALWAYS-AVAILABLE fundamental path (design spec
 §8.1 "FSI absent" branch). The plugin's deep fundamental read is the FSI
@@ -52,7 +52,7 @@ import os
 import sys
 
 if sys.version_info < (3, 10):
-    sys.exit("trade-decision requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
+    sys.exit("trading-desk requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
 
 # Allow direct invocation (``python3 scripts/score_fundamental.py``): ensure the
 # repo root is importable so ``from scripts import ...`` resolves the package.

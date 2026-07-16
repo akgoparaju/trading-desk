@@ -1,4 +1,4 @@
-"""Report renderer (L4 output layer) for the trade-decision plugin.
+"""Report renderer (L4 output layer) for the trading-desk plugin.
 
 WHY THIS MODULE EXISTS: this is the FINAL output layer -- the 3-page trade decision
 report. Its architecture kills LLM-number leakage BY CONSTRUCTION: this script
@@ -30,7 +30,7 @@ import os
 import sys
 
 if sys.version_info < (3, 10):
-    sys.exit("trade-decision requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
+    sys.exit("trading-desk requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
 
 # Allow direct invocation: ensure the repo root is importable.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

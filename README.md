@@ -1,4 +1,4 @@
-# trade-decision
+# trading-desk
 
 ## What it is
 
@@ -11,8 +11,8 @@ A Claude Code plugin that produces short (≈3-page) trade decision reports buil
 ## Install
 
 ```
-/plugin marketplace add <owner>/trade-decision
-/plugin install trade-decision
+/plugin marketplace add akgoparaju/trading-desk
+/plugin install trading-desk
 export ALPHAVANTAGE_API_KEY=your_key
 ```
 
@@ -26,7 +26,7 @@ Get an API key from [alphavantage.co](https://www.alphavantage.co/support/#api-k
 
 ## FSI integration (optional)
 
-Deep fundamental and valuation work can reuse the `equity-research` and `financial-analysis` skills from the [claude-for-financial-services](https://github.com/anthropics/claude-for-financial-services) marketplace. When those plugins are installed, trade-decision hands off to them for richer modeling. When they are absent, it runs a compressed fundamental pass instead and discloses the reduced depth. The soft dependency is declared in `.claude-plugin/marketplace.json` (`allowCrossMarketplaceDependenciesOn`); nothing about the FSI plugins is required for Phase 1.
+Deep fundamental and valuation work can reuse the `equity-research` and `financial-analysis` skills from the [claude-for-financial-services](https://github.com/anthropics/claude-for-financial-services) marketplace. When those plugins are installed, trading-desk hands off to them for richer modeling. When they are absent, it runs a compressed fundamental pass instead and discloses the reduced depth. The soft dependency is declared in `.claude-plugin/marketplace.json` (`allowCrossMarketplaceDependenciesOn`); nothing about the FSI plugins is required for Phase 1.
 
 ## Skills
 

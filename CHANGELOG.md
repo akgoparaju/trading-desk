@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 — 2026-07-16 · Rename
+
+Plugin, marketplace, and repo renamed `trade-decision` → **`trading-desk`** before first
+publication (skills now namespace as `trading-desk:*`; install via
+`/plugin marketplace add akgoparaju/trading-desk` → `/plugin install trading-desk`).
+Historical entries below retain the old working name.
+
 ## 0.4.0 — 2026-07-16 · Phase 4: Assembly & Acceptance
 
 Acceptance results (V1–V5 PASS; V6 deferred to a clean-environment run, blocks only

@@ -1,4 +1,4 @@
-"""Trade-plan decision skill (L3) for the trade-decision plugin.
+"""Trade-plan decision skill (L3) for the trading-desk plugin.
 
 WHY THIS MODULE EXISTS: the composite tells you WHETHER a name is a buy; this module
 tells you HOW to put the position on. It turns the composite's expected-value block,
@@ -48,7 +48,7 @@ import sys
 
 
 if sys.version_info < (3, 10):
-    sys.exit("trade-decision requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
+    sys.exit("trading-desk requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
 
 # Allow direct invocation (``python3 scripts/trade_plan.py``): ensure the repo root
 # is importable so ``from scripts import ...`` resolves the package.

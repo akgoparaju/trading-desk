@@ -1,4 +1,4 @@
-"""Technical-analysis evidence module for the trade-decision plugin.
+"""Technical-analysis evidence module for the trading-desk plugin.
 
 WHY THIS MODULE EXISTS: this is the FIRST scored evidence skill, so the arithmetic
 below is not merely *an* implementation of a scoring rule -- it IS the rubric of
@@ -37,7 +37,7 @@ import os
 import sys
 
 if sys.version_info < (3, 10):
-    sys.exit("trade-decision requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
+    sys.exit("trading-desk requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
 
 # Allow direct invocation (``python3 scripts/score_technical.py``): ensure the
 # repo root is importable so ``from scripts import ...`` resolves the package.

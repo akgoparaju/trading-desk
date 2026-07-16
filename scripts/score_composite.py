@@ -1,4 +1,4 @@
-"""Composite-score decision skill (L3) for the trade-decision plugin.
+"""Composite-score decision skill (L3) for the trading-desk plugin.
 
 WHY THIS MODULE EXISTS: this is the DECISION layer. The four evidence modules
 (technical-analysis, fundamental, sentiment-positioning, risk-analytics) each score
@@ -47,7 +47,7 @@ import os
 import sys
 
 if sys.version_info < (3, 10):
-    sys.exit("trade-decision requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
+    sys.exit("trading-desk requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
 
 # Allow direct invocation (``python3 scripts/score_composite.py``): ensure the repo
 # root is importable so ``from scripts import ...`` resolves the package.

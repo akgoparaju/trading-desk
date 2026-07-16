@@ -1,11 +1,11 @@
 ---
 name: full-trade-analysis
-description: Run the end-to-end trade decision pipeline for a ticker — snapshot → evidence (parallel subagents) → composite score → executable trade plan + options expression → blocking report → thesis registration + monitoring. Orchestrates the 8 other trade-decision skills through phase gates. Use when the user says "full trade analysis [ticker]", "trade decision report [ticker]", "score [ticker] end to end", or wants the complete call, not one dimension. Every number comes from the bundle; the orchestrator does zero arithmetic in prose.
+description: Run the end-to-end trade decision pipeline for a ticker — snapshot → evidence (parallel subagents) → composite score → executable trade plan + options expression → blocking report → thesis registration + monitoring. Orchestrates the 8 other trading-desk skills through phase gates. Use when the user says "full trade analysis [ticker]", "trade decision report [ticker]", "score [ticker] end to end", or wants the complete call, not one dimension. Every number comes from the bundle; the orchestrator does zero arithmetic in prose.
 ---
 
 # Full Trade Analysis (L5 Orchestrator)
 
-Coordinate the eight trade-decision skills into one phase-gated pipeline for a ticker: build the verified snapshot, score the evidence in parallel, roll the composite, mint the executable plan and options expression, render the blocking report, then register the thesis and offer a re-score. **You are a conductor, not a calculator** — every figure lives in the bundle's module JSONs; you never compute a score, a level, an EV, or a percent in prose. Your job is to invoke the right skill at the right gate, stop the line when a gate fails, and keep the conversation lean (paths + summaries, never file dumps).
+Coordinate the eight trading-desk skills into one phase-gated pipeline for a ticker: build the verified snapshot, score the evidence in parallel, roll the composite, mint the executable plan and options expression, render the blocking report, then register the thesis and offer a re-score. **You are a conductor, not a calculator** — every figure lives in the bundle's module JSONs; you never compute a score, a level, an EV, or a percent in prose. Your job is to invoke the right skill at the right gate, stop the line when a gate fails, and keep the conversation lean (paths + summaries, never file dumps).
 
 **Non-negotiables:**
 - **Single-snapshot rule (restated for the whole pipeline).** `market-snapshot` builds the one `snapshot.json` that is the single source of truth. No downstream skill — and no subagent — fetches market data. A figure missing from the snapshot is a *snapshot extension request*, never a downstream fetch.

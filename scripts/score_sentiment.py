@@ -1,4 +1,4 @@
-"""Sentiment-positioning evidence module for the trade-decision plugin.
+"""Sentiment-positioning evidence module for the trading-desk plugin.
 
 WHY THIS MODULE EXISTS: this is the THIRD scored evidence skill, and like
 technical-analysis and risk-analytics its arithmetic IS the rubric of record
@@ -51,7 +51,7 @@ import os
 import sys
 
 if sys.version_info < (3, 10):
-    sys.exit("trade-decision requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
+    sys.exit("trading-desk requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
 
 # Allow direct invocation (``python3 scripts/score_sentiment.py``): ensure the repo
 # root is importable so ``from scripts import ...`` resolves the package.

@@ -1,4 +1,4 @@
-"""QC gate CLI for the trade-decision plugin.
+"""QC gate CLI for the trading-desk plugin.
 
 WHY THIS MODULE EXISTS: The snapshot QC gate is the blocking checkpoint between
 raw-derived numbers and any trade decision. This CLI loads a snapshot.json, runs
