@@ -143,6 +143,23 @@ class TestPerCheckMutations(unittest.TestCase):
         def m(s): s["price"]["mktcap_overview"] *= 1.10
         self.assertIs(self._run_one(m, "check_mktcap")["passed"], False)
 
+    def test_mktcap_passes_on_stale_vendor_cap_matching_prev_close(self):
+        # Big move day: vendor cap = shares x prev_close, not shares x last.
+        # Share count reconciles -> pass, with staleness disclosed.
+        def m(s):
+            s["price"]["last"] = s["price"]["prev_close"] * 1.04
+            s["price"]["mktcap_computed"] = (
+                s["price"]["last"] * s["price"]["shares_diluted_m"] * 1e6)
+        r = self._run_one(m, "check_mktcap")
+        self.assertIs(r["passed"], True)
+        self.assertIn("prior-session stale", r["detail"])
+
+    def test_mktcap_fails_when_neither_last_nor_prev_reconciles(self):
+        def m(s):
+            s["price"]["mktcap_overview"] *= 1.10
+            s["price"]["last"] = s["price"]["prev_close"] * 1.04
+        self.assertIs(self._run_one(m, "check_mktcap")["passed"], False)
+
     def test_ma_ordering_fails(self):
         def m(s): s["technicals"]["ma50"] = 105.0  # ma50 > last breaks uptrend
         self.assertIs(self._run_one(m, "check_ma_ordering")["passed"], False)

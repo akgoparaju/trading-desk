@@ -96,9 +96,18 @@ def _parse_iso(ts):
 
 
 def check_mktcap(s):
-    """price.last * shares_diluted_m * 1e6 within +-2% of price.mktcap_overview."""
+    """shares x price within +-2% of price.mktcap_overview, staleness-aware.
+
+    COMPANY_OVERVIEW's MarketCapitalization is computed by the vendor from the
+    PRIOR session's close, so on a big move day shares x last legitimately
+    diverges from it (validation finding, AAPL +4% 2026-07-16). The check's
+    real target is share-count / unit errors, so it passes if EITHER
+    shares x last OR shares x prev_close reconciles; matching on prev_close
+    is disclosed as vendor staleness in the detail.
+    """
     price = _get(s, "price")
     last = _get(price, "last")
+    prev = _get(price, "prev_close")
     shares_m = _get(price, "shares_diluted_m")
     overview = _get(price, "mktcap_overview")
     if not (_is_num(last) and _is_num(shares_m) and _is_num(overview)):
@@ -108,10 +117,21 @@ def check_mktcap(s):
         return _result("check_mktcap", None, "SKIP: mktcap_overview is zero")
     computed = last * shares_m * 1e6
     diff = abs(computed - overview) / abs(overview)
-    passed = diff <= _MKTCAP_TOL
-    return _result("check_mktcap", passed,
+    if diff <= _MKTCAP_TOL:
+        return _result("check_mktcap", True,
+                       f"computed {computed:.4g} vs overview {overview:.4g}: "
+                       f"{diff:.2%} diff (tol {_MKTCAP_TOL:.0%})")
+    if _is_num(prev) and prev > 0:
+        computed_prev = prev * shares_m * 1e6
+        diff_prev = abs(computed_prev - overview) / abs(overview)
+        if diff_prev <= _MKTCAP_TOL:
+            return _result("check_mktcap", True,
+                           f"overview cap matches shares x prev_close ({diff_prev:.2%} diff) "
+                           f"but not shares x last ({diff:.2%}) — vendor mktcap is prior-session "
+                           f"stale; share count reconciles (tol {_MKTCAP_TOL:.0%})")
+    return _result("check_mktcap", False,
                    f"computed {computed:.4g} vs overview {overview:.4g}: "
-                   f"{diff:.2%} diff (tol {_MKTCAP_TOL:.0%})")
+                   f"{diff:.2%} diff (tol {_MKTCAP_TOL:.0%}; prev_close reconciliation also failed)")
 
 
 def check_ma_ordering(s):
@@ -120,6 +140,11 @@ def check_ma_ordering(s):
     uptrend   requires last > ma50 > ma200
     downtrend requires last < ma50 < ma200
     sideways / any other claim -> skip (no orderable assertion).
+
+    PHASE-LATENT BY DESIGN: the snapshot builder never emits trend_claim (a
+    mechanical claim would make this check circular). The claim is stamped by
+    the technical-analysis skill (Phase 2); until then this check reports SKIP
+    at the snapshot gate, and goes live when a downstream skill asserts trend.
     """
     tech = _get(s, "technicals")
     claim = _get(tech, "trend_claim")
@@ -231,11 +256,14 @@ def check_pe_arithmetic(s):
             problems.append(f"{name}={reported_pe} vs last/eps {implied:.4g}: "
                             f"{diff:.2%} diff (tol {tol:.0%})")
 
-    detail = "; ".join(problems + skips) or "no legs evaluable"
     if checked == 0:
-        return _result("check_pe_arithmetic", None, "SKIP: " + detail)
+        return _result("check_pe_arithmetic", None,
+                       "SKIP: " + ("; ".join(skips) or "no legs evaluable"))
     if problems:
-        return _result("check_pe_arithmetic", False, detail)
+        return _result("check_pe_arithmetic", False, "; ".join(problems + skips))
+    detail = f"{checked} leg(s) within tolerance"
+    if skips:
+        detail += "; " + "; ".join(skips)
     return _result("check_pe_arithmetic", True, detail)
 
 

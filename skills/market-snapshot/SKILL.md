@@ -46,23 +46,25 @@ select:mcp__alphavantage__GLOBAL_QUOTE,mcp__alphavantage__COMPANY_OVERVIEW,mcp__
 
 ## Step 2 — Fetch pass (~15 calls)
 
-Save each response **VERBATIM** as JSON to `raw/<key>.json`. Do not reformat, do not transcribe any number by hand. If a tool result is offloaded to a file by the harness, record that absolute path in the manifest instead of copying the payload. Manifest keys are in parentheses.
+Pass **`return_full_data=true` on EVERY Alpha Vantage call** — the AV MCP server otherwise silently truncates any mid-size response into a `{"preview": true, ...}` stub (validation caught BALANCE_SHEET reduced to 2 quarters, which corrupts TTM sums). With it set, small results arrive whole and large ones are offloaded to files by the harness.
+
+For results that arrive in context: save the payload **VERBATIM** to `raw/<key>.json` — do not reformat, do not transcribe any number by hand. For results the harness offloads to a file: do NOT copy them; record the offloaded file's absolute path as the manifest `path`. Manifest keys are in parentheses.
 
 1. `GLOBAL_QUOTE` symbol=`<T>` → (`global_quote`)
 2. `COMPANY_OVERVIEW` symbol=`<T>` → (`overview`)
-3. `TIME_SERIES_DAILY_ADJUSTED` symbol=`<T>`, outputsize=full, **return_full_data=true** → (`daily_adjusted`). NEVER use raw `TIME_SERIES_DAILY` — split-adjusted series is mandatory for multi-year stats. Large: will be offloaded or preview-wrapped — both fine, the scripts unwrap it.
-4. `TIME_SERIES_DAILY_ADJUSTED` symbol=SPY, outputsize=full, **return_full_data=true** → (`spy_daily_adjusted`)
+3. `TIME_SERIES_DAILY_ADJUSTED` symbol=`<T>`, outputsize=full → (`daily_adjusted`). NEVER use raw `TIME_SERIES_DAILY` — split-adjusted series is mandatory for multi-year stats.
+4. `TIME_SERIES_DAILY_ADJUSTED` symbol=SPY, outputsize=full → (`spy_daily_adjusted`)
 5. `INCOME_STATEMENT` symbol=`<T>` → (`income_statement`)
 6. `BALANCE_SHEET` symbol=`<T>` → (`balance_sheet`)
 7. `CASH_FLOW` symbol=`<T>` → (`cash_flow`)
 8. `EARNINGS` symbol=`<T>` → (`earnings`)
 9. `EARNINGS_ESTIMATES` symbol=`<T>` → (`earnings_estimates`)
 10. `NEWS_SENTIMENT` tickers=`<T>`, limit=50 → (`news_sentiment`)
-11. `INSIDER_TRANSACTIONS` symbol=`<T>` → (`insider_transactions`). The builder filters to the trailing 90 days (as-of − 90d) itself.
-12. `HISTORICAL_OPTIONS` symbol=`<T>`, **return_full_data=true** → (`options_chain`). The full chain is ~2M tokens; the harness offloads it to a file. Record that file path. **NEVER Read this file, never paste any part of it — `scripts/chain.py` is the only reader.**
+11. `INSIDER_TRANSACTIONS` symbol=`<T>`, **from_date = as-of − 90 days** → (`insider_transactions`). The from_date keeps the response inside the 90-day window the builder uses (without it the default response may omit most of the window).
+12. `HISTORICAL_OPTIONS` symbol=`<T>` → (`options_chain`). The full chain is ~2M tokens; the harness offloads it to a file. Record that file path. **NEVER Read this file, never paste any part of it — `scripts/chain.py` is the only reader.**
 13. `REALTIME_PUT_CALL_RATIO` symbol=`<T>` → (`pc_ratio_realtime`)
 14. `EARNINGS_CALENDAR` symbol=`<T>`, horizon=6month → (`earnings_calendar`). Returns CSV text inside `{"result": "..."}`; save as-is. ⚠ Known to return header-only/empty for valid tickers → use the Step 3c fallback.
-15. `TREASURY_YIELD` interval=daily, maturity=10year, datatype=json, **return_full_data=true** → (`treasury_yield`). Full history is ~350k tokens, offloaded; the builder takes the latest row.
+15. `TREASURY_YIELD` interval=daily, maturity=10year, datatype=json → (`treasury_yield`). Full history is ~350k tokens, offloaded; the builder takes the latest row.
 
 **Rate limit:** premium tier = 75 req/min. This pass is ~15 calls — no pacing needed.
 
@@ -96,7 +98,7 @@ Cache file `iv_history_<TICKER>.json` lives in the bundle's **PARENT** dir (i.e.
 {"ticker": "<TICKER>", "samples": [{"date": "YYYY-MM-DD", "atm_iv": <number>}]}
 ```
 
-If the cache is absent OR its newest sample is more than 14 days old, refresh it: sample `HISTORICAL_OPTIONS` at ~26 biweekly dates across the trailing year (param `date=YYYY-MM-DD`, `return_full_data=true` → each response offloaded to a file). For each sample date, compute the ATM IV at the ~30-DTE expiry **via the script** (never in text). Use this one-liner, substituting the offloaded file path, the spot at that date, and the sample date:
+If the cache is absent OR its newest sample is more than 14 days old, refresh it: sample `HISTORICAL_OPTIONS` at ~26 biweekly dates across the trailing year (param `date=YYYY-MM-DD`, `return_full_data=true` → each response offloaded to a file). Pick trading days — bi-weekly **Fridays** work; if a sampled date returns an empty/error response (holiday), step back one day at a time (up to 3) and retry, else skip that sample and note it. For each sample date, compute the ATM IV at the ~30-DTE expiry **via the script** (never in text). Use this one-liner, substituting the offloaded file path, the spot at that date, and the sample date:
 
 ```bash
 python3 - "<offloaded_chain_file>" "<spot>" "<sample_date>" <<'PY'
