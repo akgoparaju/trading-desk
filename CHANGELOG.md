@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased — Phase 2: Evidence Skills
+## 0.2.0 — 2026-07-16 · Phase 2: Evidence Skills
+
+Gate 2 (validation on the three Gate-1 bundles, fresh agents executing the
+SKILL.mds): 3/3 PASS — 9/9 independently recomputed subscores matched module
+arithmetic exactly; ma_ordering QC check went live (SKIP→PASS) via AAPL's
+trend_claim; ETSY fired the vertical-rally penalty (+14.5%/15d) and the >15%
+SI band; MU (−14%/15d) correctly did not. Gate-2 fix: downside map now emits
+NEAREST-FIRST (descending) — ascending order made "top rows" read as the
+deepest anchors instead of the first supports price would fall through.
 
 ### Added
 - **`sentiment-positioning` evidence skill** (rubric v1.0.0):

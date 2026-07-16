@@ -318,9 +318,11 @@ class TestDownsideMap(unittest.TestCase):
         vfs = [r for r in rows if r["type"] == "valuation_floor"]
         self.assertEqual(len(vfs), 1)
         self.assertEqual(vfs[0]["level"], 72.0)
-        # sorted ascending: 72 sits between nothing and 90
+        # NEAREST-FIRST (descending): first row is the first support hit; 72 is last
         levels = [r["level"] for r in rows]
-        self.assertEqual(levels, sorted(levels))
+        self.assertEqual(levels, sorted(levels, reverse=True))
+        self.assertEqual(levels[0], 96.0)
+        self.assertEqual(levels[-1], 72.0)
 
     def test_valuation_floor_none_when_inputs_missing(self):
         self.assertIsNone(sr.valuation_floor(pe_5yr_median=None, eps_ntm=6.0))

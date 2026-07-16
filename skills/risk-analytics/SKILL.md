@@ -7,7 +7,7 @@ description: Score a ticker's risk-reward conditions (volatility state, drawdown
 
 Score the risk-reward dimension for one ticker from an already-built snapshot bundle. **All arithmetic is done by `scripts/score_risk.py`** — you run the script, read its small JSON, and write prose. You never compute a score, a percentage, a ratio, or a level in text.
 
-**Higher score = BETTER conditions.** A high risk-analytics score means the *setup* is favorable (low volatility, shallow historical drawdowns, a real discount, tight downside vs. upside, deep liquidity, a strong balance sheet) — it does NOT mean the stock is dangerous. State this convention in the brief so no reader inverts it.
+**Higher score = BETTER conditions.** A high risk-analytics score means the *setup* is favorable (low volatility, shallow historical drawdowns, a real discount, tight downside vs. upside, deep liquidity, a strong balance sheet) — it does NOT mean the stock is dangerous. State this convention as a short note in the score HEADLINE line (not inside the ≤120-word paragraph, where it eats the word budget).
 
 **Non-negotiables:**
 - **Never do arithmetic in prose.** Every number you cite must already appear in `module_risk.json` or the snapshot. A number you would have to compute is a script change, not a prose change.
@@ -70,7 +70,7 @@ The module JSON is small — read it directly. Then write `<bundle>/brief_risk.m
 
 1. **Score headline** — `## Risk Score: <score>/100 — <one-line conditions read>`. Copy `score` verbatim. If `renormalized` is true, add a one-line note quoting `renormalization_note`. State once, plainly, that higher = better conditions.
 2. **A single paragraph, ≤120 words.** Cite ONLY numbers present in `module_risk.json` (the `subscores[].arithmetic` strings and `inputs`) or the snapshot. Zero computed-in-prose numbers. Walk the four dimensions (volatility state, drawdown profile, margin of safety, liquidity & solvency), naming the points each earned and why, using the `arithmetic` strings as your source of truth.
-3. **Downside-map mini-table** — the top 5 rows of `tables.downside_map` (the nearest anchors below `last`), each with its `level`, `type`, and `basis`; include `pct_from_last` if you show a distance (quote it, never recompute), and the `risk` text on the stress row:
+3. **Downside-map mini-table** — the FIRST 5 rows of `tables.downside_map` — the map is emitted nearest-first, so rows 1-5 are the nearest anchors below `last` in the order price would fall through them, each with its `level`, `type`, and `basis`; include `pct_from_last` if you show a distance (quote it, never recompute), and the `risk` text on the stress row:
 
    | Level | Type | Basis | % from last |
    |-------|------|-------|-------------|

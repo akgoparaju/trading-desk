@@ -401,11 +401,13 @@ def valuation_floor(pe_5yr_median, eps_ntm):
 
 
 def build_downside_map(ladder, last, val_floor, stress_pct, top_risk) -> list:
-    """Ordered list of downside anchors BELOW ``last``, ascending by level.
+    """Ordered list of downside anchors BELOW ``last``, NEAREST-FIRST.
 
-    Starts from ladder entries below ``last`` (level, type, basis, pct_from_last),
-    inserts the valuation-floor row (if computable) in sorted position, and appends
-    a stress-scenario row (if ``stress_pct`` given) at last * (1 + stress_pct).
+    Rows sort DESCENDING by level: the first row is the first support price
+    falls through (Gate-2 finding: ascending order made "top 5 rows" read as
+    the deepest anchors instead of the nearest). Ladder entries below ``last``
+    plus the valuation-floor row (if computable) in sorted position; the
+    stress-scenario row (if ``stress_pct`` given) appends last, labeled.
     """
     rows = []
     for e in ladder:
@@ -422,7 +424,7 @@ def build_downside_map(ladder, last, val_floor, stress_pct, top_risk) -> list:
                      "basis": val_floor["basis"], "method": val_floor["method"],
                      "pct_from_last": pct})
 
-    rows.sort(key=lambda r: r["level"])
+    rows.sort(key=lambda r: r["level"], reverse=True)
 
     if stress_pct is not None and last is not None:
         stress_level = _clean(last * (1 + stress_pct))
