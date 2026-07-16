@@ -45,7 +45,7 @@ import glob
 import json
 import os
 import sys
-from datetime import date
+
 
 if sys.version_info < (3, 10):
     sys.exit("trade-decision requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
