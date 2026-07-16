@@ -50,7 +50,7 @@ Pass **`return_full_data=true` on EVERY Alpha Vantage call** — the AV MCP serv
 
 Also pass **`datatype=json` on every call that accepts it** — some endpoints (GLOBAL_QUOTE, HISTORICAL_OPTIONS, TREASURY_YIELD) default to CSV, which the builder and `scripts/chain.py` do not parse (validation caught `load_contracts` failing on a CSV chain).
 
-For results that arrive in context: save the payload **VERBATIM** to `raw/<key>.json` — do not reformat, do not transcribe any number by hand. For results the harness offloads to a file: do NOT copy them; record the offloaded file's absolute path as the manifest `path`. Manifest keys are in parentheses.
+For results that arrive in context: save the payload **VERBATIM** to `raw/<key>.json` — do not reformat, do not transcribe any number by hand. For results the harness offloads to a file: **`cp` the offloaded file into `raw/<key>.json`** (a Bash copy — the content still never enters context) and record the bundle-relative path. Offloaded paths are temp files the harness may reap mid-session (validation caught one disappearing), and a self-contained bundle is required for later delta re-scores. Manifest keys are in parentheses.
 
 1. `GLOBAL_QUOTE` symbol=`<T>` → (`global_quote`)
 2. `COMPANY_OVERVIEW` symbol=`<T>` → (`overview`)
