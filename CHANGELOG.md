@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased — Phase 2: Evidence Skills
+
+### Added
+- **`technical-analysis` evidence skill** (rubric v1.0.0): `scripts/score_technical.py`
+  scores four dimensions off an existing snapshot bundle — trend structure (30),
+  momentum (25, RSI band + optional cited divergence adjustment + MACD state),
+  structure & levels (25, proven-support proximity + resistance headroom +
+  confluence, all read off the shared `levels.py` S/R ladder), and
+  volume & extension (20, distance above MA200 + volume regime − vertical-rally
+  penalty). Writes `<bundle>/module_technical.json` with per-subscore arithmetic
+  strings (the actual numbers), a mechanical `trend_claim`, the ladder, a
+  divergence flag, and `signal: null` (the LLM writes the one-line signal in the
+  brief, never numbers). Whole-dimension null inputs renormalize the 0-100 score
+  over the remaining max and flag `renormalized: true`. `INPUT_FIELDS` declares the
+  nine scored snapshot fields (Task-13 cross-skill disjointness will import it);
+  `price.last` and the ladder are shared reference infrastructure, deliberately
+  excluded. `skills/technical-analysis/SKILL.md` runs the script and writes prose
+  only (score headline → ≤120-word paragraph → S/R ladder mini-table → one-line
+  signal → rubric-version footer). This is the FIRST scored evidence module, so
+  its arithmetic is the rubric of record.
+- **53 unit tests** (`tests/test_score_technical.py`): every scoring branch pinned
+  to a hand-computed value, plus an end-to-end CLI run against a real fabricated
+  bundle (module contract, determinism, divergence-requires-justification guard).
+  Full suite: 154 tests green.
+
 ## 0.1.0 — 2026-07-16 · Phase 1: Data Engine
 
 First shipped phase. Whole-repo review verdict: SHIP.
