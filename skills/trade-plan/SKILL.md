@@ -94,7 +94,7 @@ This re-reads `module_tradeplan.json` + `module_options.json` (exit 2 "run optio
 
 ## Step 5 — Write the brief
 
-Read `module_tradeplan.json` (small — read it directly). Write `<bundle>/brief_tradeplan.md`. **Every number comes from the JSON — zero computed-in-prose numbers.**
+Read `module_tradeplan.json` (small — read it directly). Write `<bundle>/brief_tradeplan.md`. **Every number comes from the JSON — zero computed-in-prose numbers.** Format discipline (uniform with the evidence briefs): open with a verdict headline (`### Trade Plan — {expression selector} / size {recommended}% (rubric v{ver})`), round displayed floats to 2 dp in prose and tables (full precision stays in the JSON), and END with a one-line `**Signal:**` read.
 
 **Page-1 trade-plan table** (one row each, verbatim from the JSON):
 

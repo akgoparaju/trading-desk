@@ -1172,9 +1172,17 @@ def _run(args):
     # -- chain (loaded ONLY via chain.load_contracts; never into context) --
     chain_file = (snapshot.get("options") or {}).get("chain_file_path")
     if not chain_file:
-        print(f"ERROR: snapshot {snap_path} has no options.chain_file_path.",
-              file=sys.stderr)
-        return 2
+        # NO-CHAIN DEGRADATION (V3 acceptance finding): a snapshot can pass its
+        # QC gate with the options block disclosed-missing. The stated policy is
+        # that a failed snapshot gate is the ONLY full stop, so this module must
+        # emit a disclosed empty module rather than exit 2 and leave the report
+        # un-renderable. Everything downstream already handles zero structures.
+        doc = build_no_chain_module(snapshot, direction, direction_source, args.mode)
+        out = args.out or os.path.join(args.bundle, "module_options.json")
+        with open(out, "w") as fh:
+            json.dump(doc, fh, indent=2, sort_keys=True)
+        print(out)
+        return 0
     chain_path = chain_file if os.path.isabs(chain_file) \
         else os.path.join(args.bundle, chain_file)
     try:
@@ -1194,6 +1202,42 @@ def _run(args):
         json.dump(doc, fh, indent=2, sort_keys=True)
     print(out)
     return 0
+
+
+def build_no_chain_module(snapshot, direction, direction_source, mode):
+    """Disclosed empty module for a snapshot whose options block is missing.
+
+    Emitted instead of a hard stop so the pipeline's degradation invariant holds
+    (only a failed snapshot QC gate stops the run). Zero structures, explicit
+    reason, vol verdict 'unknown' — downstream synthesize/renderer already
+    disclose unexecutable expressions and empty strategy tables.
+    """
+    meta = snapshot.get("meta") or {}
+    reason = ("no options chain in the snapshot (options block missing/disclosed "
+              "in meta.missing) -- options analysis unavailable for this run")
+    return {
+        "skill": SKILL_NAME,
+        "rubric_version": RUBRIC_VERSION,
+        "ticker": meta.get("ticker"),
+        "as_of": meta.get("as_of_utc"),
+        "mode": mode,
+        "direction": direction,
+        "direction_source": direction_source,
+        "selected_expiry": None,
+        "vol_dashboard": {"verdict": "unknown", "iv30": None, "rv20": None,
+                          "diff": None, "iv_pctile_1yr": None,
+                          "atm_iv_by_expiry": [], "term_structure": "flat",
+                          "skew_25d_30d": None, "disclosure": reason},
+        "term_structure": "flat",
+        "expected_moves": [],
+        "flow": {},
+        "recommended_structures": [],
+        "declined": [{"name": "all", "reason": reason}],
+        "hedge_structure": None,
+        "liquidity_verdict": "no chain -- options analysis unavailable",
+        "warnings_global": [reason.upper()[:1] + reason[1:]],
+        "signal": None,
+    }
 
 
 def main(argv=None):

@@ -815,6 +815,24 @@ class TestCLI(unittest.TestCase):
         proc = self._run(extra=["--mode", "standalone", "--direction", "bullish"])
         self.assertEqual(proc.returncode, 2)
 
+    def test_no_chain_in_snapshot_degrades_disclosed(self):
+        # V3 acceptance regression: options block missing entirely (disclosed in
+        # meta.missing) must NOT hard-stop — it emits a disclosed empty module so
+        # the report stays renderable (only the snapshot QC gate is a full stop).
+        snap = _snapshot()
+        snap["options"] = None
+        snap.setdefault("meta", {}).setdefault("missing", []).append("options_chain")
+        _write_bundle(self.dir, snapshot=snap)
+        proc = self._run(extra=["--mode", "standalone", "--direction", "bullish"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        doc = self._read()
+        self.assertEqual(doc["recommended_structures"], [])
+        self.assertEqual(doc["declined"][0]["name"], "all")
+        self.assertIn("options analysis unavailable", doc["liquidity_verdict"])
+        self.assertTrue(any("no options chain" in w.lower()
+                            for w in doc["warnings_global"]))
+        self.assertEqual(doc["vol_dashboard"]["verdict"], "unknown")
+
     def test_pipeline_csp_alignment_to_entry_1(self):
         # tradeplan entry_1 = 90.0 (== a listed put strike, within 2%) -> CSP uses 90.
         _write_bundle(self.dir, chain=_chain(),
