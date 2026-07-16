@@ -3,6 +3,57 @@
 ## [Unreleased]
 
 ### Added
+- **Trade-plan decision skill** (rubric v1.0.0; expression decision table
+  `expression-v1.0.0`): `scripts/trade_plan.py` + `skills/trade-plan/SKILL.md` — the
+  **L3 execution layer**. It turns the composite into an EXECUTABLE plan: it consumes
+  module outputs (`module_composite.json`'s EV block, `module_technical.json`'s S/R
+  ladder, `module_risk.json`'s downside_map) and reads the newest snapshot only for
+  plan references (`price.last`, `events.next_earnings.date`,
+  `sentiment.iv_pctile_1yr`, `options.iv_minus_rv20`, `fundamentals.eps_ntm_consensus`)
+  — it scores NO snapshot field directly (`INPUT_FIELDS = set()`), so single-mapping
+  is preserved by construction (added to `tests/test_single_mapping.py` SKILLS like
+  composite). **ALL sizing/EV/required-multiple math is delegated to
+  `scripts/ev_kelly.py`** (`ev_at`, `kelly`, `size_recommendation`). **Two passes.**
+  **Pass 1 (`--stock-plan`)** mints: an **entry ladder** — valuation anchors =
+  `{composite.ev.ev_breakeven_entry}` ∪ downside_map `valuation_floor` rows; a proven
+  support (swing_low/ma50/ma200/put_wall) within 3% of an anchor is a **confluence**;
+  `entry_1` = highest confluence below `last`, **unless** `ev_at_current ≥ hurdle_total`
+  → `entry_1` = current price **sized down** (half recommended); `entry_2`/`entry_3` =
+  next lower confluences/proven supports, distinct and ≥3% apart (max 3); each carries
+  its `ev_at_level`. **Exits** — `profit_take` = nearest ladder resistance above `last`;
+  `bull_target` = max scenario target with `required_multiple = target / eps_ntm`
+  ("implies N× fwd EPS", null-safe). **Invalidation (BOTH legs mandatory)** —
+  technical leg (weekly close below the first proven support under the deepest entry,
+  minted off the ladder) + a REQUIRED fundamental leg (`--fund-invalidation-metric /
+  -threshold / -justification`, no defaults → exit 2). **Sizing** — full Kelly at
+  `entry_1` capped by profile (5/8/10% trader/balanced/long-term), −1 notch
+  (quarter-Kelly + half-cap) on a binary event within 30d; the full arithmetic string
+  is emitted. **Hedge** — required iff (binary30d AND recommended ≥ 5%) OR (iv_pctile
+  ≤ 25); each clause fires independently; spec names trigger, structure, `strikes_from`
+  (first two downside_map levels), expiry rule, premium cap 1.5%. **Don't-chase** — 5%
+  above the top entry. **Expression decision table (`expression-v1.0.0`)** — a decision
+  of record formalizing the lived rule *a catalyst in sight selects options for
+  leverage; the profile only implements*: RULE 1 (selector) days-to-catalyst ≤ 60 AND
+  `--catalyst-in-thesis yes` → options-tilted for ALL profiles (long-term still gets a
+  small defined-risk options **kicker**); RULE 2 → per-profile default; MODULATORS
+  appended in order (iv_minus_rv ≥ +0.05 premium-selling; ≤ −0.05 long-premium viable;
+  days ≤ 30 defined-risk-only). The `--catalyst-in-thesis yes|no` selector flag is
+  REQUIRED (no default → exit 2). **Pass 2 (`--synthesize`)** re-reads the plan +
+  `module_options.json` (exit 2 "run options-strategy first" if missing) and folds the
+  options module's chosen structures (names + strikes) and hedge spec into
+  `expression` (`synthesized: true`, `structures_selected`, `hedge_structure`); a
+  recommended structure missing strikes → exit 2 (consistency). Writes
+  `<bundle>/module_tradeplan.json` (`stock_plan`, preliminary/synthesized `expression`,
+  `flags`, `event_playbook: null` + `signal: null` LLM prose slots). A missing
+  `module_composite.json` → exit 2 ("run composite-score first"). Test coverage:
+  `tests/test_trade_plan.py` (62 tests — days-to-catalyst/binary-event helpers,
+  confluence + entry spacing + EV-at-level + ev≥hurdle sized-down branch, exits +
+  required-multiple, both-leg invalidation, Kelly sizing recomputed against ev_kelly,
+  hedge firing on each clause independently + null-safety, the full expression decision
+  table incl. selector/default/modulator order, and CLI end-to-end for both passes incl.
+  every exit-2 gate + determinism). Files: `scripts/trade_plan.py`,
+  `skills/trade-plan/SKILL.md`, `tests/test_trade_plan.py`,
+  `tests/test_single_mapping.py`.
 - **Composite-score decision skill** (composite rubric v1.0.0): `scripts/score_composite.py`
   + `skills/composite-score/SKILL.md` — the **L3 decision layer**. It CONSUMES the
   four evidence module JSONs' final scores (`module_technical.json`,

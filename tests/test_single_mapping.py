@@ -14,16 +14,17 @@ declared field sets -- it does no scoring of its own.
 import unittest
 
 from scripts import (score_technical, score_risk, score_sentiment,
-                     score_fundamental, score_composite)
+                     score_fundamental, score_composite, trade_plan)
 
-# composite-score (L3) declares INPUT_FIELDS = set(): it consumes the four module
-# scores + price.last (EV reference), scoring NO snapshot field directly, so it can
-# never collide with an evidence module. It is included here so the governance test
-# iterates over it too -- the disjointness and guard checks stay green by
-# construction (an empty scored set collides with nothing).
+# composite-score (L3) and trade-plan (L3) both declare INPUT_FIELDS = set(): they
+# consume module outputs (+ a few snapshot facts used only as EV/plan references),
+# scoring NO snapshot field directly, so they can never collide with an evidence
+# module. They are included here so the governance test iterates over them too -- the
+# disjointness and guard checks stay green by construction (an empty scored set
+# collides with nothing).
 SKILLS = {"technical": score_technical, "risk": score_risk,
           "sentiment": score_sentiment, "fundamental": score_fundamental,
-          "composite": score_composite}
+          "composite": score_composite, "trade_plan": trade_plan}
 
 
 class TestSingleMapping(unittest.TestCase):
