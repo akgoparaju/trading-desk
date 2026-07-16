@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+td_bundle_*/
+iv_history_*.json
+snapshot_*.json
+.DS_Store

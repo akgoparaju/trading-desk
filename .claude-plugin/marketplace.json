@@ -1,0 +1,8 @@
+{
+  "name": "trade-decision-marketplace",
+  "owner": { "name": "Anil Goparaju" },
+  "metadata": { "allowCrossMarketplaceDependenciesOn": ["claude-for-financial-services"] },
+  "plugins": [
+    { "name": "trade-decision", "source": "./", "description": "Trade decision system (Alpha-Vantage-first)" }
+  ]
+}
