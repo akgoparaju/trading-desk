@@ -635,6 +635,15 @@ def synthesize(plan, options_module):
     plan["expression"]["synthesized"] = True
     plan["expression"]["structures_selected"] = structures_selected
     plan["expression"]["hedge_structure"] = hedge_structure
+    # An options-tilted expression with zero executable structures is a trap for
+    # the reader (Gate-3 finding, AAPL: neutral+cheap vol declined everything while
+    # the expression still read "options tenored past catalyst"). Disclose it.
+    plan["expression"]["executable"] = bool(structures_selected)
+    if not structures_selected:
+        plan["expression"]["executability_note"] = (
+            "no options structures survived the options module's vol/liquidity/event "
+            "gates (see module_options declined + liquidity_verdict) -- implement the "
+            "expression in STOCK per the stock plan until conditions change")
     return plan
 
 

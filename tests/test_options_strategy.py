@@ -331,6 +331,22 @@ class TestTermStructure(unittest.TestCase):
         self.assertEqual(opts.term_structure([{"expiry": _NEAR_EXP, "atm_iv": 0.9}]),
                          "flat")
 
+    def test_tenor_window_excludes_0dte_stub_and_leap(self):
+        # Gate-3 MU case: a 0-DTE stub (low IV) + a 2-year LEAP (high IV) made the
+        # curve read "contango" while the tradeable window was backwarded.
+        rows = [{"expiry": "2026-07-16", "atm_iv": 0.127},   # 0 DTE stub
+                {"expiry": "2026-08-21", "atm_iv": 0.98},    # front (36d)
+                {"expiry": "2026-10-16", "atm_iv": 0.927},   # back (92d)
+                {"expiry": "2028-12-15", "atm_iv": 0.859}]   # LEAP, out of window
+        self.assertEqual(opts.term_structure(rows, as_of="2026-07-16"),
+                         "backwardation")
+        # as_of arrives as a full ISO timestamp in real snapshots (meta.as_of_utc)
+        # — the window must still engage (Gate-3 fix regression).
+        self.assertEqual(opts.term_structure(rows, as_of="2026-07-16T18:38:07Z"),
+                         "backwardation")
+        # without as_of the unfiltered legacy behavior remains (documented).
+        self.assertEqual(opts.term_structure(rows), "contango")
+
 
 # --------------------------------------------------------------------------- #
 # Monthly-ish + expiry selection.
@@ -363,6 +379,22 @@ class TestExpirySelection(unittest.TestCase):
             [_NEAR_EXP, _FAR_EXP], as_of="2026-07-16",
             catalyst_date=None, days_to_catalyst=None)
         self.assertEqual(chosen, _NEAR_EXP)
+
+    def test_select_expiry_monthly_beats_closer_weekly(self):
+        # Gate-3 MU case: weekly 2026-08-28 sits 43 DTE (|43-45|=2) vs monthly
+        # 2026-08-21 at 36 DTE (|36-45|=9). Monthlyish-in-window wins regardless
+        # of raw DTE distance — weeklies are a fallback pool, not a peer.
+        chosen = opts.select_expiry(
+            ["2026-08-28", "2026-08-21"], as_of="2026-07-16",
+            catalyst_date=None, days_to_catalyst=None)
+        self.assertEqual(chosen, "2026-08-21")
+
+    def test_select_expiry_weekly_fallback_when_no_monthly_in_window(self):
+        # only weeklies in [30,90] -> the weekly pool is used.
+        chosen = opts.select_expiry(
+            ["2026-08-28", "2026-12-18"], as_of="2026-07-16",
+            catalyst_date=None, days_to_catalyst=None)
+        self.assertEqual(chosen, "2026-08-28")
 
 
 # --------------------------------------------------------------------------- #
@@ -855,6 +887,10 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         doc = self._read()
         self.assertIn("thin", doc["liquidity_verdict"].lower())
+        # Gate-3 ETSY regression: the binary event must be globally visible even
+        # when zero structures survive (per-structure warnings vanish with them).
+        self.assertTrue(any("BINARY EVENT" in w for w in doc["warnings_global"]),
+                        doc["warnings_global"])
 
     def test_determinism(self):
         _write_bundle(self.dir, chain=_chain(), snapshot=_snapshot())

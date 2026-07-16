@@ -1,6 +1,17 @@
 # Changelog
 
-## [Unreleased]
+## 0.3.0 — 2026-07-16 · Phase 3: Decision Layer
+
+Gate 3 (full decision chain on the three validated bundles): 3/3 PASS — all
+composite/EV/sizing arithmetic reproduced by independent hand-recomputation; the
+MU standalone options run reproduced a hand-verified prototype's economics on the
+same 2026-07-15 chain (CSP mark exact, bull-put PoP 0.70 vs 0.68). Gate-3 fixes:
+term-structure tenor window (0-DTE stubs and LEAPs excluded), monthly-first expiry
+selection (a closer-but-illiquid weekly was silently killing every structure),
+always-global binary-event warning, expression executability disclosure when all
+structures are declined. Known deviation: vertical widths follow "1-2 strikes
+below" literally, narrower than the 5-10%-of-spot target on dense chains (v0.4
+polish).
 
 ### Added
 - **Options-strategy decision skill** (rubric v1.0.0): `scripts/options_strategy.py` +

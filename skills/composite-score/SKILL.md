@@ -91,7 +91,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/score_composite.py \
   --profile balanced
 ```
 
-Optional repeatable `--entry-level <price>` flags add `ev_at_levels` rows (the trade-plan skill feeds these later). The script writes `<bundle>/module_composite.json` (path printed to stdout). Any missing flag/justification, a bad scenario file, a probability sum ≠ 1, or ≥ 3 missing dimensions is exit 2 — fix and re-run.
+Optional repeatable `--entry-level <price>` flags add `ev_at_levels` rows — useful for ad-hoc what-if runs and re-scores; the trade-plan skill computes its own EV-at-level from the same scenario set and does NOT re-invoke this script. The script writes `<bundle>/module_composite.json` (path printed to stdout). Any missing flag/justification, a bad scenario file, a probability sum ≠ 1, or ≥ 3 missing dimensions is exit 2 — fix and re-run.
 
 ---
 

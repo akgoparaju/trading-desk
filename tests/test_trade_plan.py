@@ -729,6 +729,28 @@ class TestSynthesizeCLI(unittest.TestCase):
         # entries unchanged from pass 1.
         self.assertEqual(doc["stock_plan"]["entries"][0]["level"], 95.0)
 
+    def test_synthesize_happy_path_marks_executable(self):
+        self._write_options()
+        self._synth()
+        exp = self._read()["expression"]
+        self.assertTrue(exp["executable"])
+        self.assertNotIn("executability_note", exp)
+
+    def test_synthesize_zero_structures_discloses_unexecutable(self):
+        # Gate-3 AAPL case: options module declined everything; the expression
+        # must say the options tilt is not currently executable, in stock instead.
+        empty = _options_doc()
+        empty["recommended_structures"] = []
+        empty["hedge_structure"] = None
+        empty.pop("hedge", None)
+        self._write_options(empty)
+        proc = self._synth()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        exp = self._read()["expression"]
+        self.assertTrue(exp["synthesized"])
+        self.assertFalse(exp["executable"])
+        self.assertIn("STOCK", exp["executability_note"])
+
 
 if __name__ == "__main__":
     unittest.main()

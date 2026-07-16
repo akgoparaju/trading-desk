@@ -181,13 +181,29 @@ def vol_verdict(iv_minus_rv):
     return "fair"
 
 
-def term_structure(atm_iv_by_expiry):
+def term_structure(atm_iv_by_expiry, as_of=None):
     """Front-vs-back ATM IV: 'backwardation' | 'contango' | 'flat'.
 
     front > back + 0.02 -> backwardation; back > front + 0.02 -> contango; else flat.
     A single (or empty) expiry list is 'flat' by convention.
+
+    Rows are restricted to the TRADEABLE tenor window [7, 365] days when ``as_of``
+    is parseable (Gate-3 finding, MU: comparing a 0-DTE stub against a 2-year LEAP
+    reported 'contango' while the tradeable curve was backwarded), and sorted by
+    expiry date before the front/back comparison.
     """
     rows = [r for r in (atm_iv_by_expiry or []) if r.get("atm_iv") is not None]
+    # as_of may be a full ISO timestamp (meta.as_of_utc) — slice to the date part.
+    as_of_d = _parse_date(str(as_of)[:10]) if as_of else None
+    if as_of_d is not None:
+        windowed = []
+        for r in rows:
+            d = _parse_date(r.get("expiry"))
+            if d is not None and 7 <= (d - as_of_d).days <= 365:
+                windowed.append(r)
+        if len(windowed) >= 2:
+            rows = windowed
+    rows.sort(key=lambda r: r.get("expiry") or "")
     if len(rows) < 2:
         return "flat"
     front = rows[0]["atm_iv"]
@@ -211,6 +227,7 @@ def build_vol_dashboard(snapshot):
     diff = options.get("iv_minus_rv20")
     atm = options.get("atm_iv_by_expiry") or []
     verdict = vol_verdict(diff)
+    as_of = (snapshot.get("meta") or {}).get("as_of_utc")
 
     dash = {
         "verdict": verdict,
@@ -219,7 +236,7 @@ def build_vol_dashboard(snapshot):
         "diff": _clean(diff),
         "iv_pctile_1yr": sentiment.get("iv_pctile_1yr"),
         "atm_iv_by_expiry": atm,
-        "term_structure": term_structure(atm),
+        "term_structure": term_structure(atm, as_of),
         "skew_25d_30d": options.get("skew_25d_30d"),
     }
     if verdict == "unknown":
@@ -273,10 +290,12 @@ def select_expiry(expiries, as_of, catalyst_date, days_to_catalyst):
         return (d - as_of_d).days
 
     in_window = [(e, d) for e, d in parsed if _MIN_DTE <= dte(d) <= _MAX_DTE]
-    pool = in_window or parsed
-    # Prefer a monthlyish expiry within the window when tenor ties are close.
-    return min(pool, key=lambda ed: (abs(dte(ed[1]) - _TARGET_DTE),
-                                     0 if is_monthlyish(ed[0]) else 1))[0]
+    # MONTHLYISH FIRST within the window (Gate-3 finding, MU: nearest-to-45 picked
+    # an illiquid weekly 2 days closer to target than the liquid monthly, and every
+    # structure then failed the liquidity gate). Weeklies are a fallback, not a peer.
+    monthly_in_window = [(e, d) for e, d in in_window if is_monthlyish(e)]
+    pool = monthly_in_window or in_window or parsed
+    return min(pool, key=lambda ed: abs(dte(ed[1]) - _TARGET_DTE))[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -1037,6 +1056,14 @@ def build_module(snapshot, direction, direction_source, mode, tradeplan):
         global_warnings.append(
             "PRIMARY GATE: IV is CHEAP vs realized -- premium selling has no edge; "
             "long-premium/defined-risk directional preferred")
+    # The binary event must be visible in the module even when zero structures
+    # survive (Gate-3 finding, ETSY: per-structure IV-crush warnings vanish with
+    # the structures, leaving a 13-days-to-earnings module with no event trace).
+    days_to_earn_global = _days_to_earnings(snapshot, as_of)
+    if days_to_earn_global is not None and 0 <= days_to_earn_global <= _EVENT_DAYS:
+        global_warnings.append(
+            f"BINARY EVENT: earnings in {days_to_earn_global}d -- defined-risk only; "
+            "IV-crush risk on long premium held through the print")
 
     # -- liquidity verdict -------------------------------------------------
     if len(recommended) < 2:
