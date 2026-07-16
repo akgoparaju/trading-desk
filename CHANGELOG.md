@@ -3,6 +3,59 @@
 ## [Unreleased]
 
 ### Added
+- **Options-strategy decision skill** (rubric v1.0.0): `scripts/options_strategy.py` +
+  `skills/options-strategy/SKILL.md` — the **L3 structure-selection layer**. It turns a
+  DIRECTION + the REAL options chain into concrete, defined-risk option STRUCTURES —
+  real strikes only, economics minted from chain marks, probabilities shown as LABELED
+  delta approximations, and mechanical honesty gates. It reads the newest snapshot's
+  options/sentiment/events blocks + the on-disk chain (loaded ONLY via
+  `chain.load_contracts`, NEVER into LLM context) and scores NO snapshot field directly
+  (`INPUT_FIELDS = set()`), so single-mapping is preserved by construction (added to
+  `tests/test_single_mapping.py` SKILLS like composite/trade-plan). **The central lesson
+  it encodes:** IV LEVEL alone never selects a strategy — **IV-vs-REALIZED is the
+  PRIMARY GATE**. `vol_verdict(options.iv_minus_rv20)`: `≤ −0.03` → `cheap_vs_realized`
+  (no premium-selling edge; long premium viable), `≥ +0.03` → `rich_vs_realized`
+  (premium selling favored), between → `fair`, null → `unknown` (treated as fair +
+  disclosed). (The MU prototype: a 96% IV that LOOKED rich but sat ~14 pts BELOW
+  ~110–116% realized was CHEAP, not rich — a naive "sell premium" call would have been
+  wrong.) **Vol dashboard** also carries iv30, rv20, iv_pctile, **term structure**
+  (front-vs-back ATM IV: backwardation/contango/flat), 25d skew. **Expiry selection** —
+  monthlies preferred (3rd-Friday heuristic `is_monthlyish`); pipeline with a catalyst
+  ≤ 60 DTE → first monthlyish expiry AFTER the catalyst, else nearest 45 DTE within
+  [30,90]. **Strikes by delta off the real chain** — short put/call ≈ 0.30Δ, long call
+  ≈ 0.55Δ, wings 1–2 strikes out, condor shorts ≈ 0.25Δ; pipeline CSP aligns to the
+  stock plan's `entry_1` when within 2% of a listed put strike. **Selection matrix
+  (direction × vol verdict)** — bullish×rich/fair → bull_put_spread + cash_secured_put;
+  bullish×cheap → long_call_vertical (+ bull_put_spread w/ warning); bearish×rich/fair →
+  bear_call_spread; bearish×cheap → long_put_vertical (+ bear_call_spread w/ warning);
+  neutral×rich → iron_condor; **neutral×cheap/fair → NO premium structure** (a `declined`
+  "stand aside" entry). **Economics from chain marks** — net credit/debit, max
+  profit/loss, breakevens, PoP with a named `pop_method` (`1 − |Δ short|` credit /
+  `|Δ long|` debit), all round-tripped in an `arithmetic` string. **Iron-condor honesty
+  check** — profit-zone half-width inside the snapshot 1σ expected move → warning +
+  `pop_full_profit_note` (full-profit probability is LOW). **Liquidity gate** (per leg)
+  — `oi ≥ 100` AND `spread ≤ max(0.10, 0.10×mark)`; failing leg → structure `declined`;
+  < 2 viable → `liquidity_verdict: "thin — declining to force structures"`. **Honesty
+  gates** — cheap-vs-realized tags every credit structure ("premium sellers are NOT
+  being paid for delivered vol"); earnings ≤ 30d excludes the CSP + tags all structures
+  ("IV-crush/defined-risk-only into event"); ex-div within tenor tags short-call legs
+  (early-assignment). **Management rules** per family (credit 50%/2×/21 DTE; condor
+  25–35%/roll untested; debit 100%/−50%/21 DTE). **Hedge** (pipeline, if the stock
+  plan's hedge is required) — a put spread from the hedge `strikes_from`; cost/spot over
+  the premium cap → a **collar alternative** (short call ≈ 0.20Δ) emitted + disclosed.
+  **Two modes:** `pipeline` derives direction from the composite grade (A|B → bullish,
+  C → neutral, D → bearish) and requires both `module_composite.json` and
+  `module_tradeplan.json` (exit 2 if either missing), aligning to the stock plan and
+  feeding recommended structures (each carrying top-level `strikes`) back to trade-plan's
+  `--synthesize`; `standalone` requires an explicit `--direction` (exit 2 if absent).
+  The chain file at `snapshot.options.chain_file_path` is resolved relative to the
+  bundle (exit 2 if unreadable). Writes `<bundle>/module_options.json` (deterministic,
+  `sort_keys`). Tests: `tests/test_options_strategy.py` (65 tests) — delta-targeted
+  strike picks, exact credit/debit economics, CSP entry alignment, condor
+  inside-1σ warning, all six direction×verdict branches, liquidity declines + thin
+  verdict, event gates, cheap-vs-realized warnings, hedge + collar breach, term
+  structure, pipeline direction-from-grade, standalone `--direction` requirement,
+  missing-chain exit 2, determinism. Full suite: 545 tests green.
 - **Trade-plan decision skill** (rubric v1.0.0; expression decision table
   `expression-v1.0.0`): `scripts/trade_plan.py` + `skills/trade-plan/SKILL.md` — the
   **L3 execution layer**. It turns the composite into an EXECUTABLE plan: it consumes
