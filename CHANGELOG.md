@@ -1,6 +1,21 @@
 # Changelog
 
-## Unreleased — Phase 4: Assembly
+## 0.4.0 — 2026-07-16 · Phase 4: Assembly & Acceptance
+
+Acceptance results (V1–V5 PASS; V6 deferred to a clean-environment run, blocks only
+the 1.0.0 tag): V1 AAPL 3-page report shipped with ZERO unwaived report-QC failures
+(the reference report it replaces contained four internal contradictions) at 2,099
+words; V2 trader-profile run reproduced the balanced run's sensitivity prediction
+byte-for-byte; V3 degradation (no chain/SI/P-C) renders a fully disclosed report —
+fixed mid-acceptance so the snapshot QC gate is the ONLY full stop; V4 delta report
+mechanics pass under the hardened QC; V5 FSI structural parity 5/6 (the one PARTIAL
+was brief-format uniformity, fixed). The 12 superseded in-house trade-* analysis
+skills are retired (reversible) in the author environment.
+
+Known limitation: number-provenance is a numeric-membership check with rounding/percent
+tolerance — bare small integers near real bundle values can pass; fabricated dates,
+versions, headers, and prose-only figures are deterministically caught. Revisit
+tolerance width post-1.0.: Assembly
 
 ### Fixed
 - **Report-QC number provenance hardened** (`scripts/report_qc.py`, `tests/test_report_renderer.py`):
