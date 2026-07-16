@@ -3,6 +3,42 @@
 ## Unreleased — Phase 2: Evidence Skills
 
 ### Added
+- **`risk-analytics` evidence skill** (rubric v1.0.0): `scripts/score_risk.py`
+  scores four dimensions off an existing snapshot bundle — volatility state (25,
+  rv30-vs-10yr percentile + benchmark beta), drawdown profile (25, max 10-yr
+  drawdown + 30% episode count + a 20%-vs-30% episode-spread severity proxy),
+  margin of safety (30, distance below the all-time high + ladder asymmetry of
+  proven-support-vs-resistance distance), and liquidity & solvency (20, 3-month
+  average dollar volume + net-cash ratio). **Higher score = better risk-reward
+  conditions** (calm, discounted, asymmetric, liquid, cash-rich = near 100), the
+  opposite polarity from a danger meter. CONSUMES `<bundle>/module_technical.json`
+  for the shared S/R ladder (asymmetry reads `levels.nearest_support` /
+  `nearest_resistance` off it); exits 2 asking for technical-analysis first when
+  the module is absent. Writes `<bundle>/module_risk.json` with per-subscore
+  arithmetic strings (the actual numbers), a `downside_map` table (ladder entries
+  below `last` + a script-computed valuation-floor row `pe_5yr_median × eps_ntm`
+  inserted in sorted position + an optional stress row `last × (1 + stress_pct)`),
+  a verbatim `vol_profile` context block (correlation is context, unscored), flags,
+  and `signal: null` (the LLM writes the one-line signal in the brief, never
+  numbers). Whole-dimension null inputs renormalize the 0-100 score over the
+  remaining max and flag `renormalized: true`. The `--stress-pct` flag requires
+  `--top-risk` (a named single risk) — a judgment input, never computed in prose.
+  DEVIATION FROM DESIGN-SPEC §5.3 (documented in SKILL.md Important Notes and a
+  code comment): consensus-PT upside is scored ONLY in sentiment-positioning, not
+  here — the spec listed it in both modules, violating its own single-mapping rule;
+  the ~10 points are reallocated into the asymmetry (18) + dist-from-ATH (12)
+  components. `INPUT_FIELDS` declares the nine scored snapshot fields; `price.last`
+  and the ladder are shared reference infrastructure, deliberately excluded.
+  `skills/risk-analytics/SKILL.md` runs the script and writes prose only (score
+  headline → ≤120-word paragraph → downside-map mini-table → SPY correlation note →
+  one-line signal → rubric-version footer).
+- **59 unit tests** (`tests/test_score_risk.py`): every scoring branch pinned to a
+  hand-computed value (vol percentile/beta bands, max-dd/episode/spread bands,
+  dist-from-ATH bands, asymmetry ratios incl. blue-sky convention and
+  no-proven-floor, ADV/net-cash bands, valuation-floor arithmetic, stress-row
+  arithmetic + top-risk guard, renormalization, determinism), plus an end-to-end
+  CLI run against a real fabricated bundle including the missing-module-technical
+  exit-2 guard. Full suite: 213 tests green.
 - **`technical-analysis` evidence skill** (rubric v1.0.0): `scripts/score_technical.py`
   scores four dimensions off an existing snapshot bundle — trend structure (30),
   momentum (25, RSI band + optional cited divergence adjustment + MACD state),
