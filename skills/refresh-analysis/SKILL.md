@@ -93,7 +93,12 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_report.py \
 
 Fill only the `<!-- SLOT:... -->` prose slots (citing numbers already printed on the page); the delta report's `SLOT:delta_interpretation` explains what drove the composite/EV/level moves.
 
-**GATE — report QC (`report_qc.py` exit 0, BLOCKING) on BOTH.** Run `report_qc.py --report <full report>` and `report_qc.py --report <delta report> --previous <previous_bundle>`. Fix the PROSE, never the numbers; a table-driven failure is an upstream module bug. Waivers disclosed only.
+**GATE — report QC (`report_qc.py` exit 0, BLOCKING) on BOTH:**
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/report_qc.py --bundle <new_bundle> --report <full report path>
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/report_qc.py --bundle <new_bundle> --report <delta report path> --previous <previous_bundle>
+```
+(The delta report is auto-detected by its `Delta_Report` filename and runs the delta check subset; `--previous` folds the old bundle's values into the allowed provenance set.) Fix the PROSE, never the numbers; a table-driven failure is an upstream module bug. Waivers disclosed only.
 
 ---
 

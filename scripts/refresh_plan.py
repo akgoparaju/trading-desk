@@ -44,9 +44,11 @@ if _REPO_ROOT not in sys.path:
 from scripts import qc
 
 # REUSE the QC gate's own staleness table — the planner authorizes a REUSE only
-# when the file is within the SAME window the gate will later age it against, so
-# a reused-in-window file provably passes qc.check_staleness. Bound by identity
-# (a private copy would silently drift from the gate).
+# STRICTLY INSIDE the window the gate will later age it against (age < window,
+# review finding: the gate ages with fractional days and strict '>', so a reuse
+# at exactly integer age == window can fail when the file's time-of-day precedes
+# the new as_of's time-of-day). Strict-inside keeps a planner-authorized reuse
+# provably gate-passing. Bound by identity (a private copy would silently drift).
 _STALENESS_WINDOWS = qc._STALENESS_WINDOWS
 _DEFAULT_STALENESS_WINDOW = qc._DEFAULT_STALENESS_WINDOW
 
@@ -257,7 +259,7 @@ def _group_decision(group, present, age, window, forced_by_event):
         # Present but no parseable retrieved_utc — refetch rather than trust it.
         return {"action": "refetch", "reason": "retrieved_utc unparseable",
                 "age_days": None}
-    if age <= window:
+    if age < window:  # strict: at age == window the gate's fractional aging can exceed it
         return {"action": "reuse",
                 "reason": "age %dd vs window %dd" % (age, window),
                 "age_days": age}

@@ -206,19 +206,47 @@ class WindowBoundaryTests(unittest.TestCase):
             self.assertEqual(it["action"], "refetch")
             self.assertEqual(it["age_days"], 91)
 
-    def test_insider_reuse_exactly_at_window(self):
-        # age == window (90d) -> reuse (<=, matching qc's own <= window rule).
+    def test_insider_refetch_exactly_at_window(self):
+        # age == window (90d) -> REFETCH (strict <; review finding: the gate ages
+        # with fractional days and strict '>', so an at-window reuse can fail when
+        # the file's time-of-day precedes the new as_of's time-of-day).
         with tempfile.TemporaryDirectory() as tmp:
             td, _ = _make_workspace(tmp, AS_OF,
                                     ages={"insider_transactions": 90})
             _, plan = _plan(td)
             self.assertEqual(plan["groups"]["insider_transactions"]["action"],
-                             "reuse")
+                             "refetch")
+
+    def test_planner_reuse_always_passes_gate_worst_case(self):
+        # CROSS-CHECK: any planner-authorized reuse must pass qc.check_staleness
+        # even in the worst time-of-day case (file retrieved at 00:00, new as_of
+        # at 23:59 — maximal fractional age for a given integer date age).
+        from scripts import qc as qc_mod
+        for group, window in sorted(qc_mod._STALENESS_WINDOWS.items()):
+            age = window - 1  # deepest age the strict planner rule can authorize
+            with tempfile.TemporaryDirectory() as tmp:
+                td, _ = _make_workspace(tmp, AS_OF, ages={group: age})
+                _, plan = _plan(td)
+                if plan["groups"].get(group, {}).get("action") != "reuse":
+                    continue  # always-refetch groups etc.
+                retrieved = plan["groups"][group]  # planner said reuse at window-1
+                import datetime as _dt
+                as_of_dt = _dt.date.fromisoformat(AS_OF)
+                snapshot = {"meta": {
+                    "as_of_utc": AS_OF + "T23:59:00Z",
+                    "sources": [{"field_group": group,
+                                 "endpoint_or_url": "x",
+                                 "retrieved_utc": (as_of_dt - _dt.timedelta(days=age)).isoformat() + "T00:00:00Z",
+                                 "covers": []}],
+                }}
+                res = qc_mod.check_staleness(snapshot)
+                self.assertIsNot(res["passed"], False,
+                                 f"{group}: planner reuse at {age}d failed the gate: {res['detail']}")
 
     def test_short_interest_boundary(self):
         # short_interest window 14d.
         with tempfile.TemporaryDirectory() as tmp:
-            td, _ = _make_workspace(tmp, AS_OF, ages={"short_interest": 14})
+            td, _ = _make_workspace(tmp, AS_OF, ages={"short_interest": 13})
             _, plan = _plan(td)
             self.assertEqual(plan["groups"]["short_interest"]["action"], "reuse")
         with tempfile.TemporaryDirectory() as tmp:
@@ -228,7 +256,7 @@ class WindowBoundaryTests(unittest.TestCase):
 
     def test_treasury_yield_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
-            td, _ = _make_workspace(tmp, AS_OF, ages={"treasury_yield": 7})
+            td, _ = _make_workspace(tmp, AS_OF, ages={"treasury_yield": 6})
             _, plan = _plan(td)
             self.assertEqual(plan["groups"]["treasury_yield"]["action"], "reuse")
         with tempfile.TemporaryDirectory() as tmp:
