@@ -85,7 +85,20 @@ INPUT_FIELDS = {
     "price.adv_dollar_3m",
     "fundamentals.net_cash_defined.net",
     "price.mktcap_computed",
+    # Confidence-gating inputs (short-history bug): the beta component is gated
+    # on the number of return-days behind the estimate, and the rv30 regime
+    # percentile on the number of ohlcv rows behind the percentile. They do not
+    # carry points of their own -- they can only zero a component and disclose
+    # why -- but they ARE scored inputs (they change the score), so single-mapping
+    # governance must see them here and nowhere else.
+    "benchmark.beta_n_days",
+    "technicals.ohlcv_rows",
 }
+
+# Minimum history for a component to be trusted (see the module docstring / the
+# real-world bug that motivated this: a beta of 3.61 from 100 unadjusted days).
+_MIN_BETA_N_DAYS = 150     # ~half a trading year of return-days for a stable beta
+_MIN_OHLCV_ROWS = 500      # ~2 trading years for a meaningful regime percentile
 
 
 def _fmt(x):
@@ -112,19 +125,36 @@ def _clean(x):
 # 1. Volatility state (max 25): rv percentile (20) + beta (5)
 # --------------------------------------------------------------------------- #
 
-def score_volatility(tech, beta) -> dict:
+def score_volatility(tech, beta, beta_n_days=None, ohlcv_rows=None) -> dict:
     """rv30_vs_10yr_pctile band (max 20) + benchmark beta band (max 5).
 
     pctile: <30 -> 20; 30-60 -> 14; 60-80 -> 8; >=80 -> 3; null -> 0 ("n/a").
     beta: <1.2 -> +5; 1.2-1.8 -> +3; >1.8 -> +0; null -> 0.
     Lower volatility and lower beta = better conditions = more points.
+
+    Short-history confidence gating (REAL-WORLD BUG: a beta of 3.61 computed from
+    100 unadjusted return-days was fed the score as a plain number). A component
+    is only trusted with enough history behind it:
+      - beta needs ``beta_n_days`` >= 150 return-days; below -> 0 with an explicit
+        "beta n/a (only {n} return-days; needs >=150 ...)" disclosure.
+      - the rv30 regime percentile needs ``ohlcv_rows`` >= 500 (~2yr); below -> 0
+        with "rv30 percentile n/a ({rows} rows; needs >=500 (~2yr) ...)".
+    Gating trips ONLY when the gating count is PRESENT and below threshold; when
+    it is None (not supplied) the gate does not fire, so the pure-branch tests
+    that never pass a count keep their existing behavior. A gated component is
+    NOT counted toward ``evaluable`` (an untrustworthy input is no input).
     """
     pctile = tech.get("rv30_vs_10yr_pctile")
 
     parts = []
     evaluable = 0
 
-    if pctile is not None:
+    pctile_gated = ohlcv_rows is not None and ohlcv_rows < _MIN_OHLCV_ROWS
+    if pctile is not None and pctile_gated:
+        pctile_pts = 0
+        parts.append(f"rv30 percentile n/a ({_fmt(ohlcv_rows)} rows; needs "
+                     f">={_MIN_OHLCV_ROWS} (~2yr) for a regime percentile)")
+    elif pctile is not None:
         evaluable += 1
         if pctile < 30:
             pctile_pts = 20
@@ -139,7 +169,12 @@ def score_volatility(tech, beta) -> dict:
         pctile_pts = 0
         parts.append("rv30_vs_10yr_pctile: n/a (+0)")
 
-    if beta is not None:
+    beta_gated = beta_n_days is not None and beta_n_days < _MIN_BETA_N_DAYS
+    if beta is not None and beta_gated:
+        beta_pts = 0
+        parts.append(f"beta n/a (only {_fmt(beta_n_days)} return-days; needs "
+                     f">={_MIN_BETA_N_DAYS} for a stable estimate)")
+    elif beta is not None:
         evaluable += 1
         if beta < 1.2:
             beta_pts = 5
@@ -159,7 +194,8 @@ def score_volatility(tech, beta) -> dict:
         "max": 25,
         "arithmetic": "; ".join(parts),
         "inputs": {"pctile_points": pctile_pts, "beta_points": beta_pts,
-                   "rv30_vs_10yr_pctile": pctile, "beta": beta},
+                   "rv30_vs_10yr_pctile": pctile, "beta": beta,
+                   "beta_n_days": beta_n_days, "ohlcv_rows": ohlcv_rows},
         "evaluable": evaluable > 0,
     }
 
@@ -455,15 +491,20 @@ def build_vol_profile(tech, bench) -> dict:
 # Composite scoring + renormalization (identical pattern to score_technical)
 # --------------------------------------------------------------------------- #
 
-def score(tech, beta, ladder, last, adv, net, mktcap) -> dict:
+def score(tech, beta, ladder, last, adv, net, mktcap,
+          beta_n_days=None, ohlcv_rows=None) -> dict:
     """Assemble the four subscores and the (possibly renormalized) 0-100 score.
 
     A dimension whose ``evaluable`` is False (all its scored inputs null) is
     EXCLUDED from the max total and the score is rescaled to 0-100 over the
     remaining max, with ``renormalized: true`` recorded.
+
+    ``beta_n_days``/``ohlcv_rows`` gate the volatility-state components on
+    sufficient history (see score_volatility).
     """
     subs = [
-        score_volatility(tech, beta),
+        score_volatility(tech, beta, beta_n_days=beta_n_days,
+                         ohlcv_rows=ohlcv_rows),
         score_drawdown(tech),
         score_margin(tech, ladder, last),
         score_liquidity(adv, net, mktcap),
@@ -530,12 +571,15 @@ def build_module(snapshot, ladder, stress_pct, top_risk) -> dict:
 
     last = price.get("last")
     beta = bench.get("beta")
+    beta_n_days = bench.get("beta_n_days")
+    ohlcv_rows = tech.get("ohlcv_rows")
     adv = price.get("adv_dollar_3m")
     mktcap = price.get("mktcap_computed")
     net_cash = fund.get("net_cash_defined") or {}
     net = net_cash.get("net") if isinstance(net_cash, dict) else None
 
-    scored = score(tech, beta, ladder, last, adv, net, mktcap)
+    scored = score(tech, beta, ladder, last, adv, net, mktcap,
+                   beta_n_days=beta_n_days, ohlcv_rows=ohlcv_rows)
 
     vf = valuation_floor(val.get("pe_5yr_median"),
                          fund.get("eps_ntm_consensus"))

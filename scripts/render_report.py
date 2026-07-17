@@ -13,11 +13,16 @@ Two modes:
 - FULL (default): requires snapshot + module_{technical,risk,sentiment,fundamental,
   composite,tradeplan,options}.json. Any missing file -> exit 2 naming it
   (renormalized absences INSIDE modules are fine; the files must exist). Writes
-  ``<bundle>/<TICKER>_Trade_Decision_<date>.md``.
+  ``<TICKER>_Trade_Report_<date>.md``.
 - DELTA (``--delta --previous <old_bundle>``): both bundles must have
   module_composite (+ whatever else exists). Writes
-  ``<bundle>/<TICKER>_Delta_Report_<date>.md`` with composite/EV/level/structure
+  ``<TICKER>_Delta_Report_<date>.md`` with composite/EV/level/structure
   deltas old-vs-new and a delta-interpretation slot.
+
+Default output DIRECTORY (both modes): if the bundle dir's basename starts with
+``detail_reports`` (the new ``trading_desk_<T>/detail_reports_<date>/`` layout),
+the report is written to the bundle's PARENT dir; otherwise it is written inside
+the bundle (legacy layout). ``--out`` overrides the path entirely.
 
 stdlib-only; >=3.10 guard. The page/table builders are pure over parsed inputs;
 the CLI is thin I/O.
@@ -700,7 +705,7 @@ def build_full_report(bundle_docs):
                         bundle_docs["module_options"],
                         bundle_docs["module_tradeplan"], bundle_docs)
 
-    title = f"# {ticker} — Trade Decision Report ({as_of_date})"
+    title = f"# {ticker} — Trade Report ({as_of_date})"
     return "\n\n".join([title, page1, page2, page3]) + "\n"
 
 
@@ -864,12 +869,27 @@ def _require_full_modules(bundle):
     return None
 
 
+def _output_dir(bundle):
+    """The directory a default-named report is written to.
+
+    New layout ``trading_desk_<T>/detail_reports_<date>/``: when the bundle dir's
+    basename starts with ``detail_reports`` the report is a sibling of the bundle,
+    so it lands in the bundle's PARENT directory (next to the data folder, not
+    buried inside it). Legacy bundle names keep the report inside the bundle. An
+    explicit ``--out`` bypasses this entirely (handled by the caller).
+    """
+    base = os.path.basename(os.path.normpath(bundle))
+    if base.startswith("detail_reports"):
+        return os.path.dirname(os.path.normpath(bundle))
+    return bundle
+
+
 def _default_out(bundle, snapshot, delta=False):
     meta = snapshot.get("meta", {}) or {}
     ticker = meta.get("ticker", "UNKNOWN")
     date = (meta.get("as_of_utc", "") or "")[:10] or "undated"
-    kind = "Delta_Report" if delta else "Trade_Decision"
-    return os.path.join(bundle, f"{ticker}_{kind}_{date}.md")
+    kind = "Delta_Report" if delta else "Trade_Report"
+    return os.path.join(_output_dir(bundle), f"{ticker}_{kind}_{date}.md")
 
 
 def main(argv=None):

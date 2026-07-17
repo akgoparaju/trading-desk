@@ -63,6 +63,7 @@ COVERS = {
     "treasury_yield": ["macro"],
     "web_spot_check": ["price"],
     "short_interest": ["sentiment"],
+    "web_fundamentals": ["fundamentals", "valuation"],
 }
 
 # Trading-day windows.
@@ -113,6 +114,24 @@ def load_raw(path):
     return _unwrap_all(obj)
 
 
+def load_daily_raw(path):
+    """Load a daily-series file that may be AV JSON or a bare stooq CSV.
+
+    Tries JSON first (AV shape, or a {"result": csv} envelope). If the file is not
+    JSON (a bare .csv/.txt stooq export), falls back to reading it as text so
+    parse_daily_rows can take the CSV path. None only if the file is unreadable.
+    """
+    try:
+        with open(path, "r") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    try:
+        return _unwrap_all(json.loads(text))
+    except ValueError:
+        return text  # bare CSV (or other non-JSON text); CSV detector handles it
+
+
 _NULLISH = {"none", "-", "", "null", "n/a", "nan"}
 
 
@@ -159,13 +178,86 @@ def _mean(seq):
 # Raw-shape parsers
 # --------------------------------------------------------------------------- #
 
+# Disclosure label carried in technicals.series_source when the daily series was
+# parsed from a stooq CSV export (close used as adjusted_close -- stooq closes are
+# already split-adjusted, so the label discloses the convention explicitly).
+SERIES_SOURCE_STOOQ = "stooq_csv_close_as_adjusted"
+
+
+def _extract_daily_csv_text(payload):
+    """Return the stooq-CSV text if ``payload`` is one, else None.
+
+    Accepts a bare CSV string OR a {"result": "<csv>"} CSV-in-JSON envelope (the
+    same envelope other CSV-bearing AV MCP responses use). Detection is by the
+    header shape: the first non-empty line must start with ``Date,Open`` (case-
+    insensitive). An AV JSON dict (which carries "Time Series (Daily)") is NOT a
+    CSV and returns None so the JSON path is taken.
+    """
+    text = None
+    if isinstance(payload, str):
+        text = payload
+    elif isinstance(payload, dict) and isinstance(payload.get("result"), str):
+        text = payload["result"]
+    if text is None:
+        return None
+    stripped = text.lstrip("﻿ \t\r\n")
+    if stripped[:9].lower().startswith("date,open"):
+        return text
+    return None
+
+
+def _parse_stooq_csv_rows(csv_text):
+    """Parse a stooq daily CSV into ASCENDING rows (adjusted_close == close).
+
+    Header: ``Date,Open,High,Low,Close,Volume``. stooq exports are already
+    ascending, but we sort defensively. Rows with an unparseable/absent date are
+    skipped. Raises BuildError if no valid row is produced.
+    """
+    reader = csv.DictReader(io.StringIO(csv_text))
+    # Normalize header keys case-insensitively (stooq uses TitleCase).
+    rows = []
+    for raw in reader:
+        row = {(k or "").strip().lower(): v for k, v in raw.items()}
+        d = (row.get("date") or "").strip()
+        if not d:
+            continue
+        close = num(row.get("close"))
+        rows.append({
+            "date": d,
+            "open": num(row.get("open")),
+            "high": num(row.get("high")),
+            "low": num(row.get("low")),
+            "close": close,
+            "adjusted_close": close,  # stooq close IS split-adjusted
+            "volume": num(row.get("volume")),
+        })
+    if not rows:
+        raise BuildError("stooq CSV daily series parsed to zero rows")
+    rows.sort(key=lambda r: r["date"])  # ascending
+    return rows
+
+
+def is_stooq_csv_daily(payload):
+    """True if ``payload`` is a stooq-CSV daily series (bare or {"result": csv})."""
+    return _extract_daily_csv_text(payload) is not None
+
+
 def parse_daily_rows(payload):
-    """Parse TIME_SERIES_DAILY_ADJUSTED into ASCENDING (oldest-first) rows.
+    """Parse a daily series into ASCENDING (oldest-first) standard rows.
+
+    Two accepted shapes:
+      - AV JSON: ``{"Time Series (Daily)": {...}}`` (NEWEST-first keys) with the
+        adjusted-close column -> parsed as before.
+      - stooq CSV: a bare CSV string or a {"result": "<csv>"} envelope whose
+        first line is ``Date,Open,...`` -> parsed with adjusted_close == close.
 
     Returns a list of dicts with keys date/open/high/low/close/adjusted_close/
-    volume. Raw keys are NEWEST-first, so we sort ascending by date. Raises
-    BuildError if the time-series block is absent/garbage.
+    volume. Raises BuildError if neither shape yields rows.
     """
+    csv_text = _extract_daily_csv_text(payload)
+    if csv_text is not None:
+        return _parse_stooq_csv_rows(csv_text)
+
     if not isinstance(payload, dict):
         raise BuildError("daily series is not a JSON object")
     ts = payload.get("Time Series (Daily)")
@@ -252,8 +344,14 @@ def _rolling_rv30_series(adj):
     return out
 
 
-def build_technicals(rows):
-    """Technicals block from adjusted-close + volume series (oldest-first)."""
+def build_technicals(rows, series_source=None):
+    """Technicals block from adjusted-close + volume series (oldest-first).
+
+    ``series_source`` (optional) discloses how the series was obtained. When the
+    daily series came from a stooq CSV export (close used as adjusted_close) the
+    caller passes ``SERIES_SOURCE_STOOQ`` and it is echoed into the block; for the
+    default AV path it is None and the key is omitted (unchanged shape).
+    """
     adj = [r["adjusted_close"] for r in rows if r["adjusted_close"] is not None]
     vols = [r["volume"] for r in rows if r["volume"] is not None]
 
@@ -269,7 +367,7 @@ def build_technicals(rows):
 
     ten_yr = adj[-_TEN_YR_ROWS:]
 
-    return {
+    block = {
         "ma50": indicators.sma(adj, 50),
         "ma200": indicators.sma(adj, 200),
         "ma50_slope_20d": indicators.ma_slope(adj, 50, 20),
@@ -296,6 +394,9 @@ def build_technicals(rows):
         "ohlcv_rows": len(rows),
         "last_ohlcv_date": rows[-1]["date"] if rows else None,
     }
+    if series_source:
+        block["series_source"] = series_source
+    return block
 
 
 def build_benchmark(stock_rows, spy_rows):
@@ -424,7 +525,10 @@ def build_fundamentals(income, balance, cashflow, earnings, estimates,
         if parts:
             fcf_ttm = sum(parts)
 
-    net_cash = _build_net_cash(bal_q[0] if bal_q else {})
+    # Net cash is computable only from an actual balance sheet. With no balance
+    # quarters at all, leave it null so the web-fundamentals gap-fill can supply
+    # a cited figure (an all-zeros reconciliation from {} would be meaningless).
+    net_cash = _build_net_cash(bal_q[0]) if bal_q else None
     roe = num(overview.get("ReturnOnEquityTTM")) if isinstance(overview, dict) else None
 
     return {
@@ -443,6 +547,42 @@ def build_fundamentals(income, balance, cashflow, earnings, estimates,
         "net_cash_defined": net_cash,
         "roe": roe,
     }
+
+
+# Fields the web_fundamentals transcription may supply, in disclosure order.
+# Each maps 1:1 to a fundamentals-block key; a field is web-filled ONLY when the
+# statement-derived path left it null (statement data always wins).
+_WEB_FUND_FIELDS = (
+    "rev_ttm", "rev_growth_latest_q", "gm_ttm", "om_ttm", "nm_ttm",
+    "eps_ttm", "eps_ntm_consensus", "fcf_ttm", "net_cash_defined", "roe",
+)
+
+
+def apply_web_fundamentals(fundamentals, web):
+    """Gap-fill ``fundamentals`` from a web_fundamentals transcription in place.
+
+    Statement-derived data wins: a field is filled from ``web`` ONLY when its
+    current value is null (the statement path could not compute it). Every filled
+    field is appended to ``fundamentals['web_transcribed_fields']`` (disclosure).
+    Always establishes the ``web_transcribed_fields`` array (empty if nothing was
+    filled or ``web`` is absent). Returns the fundamentals dict.
+    """
+    filled = []
+    if isinstance(web, dict):
+        for field in _WEB_FUND_FIELDS:
+            if fundamentals.get(field) is not None:
+                continue  # statement value present -> keep it
+            if field not in web or web.get(field) is None:
+                continue  # web has nothing to offer here
+            value = web[field]
+            if field != "net_cash_defined":
+                value = num(value)
+                if value is None:
+                    continue
+            fundamentals[field] = value
+            filled.append(field)
+    fundamentals["web_transcribed_fields"] = filled
+    return fundamentals
 
 
 def _build_net_cash(bal):
@@ -860,15 +1000,29 @@ def build_snapshot(bundle, ticker):
             return None
         return load_raw(path)
 
+    # Daily/spy may be AV JSON or bare stooq CSV; load with the CSV-aware loader.
+    def load_daily_key(key):
+        entry = files.get(key)
+        if not entry:
+            return None
+        path = _resolve(bundle, entry["path"])
+        if not os.path.exists(path):
+            return None
+        return load_daily_raw(path)
+
     quote = load_key("global_quote")
     overview = load_key("overview")
-    daily = load_key("daily_adjusted")
-    spy = load_key("spy_daily_adjusted")
+    daily = load_daily_key("daily_adjusted")
+    spy = load_daily_key("spy_daily_adjusted")
 
     for name, obj in (("global_quote", quote), ("overview", overview),
                       ("daily_adjusted", daily), ("spy_daily_adjusted", spy)):
         if obj is None:
             raise BuildError(f"REQUIRED file {name} present but unparseable")
+
+    # Disclose the daily series provenance: a stooq CSV export uses close as
+    # adjusted_close (already split-adjusted); the AV path carries no label.
+    series_source = SERIES_SOURCE_STOOQ if is_stooq_csv_daily(daily) else None
 
     try:
         rows = parse_daily_rows(daily)
@@ -891,6 +1045,7 @@ def build_snapshot(bundle, ticker):
     treasury = load_key("treasury_yield")
     web_spot = load_key("web_spot_check")
     short_interest = load_key("short_interest")
+    web_fundamentals = load_key("web_fundamentals")
 
     # iv_history is a top-level manifest path, not under files{}.
     iv_history = None
@@ -902,10 +1057,13 @@ def build_snapshot(bundle, ticker):
 
     # -- assemble blocks ---------------------------------------------------
     price = build_price(quote, overview, rows, web_spot)
-    technicals = build_technicals(rows)
+    technicals = build_technicals(rows, series_source=series_source)
     benchmark = build_benchmark(rows, spy_rows)
     fundamentals = build_fundamentals(income, balance, cashflow, earnings,
                                       estimates, overview, as_of_date)
+    # Gap-fill from cited web sources ONLY where the statement path found nothing;
+    # this runs before valuation so a web-supplied eps_ntm/fcf feeds the multiples.
+    apply_web_fundamentals(fundamentals, web_fundamentals)
     valuation = build_valuation(price, fundamentals, overview, rows)
     events = build_events(earnings_calendar, overview)
     next_earnings_date = events["next_earnings"]["date"] if events["next_earnings"] else None
@@ -938,7 +1096,12 @@ def build_snapshot(bundle, ticker):
     if options is None and "options_chain" in present_keys:
         present_keys.remove("options_chain")
 
-    optional_keys = [k for k in COVERS if k not in REQUIRED]
+    # web_fundamentals is a fallback-only source (absent in the normal AV path);
+    # its presence/use is disclosed via fundamentals.web_transcribed_fields, so we
+    # do NOT report its absence as a "missing" expected source (that would be noise
+    # on every standard-mode build).
+    optional_keys = [k for k in COVERS
+                     if k not in REQUIRED and k != "web_fundamentals"]
     missing = [k for k in optional_keys if k not in present_keys]
 
     snapshot = {
@@ -947,6 +1110,7 @@ def build_snapshot(bundle, ticker):
             "as_of_utc": as_of_utc,
             "schema_version": SCHEMA_VERSION,
             "missing": missing,
+            "data_mode": manifest.get("data_mode", "alpha_vantage"),
             "api_tier_notes": manifest.get("api_tier_notes", []),
             "sources": build_sources(files, present_keys),
             "qc": {"passed": None, "checks": [], "waivers": []},

@@ -7,7 +7,9 @@ description: Render the final 3-page trade decision report (or a delta report) f
 
 Turn a completed bundle into the final **3-page trade decision report**. **Every number is script-written** by `scripts/render_report.py` from the module JSONs — you never type a level, a strike, an EV, a score, or a percent into the report. Your only job is to fill the prose slots the script leaves for you, then run the blocking QC gate until it is green.
 
-This is the **L4 output layer**. It consumes the entire bundle (snapshot + `module_{technical,risk,sentiment,fundamental,composite,tradeplan,options}.json`) and emits `<TICKER>_Trade_Decision_<date>.md`.
+This is the **L4 output layer**. It consumes the entire bundle (snapshot + `module_{technical,risk,sentiment,fundamental,composite,tradeplan,options}.json`) and emits `<TICKER>_Trade_Report_<date>.md`.
+
+**Output location:** if the bundle directory's basename starts with `detail_reports` (the `trading_desk_<T>/detail_reports_<date>/` layout), the report is written to the bundle's **parent** directory (a sibling of the data folder); otherwise it is written **inside** the bundle (legacy layout). The exact path is always printed to stdout — use that path for QC. `--out` overrides.
 
 **Why this architecture (kills number leakage BY CONSTRUCTION):** the renderer writes the whole skeleton — every table, header, and figure — from the bundle. LLM prose goes ONLY into `<!-- SLOT:... -->` marks. `report_qc.py` then extracts every numeric token from the finished document and checks it against the bundle's numeric values. A number you invent in a slot has no bundle source and **fails the gate**.
 
@@ -33,7 +35,7 @@ A **full report requires all seven module files plus a snapshot**: `module_techn
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_report.py --bundle ./td_bundle_<TICKER>_<YYYY-MM-DD>
 ```
 
-The script writes `<bundle>/<TICKER>_Trade_Decision_<date>.md` (path printed to stdout). It contains three pages, all tables and numbers already filled from the bundle, with empty `<!-- SLOT:name -->` marks for your prose:
+The script writes `<TICKER>_Trade_Report_<date>.md` (exact path — bundle or parent per the output-location rule above — printed to stdout). It contains three pages, all tables and numbers already filled from the bundle, with empty `<!-- SLOT:name -->` marks for your prose:
 
 - **Page 1 — Decision:** header block, the call (`grade — action`, composite score), composite table (+ sensitivity), trade-plan table (entries/exits/invalidation/size/hedge/expression), event-playbook skeleton.
 - **Page 2 — Evidence:** per dimension a scripted score headline + a mini-table (ladder / subscores / positioning / downside map / EV scenarios).
@@ -64,7 +66,7 @@ Reuse the bundle's `brief_<dim>.md` files (they already cite only in-bundle numb
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/report_qc.py --bundle ./td_bundle_<TICKER>_<YYYY-MM-DD> \
-  --report ./td_bundle_<TICKER>_<YYYY-MM-DD>/<TICKER>_Trade_Decision_<date>.md
+  --report <path printed by render_report.py, e.g. ./<TICKER>_Trade_Report_<date>.md>
 ```
 
 The gate prints a check table and exits 0 (pass) or 1 (fail). The checks: **number_provenance** (every report number traces to the bundle), composite_arithmetic, ev_consistency, invalidation_both_legs, sizing_within_cap, strikes_in_chain, pop_method_labeled, expression_consistency, footer_integrity, word_cap (≤2100), **no_empty_slots**.

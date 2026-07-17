@@ -492,7 +492,7 @@ def _find_report(bundle, delta=False):
     for name in os.listdir(bundle):
         if delta and "Delta_Report" in name and name.endswith(".md"):
             return os.path.join(bundle, name)
-        if not delta and "Trade_Decision" in name and name.endswith(".md"):
+        if not delta and "Trade_Report" in name and name.endswith(".md"):
             return os.path.join(bundle, name)
     return None
 
@@ -711,6 +711,127 @@ class TestDeltaMode(unittest.TestCase):
             # full-report-only checks must NOT run for a delta report.
             self.assertNotIn("composite_arithmetic", out)
             self.assertNotIn("word_cap", out)
+
+
+# --------------------------------------------------------------------------- #
+# Change 3: Trade Report naming + H1 + trading_desk folder layout.
+# --------------------------------------------------------------------------- #
+
+class TestTradeReportNaming(unittest.TestCase):
+    """Full-mode default output is <TICKER>_Trade_Report_<date>.md with an H1
+    that says 'Trade Report'; the delta name/H1 are unchanged."""
+
+    def test_full_report_filename_is_trade_report(self):
+        with tempfile.TemporaryDirectory() as d:
+            _mk_bundle(d)
+            rc, out, err = _render(d)
+            self.assertEqual(rc, 0, err)
+            names = [n for n in os.listdir(d) if n.endswith(".md")]
+            self.assertEqual(len(names), 1, names)
+            self.assertEqual(names[0], "MU_Trade_Report_2026-07-16.md")
+            self.assertNotIn("Trade_Decision", names[0])
+
+    def test_full_report_h1_says_trade_report(self):
+        with tempfile.TemporaryDirectory() as d:
+            _mk_bundle(d)
+            _render(d)
+            text = _read_file(_find_report(d))
+            self.assertIn("# MU — Trade Report (2026-07-16)", text)
+            self.assertNotIn("Trade Decision Report", text)
+
+    def test_default_out_helper_names(self):
+        # Pure-function contract for _default_out.
+        snap = _snapshot_doc()
+        full = rr._default_out("/bundle", snap, delta=False)
+        delta = rr._default_out("/bundle", snap, delta=True)
+        self.assertTrue(full.endswith("MU_Trade_Report_2026-07-16.md"))
+        self.assertTrue(delta.endswith("MU_Delta_Report_2026-07-16.md"))
+
+    def test_delta_name_and_h1_unchanged(self):
+        with tempfile.TemporaryDirectory() as old, tempfile.TemporaryDirectory() as new:
+            _mk_bundle(old)
+            _mk_bundle(new)
+            rc, out, err = _render(new, ["--delta", "--previous", old])
+            self.assertEqual(rc, 0, err)
+            report = _find_report(new, delta=True)
+            self.assertIsNotNone(report)
+            self.assertIn("Delta_Report", os.path.basename(report))
+            text = _read_file(report)
+            self.assertIn("# MU — Delta Report (2026-07-16)", text)
+
+
+class TestDetailReportsFolderLayout(unittest.TestCase):
+    """New layout trading_desk_<T>/detail_reports_<date>/: when the bundle dir's
+    basename starts with 'detail_reports' the report lands in the PARENT dir;
+    legacy bundle names keep the report inside the bundle. --out still overrides."""
+
+    def test_detail_reports_bundle_writes_to_parent(self):
+        with tempfile.TemporaryDirectory() as parent:
+            bundle = os.path.join(parent, "detail_reports_2026-07-17")
+            os.makedirs(bundle)
+            _mk_bundle(bundle)
+            rc, out, err = _render(bundle)
+            self.assertEqual(rc, 0, err)
+            # report lands in the PARENT, not the bundle.
+            parent_reports = [n for n in os.listdir(parent)
+                              if n.endswith(".md")]
+            bundle_reports = [n for n in os.listdir(bundle)
+                              if n.endswith(".md")]
+            self.assertEqual(parent_reports, ["MU_Trade_Report_2026-07-16.md"])
+            self.assertEqual(bundle_reports, [])
+            self.assertIn(os.path.join(parent, "MU_Trade_Report_2026-07-16.md"),
+                          out)
+
+    def test_legacy_bundle_writes_inside_bundle(self):
+        with tempfile.TemporaryDirectory() as parent:
+            bundle = os.path.join(parent, "MU_2026-07-16")
+            os.makedirs(bundle)
+            _mk_bundle(bundle)
+            rc, out, err = _render(bundle)
+            self.assertEqual(rc, 0, err)
+            bundle_reports = [n for n in os.listdir(bundle)
+                              if n.endswith(".md")]
+            self.assertEqual(bundle_reports, ["MU_Trade_Report_2026-07-16.md"])
+
+    def test_out_override_beats_detail_reports_rule(self):
+        with tempfile.TemporaryDirectory() as parent:
+            bundle = os.path.join(parent, "detail_reports_2026-07-17")
+            os.makedirs(bundle)
+            _mk_bundle(bundle)
+            custom = os.path.join(parent, "custom_name.md")
+            rc, out, err = _render(bundle, ["--out", custom])
+            self.assertEqual(rc, 0, err)
+            self.assertTrue(os.path.isfile(custom))
+
+    def test_detail_reports_delta_writes_to_parent(self):
+        with tempfile.TemporaryDirectory() as p_old, \
+                tempfile.TemporaryDirectory() as p_new:
+            old = os.path.join(p_old, "detail_reports_2026-07-10")
+            new = os.path.join(p_new, "detail_reports_2026-07-17")
+            os.makedirs(old)
+            os.makedirs(new)
+            _mk_bundle(old)
+            _mk_bundle(new)
+            rc, out, err = _render(new, ["--delta", "--previous", old])
+            self.assertEqual(rc, 0, err)
+            parent_reports = [n for n in os.listdir(p_new)
+                              if "Delta_Report" in n and n.endswith(".md")]
+            self.assertEqual(parent_reports, ["MU_Delta_Report_2026-07-16.md"])
+
+    def test_report_qc_passes_on_detail_reports_layout(self):
+        # A rendered + slot-filled report under the new layout still passes QC
+        # (delta detection by filename intact; page headers/H1 allowance intact).
+        with tempfile.TemporaryDirectory() as parent:
+            bundle = os.path.join(parent, "detail_reports_2026-07-17")
+            os.makedirs(bundle)
+            _mk_bundle(bundle)
+            _render(bundle)
+            report = os.path.join(parent, "MU_Trade_Report_2026-07-16.md")
+            self.assertTrue(os.path.isfile(report))
+            _fill_slots(report)
+            rc, out, err = _qc(bundle, report)
+            self.assertEqual(rc, 0, out + err)
+            self.assertIn("PASS", out)
 
 
 # --------------------------------------------------------------------------- #

@@ -80,6 +80,19 @@ def _daily_json(rows):
     return {"Meta Data": {"2. Symbol": "MU"}, "Time Series (Daily)": ts}
 
 
+def _stooq_csv(rows):
+    """Build a stooq daily-export CSV string (header ``Date,Open,High,Low,Close,
+    Volume``, ASCENDING date order like stooq's own export). No adjusted column --
+    stooq closes are already split-adjusted, which the builder discloses via the
+    ``series_source`` label. Rows are already oldest-first from _walk."""
+    lines = ["Date,Open,High,Low,Close,Volume"]
+    for r in rows:
+        vol = int(r["volume"])
+        lines.append(f"{r['date']},{r['open']},{r['high']},{r['low']},"
+                     f"{r['close']},{vol}")
+    return "\r\n".join(lines) + "\r\n"
+
+
 class BundleBuilder:
     """Fabricates a full raw-response bundle and manifest on disk."""
 
@@ -103,8 +116,21 @@ class BundleBuilder:
             json.dump(obj, fh)
         return os.path.join("raw", name)
 
+    def _write_text(self, name, text):
+        """Write a bare (non-JSON) text file, e.g. a stooq CSV export."""
+        path = os.path.join(self.raw, name)
+        with open(path, "w") as fh:
+            fh.write(text)
+        return os.path.join("raw", name)
+
     def _add(self, key, name, obj, endpoint):
         rel = self._write(name, obj)
+        self.files[key] = {
+            "path": rel, "endpoint_or_url": endpoint, "retrieved_utc": AS_OF,
+        }
+
+    def _add_rel(self, key, rel, endpoint):
+        """Register an already-written file (by relative path) in the manifest."""
         self.files[key] = {
             "path": rel, "endpoint_or_url": endpoint, "retrieved_utc": AS_OF,
         }
@@ -154,6 +180,31 @@ class BundleBuilder:
     def add_spy(self):
         self._add("spy_daily_adjusted", "spy_daily.json", _daily_json(self.spy_rows),
                   "TIME_SERIES_DAILY_ADJUSTED")
+
+    # -- stooq CSV daily variants (no-Alpha-Vantage fallback) ---------------
+    def add_daily_csv_bare(self):
+        """Stock daily series as a BARE .csv stooq export file."""
+        rel = self._write_text("daily.csv", _stooq_csv(self.stock_rows))
+        self._add_rel("daily_adjusted", rel, "stooq CSV")
+
+    def add_daily_csv_wrapped(self):
+        """Stock daily series as {"result": "<csv>"} (CSV-in-JSON envelope)."""
+        self._add("daily_adjusted", "daily_csv.json",
+                  {"result": _stooq_csv(self.stock_rows)}, "stooq CSV")
+
+    def add_spy_csv_bare(self):
+        rel = self._write_text("spy_daily.csv", _stooq_csv(self.spy_rows))
+        self._add_rel("spy_daily_adjusted", rel, "stooq CSV")
+
+    def add_spy_csv_wrapped(self):
+        self._add("spy_daily_adjusted", "spy_daily_csv.json",
+                  {"result": _stooq_csv(self.spy_rows)}, "stooq CSV")
+
+    # -- web-transcribed fundamentals (no-Alpha-Vantage fallback) -----------
+    def add_web_fundamentals(self, payload):
+        """Register a web_fundamentals transcription file with the given payload."""
+        self._add("web_fundamentals", "web_fundamentals.json", payload,
+                  "web (cited)")
 
     # -- fundamentals (5 quarterly reports, known sums) ---------------------
     def add_income(self):
@@ -338,11 +389,13 @@ class BundleBuilder:
             json.dump({"ticker": self.ticker, "samples": samples}, fh)
         self.iv_history_rel = f"iv_history_{self.ticker}.json"
 
-    def write_manifest(self):
+    def write_manifest(self, data_mode=None):
         m = {"ticker": self.ticker, "as_of_utc": AS_OF,
              "api_tier_notes": ["premium 75rpm"], "files": self.files}
         if getattr(self, "iv_history_rel", None):
             m["iv_history_path"] = self.iv_history_rel
+        if data_mode is not None:
+            m["data_mode"] = data_mode
         with open(os.path.join(self.root, "manifest.json"), "w") as fh:
             json.dump(m, fh)
 
@@ -533,6 +586,238 @@ class TestBuildSnapshotFull(unittest.TestCase):
         self.assertIsNone(self.snap["sentiment"]["news_sentiment_summary"])
         self.assertIsNone(self.snap["sentiment"]["inst_flow_notes"])
         self.assertEqual(self.snap["events"]["catalysts"], [])
+
+    def test_av_json_path_has_no_series_source_label(self):
+        # The AV-JSON daily path is the default: no stooq disclosure label.
+        self.assertNotIn("series_source", self.snap["technicals"])
+
+    def test_data_mode_defaults_to_alpha_vantage(self):
+        # No data_mode in the manifest -> meta.data_mode defaults to alpha_vantage.
+        self.assertEqual(self.snap["meta"]["data_mode"], "alpha_vantage")
+
+    def test_no_web_transcribed_fields_when_statements_present(self):
+        # Statement-derived fundamentals with no web_fundamentals file ->
+        # the web_transcribed_fields disclosure array is empty.
+        self.assertEqual(self.snap["fundamentals"]["web_transcribed_fields"], [])
+
+
+# --------------------------------------------------------------------------- #
+# Change 1a: stooq-CSV daily series (no-Alpha-Vantage fallback).
+# --------------------------------------------------------------------------- #
+
+class TestStooqCsvDaily(unittest.TestCase):
+    """A stooq CSV daily export (bare .csv OR {"result": csv}) parses into the
+    standard row shape with adjusted_close == close, and the technicals block
+    discloses the convention via series_source. The AV-JSON path is unchanged."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _build(self, b):
+        b.write_manifest()
+        proc = _run_build(self.dir)
+        self.assertEqual(proc.returncode, 0, f"stdout={proc.stdout}\nstderr={proc.stderr}")
+        out = os.path.join(self.dir, f"snapshot_MU_{AS_OF_DATE}.json")
+        with open(out) as fh:
+            return json.load(fh)
+
+    def test_parse_daily_rows_from_bare_csv_ascending_adj_eq_close(self):
+        # Pure-function contract: bare CSV string -> ascending rows, adj == close.
+        from scripts import build_snapshot as bs
+        csv_text = _stooq_csv(self.b_rows())
+        rows = bs.parse_daily_rows(csv_text)
+        dates = [r["date"] for r in rows]
+        self.assertEqual(dates, sorted(dates))  # ascending
+        for r in rows:
+            self.assertIsNotNone(r["adjusted_close"])
+            self.assertEqual(r["adjusted_close"], r["close"])
+
+    def test_parse_daily_rows_from_result_wrapped_csv(self):
+        from scripts import build_snapshot as bs
+        wrapped = {"result": _stooq_csv(self.b_rows())}
+        rows = bs.parse_daily_rows(wrapped)
+        self.assertTrue(len(rows) > 0)
+        self.assertEqual(rows[0]["adjusted_close"], rows[0]["close"])
+
+    def b_rows(self):
+        return _walk(60, seed=7, start=100.0)
+
+    def test_bare_csv_bundle_sets_series_source_label(self):
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview()
+        b.add_daily_csv_bare(); b.add_spy_csv_bare()
+        b.add_income(); b.add_balance(); b.add_cashflow(); b.add_earnings()
+        snap = self._build(b)
+        self.assertEqual(snap["technicals"]["series_source"],
+                         "stooq_csv_close_as_adjusted")
+        # rows parsed and technicals computed from them.
+        self.assertEqual(snap["technicals"]["ohlcv_rows"], 320)
+        self.assertIsNotNone(snap["technicals"]["ma50"])
+
+    def test_result_wrapped_csv_bundle_sets_series_source_label(self):
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview()
+        b.add_daily_csv_wrapped(); b.add_spy_csv_wrapped()
+        b.add_income(); b.add_balance(); b.add_cashflow(); b.add_earnings()
+        snap = self._build(b)
+        self.assertEqual(snap["technicals"]["series_source"],
+                         "stooq_csv_close_as_adjusted")
+
+    def test_csv_daily_adjusted_close_equals_close_in_snapshot(self):
+        # rv/ma computed off adjusted_close; with adj == close the technicals
+        # match the AV path's math when the same walk feeds both shapes.
+        b_csv = BundleBuilder(self.dir)
+        b_csv.add_global_quote(); b_csv.add_overview()
+        b_csv.add_daily_csv_bare(); b_csv.add_spy_csv_bare()
+        b_csv.add_income(); b_csv.add_balance(); b_csv.add_cashflow(); b_csv.add_earnings()
+        snap_csv = self._build(b_csv)
+
+        d2 = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d2, True)
+        b_json = BundleBuilder(d2)
+        b_json.add_global_quote(); b_json.add_overview()
+        b_json.add_daily(); b_json.add_spy()
+        b_json.add_income(); b_json.add_balance(); b_json.add_cashflow(); b_json.add_earnings()
+        b_json.write_manifest()
+        proc = _run_build(d2)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(d2, f"snapshot_MU_{AS_OF_DATE}.json")) as fh:
+            snap_json = json.load(fh)
+        # AV adj == close in the fixture, so ma50 matches across shapes.
+        self.assertAlmostEqual(snap_csv["technicals"]["ma50"],
+                               snap_json["technicals"]["ma50"], places=6)
+        self.assertNotIn("series_source", snap_json["technicals"])
+
+
+# --------------------------------------------------------------------------- #
+# Change 1b: web-transcribed fundamentals (statement data wins; web fills gaps).
+# --------------------------------------------------------------------------- #
+
+def _web_fund_payload():
+    """A full web_fundamentals transcription with cited per-field sources."""
+    return {
+        "rev_ttm": 26000.0, "rev_growth_latest_q": 1.0, "gm_ttm": 0.5,
+        "om_ttm": 0.25, "nm_ttm": 0.15, "eps_ttm": 6.0,
+        "eps_ntm_consensus": 7.5, "fcf_ttm": 6800.0,
+        "net_cash_defined": {"cash_st": 9000.0, "lt_inv": 2000.0,
+                             "total_debt": 4000.0, "net": 7000.0},
+        "roe": 0.28,
+        "sources": {
+            "rev_ttm": "https://example.com/mu/revenue",
+            "eps_ttm": "https://example.com/mu/eps",
+            "fcf_ttm": "https://example.com/mu/fcf",
+            "net_cash_defined": "https://example.com/mu/balance",
+        },
+    }
+
+
+class TestWebFundamentals(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _build(self, b, data_mode=None):
+        b.write_manifest(data_mode=data_mode)
+        proc = _run_build(self.dir)
+        self.assertEqual(proc.returncode, 0, f"stdout={proc.stdout}\nstderr={proc.stderr}")
+        out = os.path.join(self.dir, f"snapshot_MU_{AS_OF_DATE}.json")
+        with open(out) as fh:
+            return json.load(fh)
+
+    def test_no_statements_web_fills_all_and_lists_them(self):
+        # No income/balance/cashflow/earnings; web_fundamentals fills the block.
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        b.add_web_fundamentals(_web_fund_payload())
+        snap = self._build(b, data_mode="web_fallback")
+        f = snap["fundamentals"]
+        self.assertAlmostEqual(f["rev_ttm"], 26000.0)
+        self.assertAlmostEqual(f["gm_ttm"], 0.5)
+        self.assertAlmostEqual(f["fcf_ttm"], 6800.0)
+        self.assertAlmostEqual(f["eps_ntm_consensus"], 7.5)
+        self.assertAlmostEqual(f["net_cash_defined"]["net"], 7000.0)
+        wtf = f["web_transcribed_fields"]
+        # Every field the statement path could not compute got web-filled.
+        for field in ("rev_ttm", "rev_growth_latest_q", "gm_ttm", "om_ttm",
+                      "nm_ttm", "fcf_ttm", "eps_ntm_consensus",
+                      "net_cash_defined"):
+            self.assertIn(field, wtf, f"{field} not disclosed as web-filled")
+        # eps_ttm and roe come from overview (statement-side, always present in
+        # this fixture), NOT web, so they must not be listed as web-transcribed.
+        self.assertNotIn("eps_ttm", wtf)
+        self.assertNotIn("roe", wtf)
+        self.assertAlmostEqual(f["roe"], 0.28)  # from overview
+        self.assertAlmostEqual(f["eps_ttm"], 6.0)  # from overview
+
+    def test_valuation_computes_from_web_filled_fundamentals(self):
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        b.add_web_fundamentals(_web_fund_payload())
+        snap = self._build(b, data_mode="web_fallback")
+        v = snap["valuation"]
+        # pe_fwd = last / eps_ntm(7.5); fcf_yield from web fcf_ttm.
+        self.assertAlmostEqual(v["pe_fwd"], snap["price"]["last"] / 7.5, places=4)
+        self.assertIsNotNone(v["fcf_yield"])
+
+    def test_statements_win_only_null_fields_web_filled(self):
+        # Statements present AND web_fundamentals present: statement values win;
+        # only fields the statement path returned null for get web-filled.
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        b.add_income(); b.add_balance(); b.add_cashflow(); b.add_earnings()
+        b.add_estimates()  # so eps_ntm_consensus IS statement-computed (7.5)
+        # web payload disagrees on rev_ttm (statement computes 26000 already) and
+        # supplies a roe the overview also has (0.28). Statement/overview win.
+        web = _web_fund_payload()
+        web["rev_ttm"] = 99999.0  # bogus; must be ignored (statement wins)
+        web["eps_ntm_consensus"] = 88888.0  # bogus; statement 7.5 wins
+        b.add_web_fundamentals(web)
+        snap = self._build(b, data_mode="av_free_degraded")
+        f = snap["fundamentals"]
+        # statement-computed rev_ttm wins over the web value.
+        self.assertAlmostEqual(f["rev_ttm"], 26000.0)
+        self.assertNotIn("rev_ttm", f["web_transcribed_fields"])
+        # eps_ntm_consensus: statement path already computes 7.5 from the FY row,
+        # so web must NOT fill it.
+        self.assertAlmostEqual(f["eps_ntm_consensus"], 7.5)
+        self.assertNotIn("eps_ntm_consensus", f["web_transcribed_fields"])
+
+    def test_web_fundamentals_source_appended_to_meta_sources(self):
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        b.add_web_fundamentals(_web_fund_payload())
+        snap = self._build(b, data_mode="web_fallback")
+        groups = {s["field_group"]: s for s in snap["meta"]["sources"]}
+        self.assertIn("web_fundamentals", groups)
+        self.assertEqual(sorted(groups["web_fundamentals"]["covers"]),
+                         ["fundamentals", "valuation"])
+
+
+# --------------------------------------------------------------------------- #
+# Change 1c: data_mode passthrough.
+# --------------------------------------------------------------------------- #
+
+class TestDataMode(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _build(self, data_mode):
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        b.add_income(); b.add_balance(); b.add_cashflow(); b.add_earnings()
+        b.write_manifest(data_mode=data_mode)
+        proc = _run_build(self.dir)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        out = os.path.join(self.dir, f"snapshot_MU_{AS_OF_DATE}.json")
+        with open(out) as fh:
+            return json.load(fh)
+
+    def test_explicit_data_mode_passes_through(self):
+        for mode in ("alpha_vantage", "av_free_degraded", "web_fallback"):
+            snap = self._build(mode)
+            self.assertEqual(snap["meta"]["data_mode"], mode)
 
 
 class TestOptionalMissing(unittest.TestCase):

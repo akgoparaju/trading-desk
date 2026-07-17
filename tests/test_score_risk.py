@@ -97,6 +97,75 @@ class TestVolatilityState(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# 1b. Short-history confidence gating (REAL-WORLD BUG: a beta of 3.61 computed
+# from 100 unadjusted days fed the score as a plain number). A beta needs
+# >=150 return-days for a stable estimate; an rv30 regime percentile needs
+# >=500 (~2yr) ohlcv rows to be a percentile at all. Below threshold the
+# component scores 0 with an explicit "n/a" arithmetic disclosure. When the
+# gating input is ABSENT (None) the gate does not trip -- the pure-function
+# branch tests that never pass n_days/rows keep their existing behavior.
+# --------------------------------------------------------------------------- #
+
+class TestShortHistoryGating(unittest.TestCase):
+    def test_beta_ndays_99_gates_component_to_0(self):
+        # 99 return-days < 150 -> beta component 0 regardless of the beta value.
+        sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=None), beta=1.0,
+                                  beta_n_days=99, ohlcv_rows=2520)
+        self.assertEqual(sub["inputs"]["beta_points"], 0)
+        self.assertIn("beta n/a", sub["arithmetic"])
+        self.assertIn("99", sub["arithmetic"])
+        self.assertIn("150", sub["arithmetic"])
+
+    def test_beta_ndays_200_bands_normally(self):
+        # 200 >= 150 -> normal banding; beta 1.0 -> +5.
+        sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=None), beta=1.0,
+                                  beta_n_days=200, ohlcv_rows=2520)
+        self.assertEqual(sub["inputs"]["beta_points"], 5)
+
+    def test_ohlcv_rows_100_gates_percentile_to_0(self):
+        # 100 rows < 500 -> percentile component 0 with "n/a".
+        sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=25.0), beta=None,
+                                  beta_n_days=250, ohlcv_rows=100)
+        self.assertEqual(sub["inputs"]["pctile_points"], 0)
+        self.assertIn("rv30 percentile n/a", sub["arithmetic"])
+        self.assertIn("100", sub["arithmetic"])
+        self.assertIn("500", sub["arithmetic"])
+
+    def test_ohlcv_rows_600_bands_normally(self):
+        # 600 >= 500 -> normal banding; pctile 25 -> 20.
+        sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=25.0), beta=None,
+                                  beta_n_days=250, ohlcv_rows=600)
+        self.assertEqual(sub["inputs"]["pctile_points"], 20)
+
+    def test_gate_at_exact_threshold_passes(self):
+        # boundaries are inclusive: 150 return-days and 500 rows both pass.
+        sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=25.0), beta=1.0,
+                                  beta_n_days=150, ohlcv_rows=500)
+        self.assertEqual(sub["inputs"]["beta_points"], 5)
+        self.assertEqual(sub["inputs"]["pctile_points"], 20)
+
+    def test_absent_gating_inputs_do_not_gate(self):
+        # No n_days/rows passed (the branch-test call shape) -> no gating.
+        sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=25.0), beta=1.0)
+        self.assertEqual(sub["inputs"]["beta_points"], 5)
+        self.assertEqual(sub["inputs"]["pctile_points"], 20)
+
+    def test_gated_beta_still_evaluable_via_other_component(self):
+        # A gated beta with a valid pctile still leaves the dimension evaluable.
+        sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=25.0), beta=1.0,
+                                  beta_n_days=99, ohlcv_rows=2520)
+        self.assertTrue(sub["evaluable"])
+        self.assertEqual(sub["inputs"]["pctile_points"], 20)
+        self.assertEqual(sub["inputs"]["beta_points"], 0)
+
+    def test_both_gated_and_no_other_inputs_not_evaluable(self):
+        # pctile null + gated beta -> nothing evaluable in the dimension.
+        sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=None), beta=1.0,
+                                  beta_n_days=99, ohlcv_rows=100)
+        self.assertFalse(sub["evaluable"])
+
+
+# --------------------------------------------------------------------------- #
 # 2. Drawdown profile (max 25): max_dd (12) + episodes (8) + spread proxy (5)
 # --------------------------------------------------------------------------- #
 
@@ -400,6 +469,9 @@ class TestInputFields(unittest.TestCase):
             "technicals.dd_episodes_30pct_10yr", "technicals.dist_from_ath_pct",
             "price.adv_dollar_3m", "fundamentals.net_cash_defined.net",
             "price.mktcap_computed",
+            # confidence-gating inputs (short-history bug): the beta component is
+            # gated on the return-day count, the rv-percentile on the ohlcv rows.
+            "benchmark.beta_n_days", "technicals.ohlcv_rows",
         })
 
     def test_shared_reference_fields_not_listed(self):

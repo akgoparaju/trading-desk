@@ -393,7 +393,8 @@ def _load_rows_and_contracts(bundle):
     if not daily_entry:
         raise build_snapshot.BuildError("manifest has no daily_adjusted file")
     daily_path = build_snapshot._resolve(bundle, daily_entry["path"])
-    daily = build_snapshot.load_raw(daily_path)
+    # CSV-aware: the daily series may be AV JSON or a bare stooq CSV export.
+    daily = build_snapshot.load_daily_raw(daily_path)
     rows = build_snapshot.parse_daily_rows(daily)
 
     contracts = None
