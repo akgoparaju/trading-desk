@@ -389,13 +389,15 @@ class BundleBuilder:
             json.dump({"ticker": self.ticker, "samples": samples}, fh)
         self.iv_history_rel = f"iv_history_{self.ticker}.json"
 
-    def write_manifest(self, data_mode=None):
+    def write_manifest(self, data_mode=None, data_source=None):
         m = {"ticker": self.ticker, "as_of_utc": AS_OF,
              "api_tier_notes": ["premium 75rpm"], "files": self.files}
         if getattr(self, "iv_history_rel", None):
             m["iv_history_path"] = self.iv_history_rel
         if data_mode is not None:
             m["data_mode"] = data_mode
+        if data_source is not None:
+            m["data_source"] = data_source
         with open(os.path.join(self.root, "manifest.json"), "w") as fh:
             json.dump(m, fh)
 
@@ -594,6 +596,10 @@ class TestBuildSnapshotFull(unittest.TestCase):
     def test_data_mode_defaults_to_alpha_vantage(self):
         # No data_mode in the manifest -> meta.data_mode defaults to alpha_vantage.
         self.assertEqual(self.snap["meta"]["data_mode"], "alpha_vantage")
+
+    def test_data_source_defaults_to_alphavantage(self):
+        # No data_source in the manifest -> meta.data_source defaults to alphavantage.
+        self.assertEqual(self.snap["meta"]["data_source"], "alphavantage")
 
     def test_no_web_transcribed_fields_when_statements_present(self):
         # Statement-derived fundamentals with no web_fundamentals file ->
@@ -818,6 +824,32 @@ class TestDataMode(unittest.TestCase):
         for mode in ("alpha_vantage", "av_free_degraded", "web_fallback"):
             snap = self._build(mode)
             self.assertEqual(snap["meta"]["data_mode"], mode)
+
+
+# --------------------------------------------------------------------------- #
+# Change 1: data_source passthrough (bring-your-own-MCP source abstraction).
+# --------------------------------------------------------------------------- #
+
+class TestDataSource(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _build(self, data_source):
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        b.add_income(); b.add_balance(); b.add_cashflow(); b.add_earnings()
+        b.write_manifest(data_source=data_source)
+        proc = _run_build(self.dir)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        out = os.path.join(self.dir, f"snapshot_MU_{AS_OF_DATE}.json")
+        with open(out) as fh:
+            return json.load(fh)
+
+    def test_explicit_data_source_passes_through(self):
+        for source in ("alphavantage", "mcp:polygon", "stooq+web"):
+            snap = self._build(source)
+            self.assertEqual(snap["meta"]["data_source"], source)
 
 
 class TestOptionalMissing(unittest.TestCase):

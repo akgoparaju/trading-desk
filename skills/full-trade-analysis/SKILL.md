@@ -33,15 +33,15 @@ State the run parameters back to the user in **one line** before starting. Ask i
 
 **Unattended → proceed with the compressed pass and disclose.** Never auto-install. If the FSI skills are already present, skip the offer and reuse them per the Depth bullet.
 
-The data-mode preflight (Phase 1) runs inside market-snapshot; fold its outcome into the scope echo once known.
+The source + data-mode preflight (Phase 1) runs inside market-snapshot — it reads `./trading_desk_config.json` (ask-once source selection) and detects the AV tier; fold both outcomes into the scope echo once known.
 
-One-line echo, e.g.: `Running full-trade-analysis MU · profile=balanced (assumed) · horizon: swing into next print · no position context · fundamental: compressed pass (no FSI initiation found) · data_mode: alpha_vantage.`
+One-line echo, e.g.: `Running full-trade-analysis MU · profile=balanced (assumed) · horizon: swing into next print · no position context · fundamental: compressed pass (no FSI initiation found) · data_source: alphavantage · data_mode: alpha_vantage.`
 
 ---
 
 ## Phase 1 — Snapshot
 
-Invoke the **market-snapshot** skill for `<TICKER>`. It runs the **data-mode preflight** (Step 0 — announces `alpha_vantage | av_free_degraded | web_fallback` and, if interactive, asks before proceeding on a degraded mode), builds `./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>/` under the ticker parent, fetches raw Alpha Vantage data (or cited web sources in fallback), lets in-repo Python compute every number, fills qualitative text slots, and runs its own blocking gate. **Carry the reported `data_mode` forward** — it feeds the Phase 6 completeness statement.
+Invoke the **market-snapshot** skill for `<TICKER>`. It runs the **source + data-mode preflight** (Step 0 — settles the `data_source` via `./trading_desk_config.json` ask-once, then announces the AV tier `alpha_vantage | av_free_degraded | web_fallback` and, if interactive, asks before proceeding on a degraded mode), builds `./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>/` under the ticker parent, fetches raw data from the chosen source (Alpha Vantage, a foreign MCP via `docs/CANONICAL_CONTRACT.md` adapters, or cited web sources), lets in-repo Python compute every number, fills qualitative text slots, and runs its own blocking gate. **Carry the reported `data_source` and `data_mode` forward** — they feed the Phase 6 completeness statement.
 
 **GATE — snapshot QC (`qc_gate.py` exit 0).** The snapshot skill runs the gate itself. A check may be waived ONLY with a real, written justification (`--waive "check:reason"`). Print the attestation paragraph.
 

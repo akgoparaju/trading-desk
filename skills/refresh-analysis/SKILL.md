@@ -23,7 +23,7 @@ Trigger phrases: "refresh MU", "update the analysis for AAPL", "re-score NVDA", 
 
 Find the ticker workspace in the invoker's CWD: `./trading_desk_<TICKER>/` (legacy `./td_bundle_<TICKER>_<date>/` is accepted — output still migrates to the new `detail_reports_<as_of>/` layout).
 
-**Data-mode context.** Reuse the previous manifest's `data_mode` as the default and ANNOUNCE it (`alpha_vantage | av_free_degraded | web_fallback`). Run the full market-snapshot **data-mode preflight (Step 0)** ONLY if the workspace records no mode context (no `data_mode` in the previous manifest) — keep it light; do not re-probe a workspace that already declared its tier.
+**Source + data-mode context.** Also read `./trading_desk_config.json` (if present) and the previous manifest's `data_source` — reuse the recorded source (e.g. `alphavantage | mcp:polygon | stooq+web`) without re-asking; refetches use the same source's fetch pass (and its persisted `trading_desk_config/adapters/` transforms for bulk groups). Reuse the previous manifest's `data_mode` as the default and ANNOUNCE both (`alpha_vantage | av_free_degraded | web_fallback`). Run the full market-snapshot **source + tier preflight (Step 0)** ONLY if the workspace records no context (no `data_source`/`data_mode` in the previous manifest and no config file) — keep it light; do not re-probe a workspace that already declared its source and tier.
 
 ---
 

@@ -1111,6 +1111,7 @@ def build_snapshot(bundle, ticker):
             "schema_version": SCHEMA_VERSION,
             "missing": missing,
             "data_mode": manifest.get("data_mode", "alpha_vantage"),
+            "data_source": manifest.get("data_source", "alphavantage"),
             "api_tier_notes": manifest.get("api_tier_notes", []),
             "sources": build_sources(files, present_keys),
             "qc": {"passed": None, "checks": [], "waivers": []},

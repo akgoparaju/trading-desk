@@ -16,9 +16,27 @@ Trigger phrases: "snapshot AAPL", "market snapshot for MU", "build data snapshot
 
 ---
 
-## Step 0 — Data-mode preflight (BEFORE bundle setup)
+## Step 0 — SOURCE + tier preflight (BEFORE bundle setup)
 
-The bundled `.mcp.json` connects to Alpha Vantage even with **no key exported** — AV serves empty-key traffic at an anonymous **~25-call/day** free quota. Do NOT assume a connected MCP means a usable key. Detect the tier explicitly, up front, and disclose it — before burning calls a rerun cannot afford. (The env-var check and the classify/ask happen first; the one probe call reuses the AV tools once Step 1 loads them, so it costs nothing extra.)
+Fetching is the client agent's job; the pipeline is source-neutral (see `${CLAUDE_PLUGIN_ROOT}/docs/CANONICAL_CONTRACT.md` for the exact raw shapes the builder accepts). Two things get settled here, in order: **which data source** to fetch from (Step 0a), then **what tier** that source is on (Step 0b). Ask once, persist the answer, and disclose.
+
+### Step 0a — Source preflight (ask once, persist)
+
+1. **Read `./trading_desk_config.json` if present.** Shape:
+   ```json
+   {"primary_source": "alphavantage", "fallbacks": ["stooq+web"], "asked": true}
+   ```
+   If it exists with `"asked": true` → **announce and use it, do NOT re-ask.** (The user re-opens this by saying "change data source" or passing `--reconfigure`.)
+2. **Absent → discover candidates, then ASK once:**
+   - **Sweep connected MCP servers** for market-data-shaped tools: run a `ToolSearch` keyword sweep over `quote`, `ohlcv`, `daily`, `stock`, `options`, `fundamentals`. Any server whose tool names match is a candidate (`alphavantage` counts if its tools are present).
+   - **Built-ins** are always in the candidate list: **alphavantage** (if its MCP is connected) and **stooq+web** (always available — the cited-web path, no MCP needed).
+   - **Present the candidates and ASK** which to use as `primary_source` (+ any `fallbacks`). **Unattended default:** `alphavantage` if its MCP is connected, else `stooq+web`.
+   - **WRITE `./trading_desk_config.json`** with `{"primary_source", "fallbacks", "asked": true}`.
+3. **Record `data_source`** (the chosen `primary_source`, e.g. `"alphavantage"`, `"mcp:polygon"`, `"stooq+web"`) as a **top-level** manifest key in Step 0.5 — the builder copies it to `meta.data_source` (default `"alphavantage"`).
+
+### Step 0b — Tier preflight (Alpha Vantage only)
+
+Applies when `primary_source == "alphavantage"`. The bundled `.mcp.json` connects to Alpha Vantage even with **no key exported** — AV serves empty-key traffic at an anonymous **~25-call/day** free quota. Do NOT assume a connected MCP means a usable key. Detect the tier explicitly, up front, and disclose it — before burning calls a rerun cannot afford. (The env-var check and the classify/ask happen first; the one probe call reuses the AV tools once Step 1 loads them, so it costs nothing extra.) A foreign MCP or `stooq+web` source skips this substep — it has no AV tier; its fetch pass is Step 2-MCP / Step 2-ALT respectively.
 
 1. **Check the env var:**
    ```bash
@@ -40,6 +58,16 @@ The bundled `.mcp.json` connects to Alpha Vantage even with **no key exported** 
 
    **Unattended → proceed and disclose** (never silently). Record the mode as a **top-level** manifest key `data_mode` (Step 0.5 skeleton) — the builder copies it into `meta.data_mode`.
 
+### Step 0c — Fetch-pass routing (by source)
+
+The chosen `primary_source` selects the fetch pass; every path lands each raw file at the SAME `raw/<key>.json` bundle keys, so the builder needs no per-source changes:
+
+- **`alphavantage`** → **Step 2** (with Step 2-ALT per-group where the free tier blocks a group, per Step 0b).
+- **`stooq+web`** → **Step 2-ALT** for the whole pass.
+- **foreign MCP** (e.g. `mcp:polygon`) → **Step 2-MCP**.
+
+Groups the primary source can't supply fall through **per-group** to the configured `fallbacks` (stooq+web), disclosed in `api_tier_notes`.
+
 ---
 
 ## Step 0.5 — Bundle setup
@@ -48,10 +76,11 @@ The bundled `.mcp.json` connects to Alpha Vantage even with **no key exported** 
 2. In the invoker's CWD, create the parent + dated bundle:
    - Parent dir (NO date): `./trading_desk_<TICKER>/`
    - Bundle dir (dated): `./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>/` with `raw/` inside it.
-3. Start `./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>/manifest.json` with this skeleton (note the `data_mode` key from Step 0):
+3. Start `./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>/manifest.json` with this skeleton (note the `data_source` key from Step 0a and the `data_mode` key from Step 0b):
    ```json
-   {"ticker": "<TICKER>", "as_of_utc": "<as_of_utc>", "data_mode": "<alpha_vantage|av_free_degraded|web_fallback>", "api_tier_notes": [], "files": {}}
+   {"ticker": "<TICKER>", "as_of_utc": "<as_of_utc>", "data_source": "<primary_source>", "data_mode": "<alpha_vantage|av_free_degraded|web_fallback>", "api_tier_notes": [], "files": {}}
    ```
+   (`data_source` names the primary source, e.g. `alphavantage`, `mcp:polygon`, `stooq+web`; the builder passes it through to `meta.data_source`. `data_mode` is the AV tier and only meaningful for the alphavantage source — a foreign-MCP or stooq+web run records the source but its tier notes go in `api_tier_notes`.)
 4. As you complete each fetch, record it into `manifest.files`:
    ```json
    "files": {"<key>": {"path": "raw/<key>.json", "endpoint_or_url": "<endpoint or URL>", "retrieved_utc": "<utc>"}}
@@ -135,6 +164,20 @@ Proceed to Step 3 (web gap-fill, unchanged), then skip Step 4 (no IV history wit
 
 ---
 
+## Step 2-MCP — Foreign-MCP fetch pass (bring-your-own-source)
+
+Used when `primary_source` is a foreign MCP (e.g. `mcp:polygon`). Fetch each field group via that source's own tools and land it at the SAME `raw/<key>.json` bundle keys the AV path uses. **The builder is source-neutral** — it only cares about the raw *shape*, documented exactly per key in **`${CLAUDE_PLUGIN_ROOT}/docs/CANONICAL_CONTRACT.md`**. Do not restate the shapes; follow the contract. The adapter kind depends on the group:
+
+1. **Scalar groups** (`global_quote`, `overview`, statements/earnings/estimates, `pc_ratio_realtime`, `earnings_calendar`, `treasury_yield`, `short_interest`, `web_spot_check`, `web_fundamentals`): **TRANSCRIBE** the source's values verbatim (units checked) into the canonical shape for that key, recording the source URL / tool name in the manifest entry (per-field via `sources` for `web_fundamentals`). This is the cited-transcription pattern from Step 2-ALT — you never compute a number; the QC gate's arithmetic cross-checks audit it.
+2. **Bulk groups** (`daily_adjusted`, `spy_daily_adjusted`, `options_chain`): these are too large to transcribe by hand, so use a **structural adapter**:
+   - Check `./trading_desk_config/adapters/<source>_<group>.py` for an existing transform. **If present, re-run it VERBATIM** — never regenerate it (a regenerated mapping could drift, and a refresh delta would misread parsing drift as market movement).
+   - **If absent, write one** per `docs/CANONICAL_CONTRACT.md` — **STRUCTURAL only** (field mapping/renaming to an accepted shape; NEVER arithmetic, no unit conversion, no derived columns). Save it to `./trading_desk_config/adapters/<source>_<group>.py`, then run it to emit `raw/<key>.json`. Adapters are **user-workspace artifacts** — never plugin code.
+3. **Groups the source can't supply** → fall through **per-group** to the configured fallbacks (stooq for OHLCV, the Step 3 web paths for `short_interest` / `earnings_calendar` / `web_spot_check`), and NOTE the fallback in `manifest.api_tier_notes` (e.g. `"daily_adjusted via stooq fallback — mcp:polygon has no adjusted daily"`).
+
+If the foreign source has no options chain, leave `options_chain`/`pc_ratio_realtime` absent (options stand aside, disclosed) and skip Step 4. Proceed to Step 3 for any web gap-fill, then Step 5.
+
+---
+
 ## Step 3 — Web gap-fill (AV has no endpoint for these)
 
 **(a)** ONE independent spot-price check from any public quote page. Write `raw/web_spot.json` (key `web_spot_check`):
@@ -194,7 +237,7 @@ Append `{"date": "<sample_date>", "atm_iv": <printed value>}` to the cache. **Th
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_snapshot.py \
   --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> --ticker <TICKER>
 ```
-The builder prints the snapshot path to stdout (default `<bundle>/snapshot_<TICKER>_<YYYY-MM-DD>.json`). Exit 2 = a REQUIRED file (`global_quote`, `overview`, `daily_adjusted`, `spy_daily_adjusted`) is missing or unparseable — fix the raw file / manifest and re-run. The builder copies the manifest's `data_mode` into `meta.data_mode`; in a web-fallback / gap-filled run it also discloses filled fields in `fundamentals.web_transcribed_fields` and stooq provenance in `technicals.series_source`.
+The builder prints the snapshot path to stdout (default `<bundle>/snapshot_<TICKER>_<YYYY-MM-DD>.json`). Exit 2 = a REQUIRED file (`global_quote`, `overview`, `daily_adjusted`, `spy_daily_adjusted`) is missing or unparseable — fix the raw file / manifest and re-run. The builder copies the manifest's `data_source` into `meta.data_source` (default `alphavantage`) and its `data_mode` into `meta.data_mode`; in a web-fallback / gap-filled run it also discloses filled fields in `fundamentals.web_transcribed_fields` and stooq provenance in `technicals.series_source`.
 
 Then fill ONLY the qualitative TEXT slots by editing the snapshot JSON:
 - `sentiment.news_sentiment_summary` — ≤60 words distilled from `raw/news_sentiment.json`.
@@ -224,7 +267,8 @@ Print the attestation paragraph to the user.
 ## Output contract
 
 Report to the user (and to any calling skill):
-- **Data mode** — `alpha_vantage | av_free_degraded | web_fallback` (from Step 0), with the one-line disclosure
+- **Data source** — the `primary_source` from Step 0a (e.g. `alphavantage | mcp:polygon | stooq+web`), noting any per-group fallbacks used
+- **Data mode** — `alpha_vantage | av_free_degraded | web_fallback` (AV tier from Step 0b), with the one-line disclosure
 - **Bundle dir** — `./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>/` (under the ticker parent `./trading_desk_<TICKER>/`)
 - **Snapshot path** — QC-stamped `snapshot_<TICKER>_<YYYY-MM-DD>.json`
 - **Chain file path** — the on-disk options chain (referenced, never read into context)
@@ -253,7 +297,9 @@ Downstream skills read ONLY `snapshot.json` (plus the chain file via `scripts/ch
 - **Single-snapshot rule.** Downstream modules never fetch market data. A figure missing from the snapshot is a *snapshot extension request*, not a downstream fetch.
 - **2M-token chain rule.** The options chain is never loaded into context, never Read, never pasted. Only `scripts/chain.py` reads it.
 - **`TIME_SERIES_DAILY_ADJUSTED`-only rule.** Never raw `TIME_SERIES_DAILY`; split/dividend-adjusted closes are mandatory for multi-year returns, drawdowns, and vol.
-- **Data-mode preflight is mandatory (Step 0).** A connected AV MCP does NOT imply a usable key — the empty-key anonymous quota answers too. Detect the tier, announce the mode, and (interactive) ask before proceeding on `av_free_degraded` / `web_fallback`.
+- **Source preflight is ask-once (Step 0a).** `./trading_desk_config.json` (`{"primary_source", "fallbacks", "asked": true}`) persists the chosen source so it is never re-asked; "change data source" / `--reconfigure` re-opens it. `data_source` is recorded in the manifest and passed through to `meta.data_source`.
+- **Bring-your-own-MCP (Step 2-MCP).** A foreign source is adapted per `${CLAUDE_PLUGIN_ROOT}/docs/CANONICAL_CONTRACT.md`: scalar groups transcribe with citations; the three bulk groups (ticker/SPY daily, options chain) use a **structural** adapter (field mapping only, never arithmetic) persisted at `./trading_desk_config/adapters/<source>_<group>.py` and re-run verbatim on later fetches. Adapters are user-workspace artifacts, never plugin code.
+- **Data-mode preflight is mandatory for the alphavantage source (Step 0b).** A connected AV MCP does NOT imply a usable key — the empty-key anonymous quota answers too. Detect the tier, announce the mode, and (interactive) ask before proceeding on `av_free_degraded` / `web_fallback`.
 - **Anonymous / free-tier budget (`av_free_degraded`).** The empty-key anonymous quota is **~25 calls/day** (a free-tier key is similar for this pipeline's purposes). A full AV fetch pass here is only **~13–15 calls** because the premium-only groups drop out (no adjusted multi-year history, no chain, no IV history). **Never** attempt Step 4 IV-history sampling on this tier (~26 calls would blow the budget). At most **one run/day**. If a fetch dies mid-run from quota exhaustion, either resume the next day or switch the remaining groups to the Step 2-ALT `web_fallback` path.
 - **Free-tier IV degradation.** In any degraded/fallback mode Step 4 is skipped; `iv_pctile_1yr` comes back `null` and is disclosed in `meta.api_tier_notes` (never silently omitted).
 - **`EARNINGS_CALENDAR` empty gotcha.** Header-only/empty for valid tickers is common → use the Step 3c web fallback.

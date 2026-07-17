@@ -26,6 +26,12 @@ The `market-snapshot` skill runs a **data-mode preflight** before fetching anyth
 - **`av_free_degraded` (free key OR no key exported).** The anonymous / free tier is a **~25-call/day** budget — so **at most one run per day**. Premium endpoints are entitlement-blocked, so you **lose adjusted multi-year history, the options chain, and IV history** (`iv_pctile_1yr` → `null`); the pass is ~13–15 calls. Blocked field groups fall back to the web path below. Every degradation is disclosed in `meta.api_tier_notes` — never silently.
 - **`web_fallback` (no AV MCP at all).** FSI-style **cited web research** funneled through the same QC'd pipeline: OHLCV from stooq CSV (split-adjusted; multi-year stats work), fundamentals/overview transcribed **verbatim** from SEC filings / IR / reputable aggregators with per-figure citations, then the same in-repo Python computes every number and the QC gate's arithmetic cross-checks (P/E, mktcap, net-cash) audit the transcription. **Options stand aside** (no chain available) — disclosed. Web-filled fields are listed in `snapshot.fundamentals.web_transcribed_fields`; stooq provenance in `technicals.series_source`; the mode in `meta.data_mode`.
 
+## Bring your own data source
+
+Alpha Vantage is the default, not a requirement. The `market-snapshot` skill runs a **source preflight** that sweeps your connected MCP servers for market-data-shaped tools and offers them alongside the built-ins (`alphavantage`, `stooq+web`). It **asks once**, then persists your choice in `./trading_desk_config.json` (`{"primary_source", "fallbacks", "asked": true}`) so later runs never re-ask — say "change data source" or pass `--reconfigure` to re-open it. The chosen source is recorded as `meta.data_source` in every snapshot.
+
+The builder accepts a fixed, source-neutral set of raw file shapes documented in [`docs/CANONICAL_CONTRACT.md`](docs/CANONICAL_CONTRACT.md). Adapting a foreign source splits by field group: **scalar groups** are transcribed verbatim with per-figure citations (the same cited-web pattern the fallback path uses), and the three **bulk artifacts** (ticker daily series, SPY daily series, options chain) get a small **structural transform** — field mapping only, never arithmetic — that emits an accepted shape. Those transforms are **client-generated and live in your workspace** at `trading_desk_config/adapters/<source>_<group>.py`; they are re-run verbatim on later fetches (so a refresh delta can't misread parsing drift as market movement) and are never plugin code. The QC gate audits the result the same way regardless of source.
+
 ## Output layout
 
 A run writes under a per-ticker parent in the invoker's CWD:
@@ -66,7 +72,7 @@ Run the whole pipeline in one shot: **`full trade analysis NVDA`** — snapshot 
 
 ## Data & provenance
 
-Every number in a snapshot traces to an Alpha Vantage endpoint or a public web source, each recorded with its retrieval timestamp under `meta.sources`; `meta.data_mode` records which of the three data modes produced it. The blocking QC gate reconciles internal consistency (market cap, P/E, net cash, MA ordering, ranges, spot-check tolerance, options freshness, staleness) and stamps an attestation into `meta.qc` — the same arithmetic checks double as the transcription audit for web-fallback runs. Snapshot schema version: **v0.2.1**.
+Every number in a snapshot traces to a data-source endpoint or a public web source, each recorded with its retrieval timestamp under `meta.sources`; `meta.data_source` records the primary source (Alpha Vantage by default) and `meta.data_mode` records which of the three AV data modes produced it. The blocking QC gate reconciles internal consistency (market cap, P/E, net cash, MA ordering, ranges, spot-check tolerance, options freshness, staleness) and stamps an attestation into `meta.qc` — the same arithmetic checks double as the transcription audit for web-fallback runs. Snapshot schema version: **v0.2.1**.
 
 ## Development
 

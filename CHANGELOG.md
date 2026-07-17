@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased · Bring-your-own-MCP source abstraction (Feature A)
+
+Market-data source abstraction so the pipeline is no longer Alpha-Vantage-only. Fetching
+stays the client agent's job; the builder accepts a fixed, source-neutral set of raw file
+shapes. A source is chosen once, persisted, and re-used; foreign bulk artifacts are adapted
+by client-generated structural transforms persisted in the user workspace. Adds 1 test
+(suite 662 → 663 green).
+
+### Added
+- **`meta.data_source` passthrough (`scripts/build_snapshot.py`).** Manifest top-level key
+  `data_source` (free-form primary-source name, e.g. `alphavantage`, `mcp:polygon`,
+  `stooq+web`) → `meta.data_source`, defaulting to `alphavantage` when absent. Mirrors the
+  existing `data_mode` passthrough. Test: `TestDataSource` + a default-value assertion.
+- **`docs/CANONICAL_CONTRACT.md`.** The source-neutral interface: the exact raw file shapes
+  the builder / `scripts/chain.py` accept per manifest key (envelope handling, the two daily
+  shapes, quote/overview/statement/estimates/options/web_fundamentals/pc/calendar/treasury/
+  short-interest/insider), plus THE ADAPTER RULE for foreign sources (scalar → cited
+  transcription; bulk → structural transform persisted at
+  `trading_desk_config/adapters/<source>_<group>.py`, re-run verbatim).
+
+### Changed
+- **`skills/market-snapshot/SKILL.md` — Step 0 is now SOURCE + tier preflight.** Step 0a
+  reads/writes `./trading_desk_config.json` (`{"primary_source", "fallbacks", "asked": true}`),
+  discovers market-data MCP servers via a `ToolSearch` keyword sweep, asks once (unattended
+  default: alphavantage if connected else stooq+web), and records `data_source` in the
+  manifest. Step 0b is the existing AV tier probe (alphavantage source only). New **Step
+  2-MCP** foreign-MCP fetch pass routes scalar groups to cited transcription and bulk groups
+  to persisted structural adapters, with per-group fallthrough to stooq+web.
+- **`skills/refresh-analysis/SKILL.md` Step 1** also reads `trading_desk_config.json` /
+  previous `data_source` for source context alongside `data_mode`.
+- **`skills/full-trade-analysis/SKILL.md` Phase 0/1** mention the source preflight + config
+  once; scope echo carries `data_source`.
+- **README** — new "Bring your own data source" section (config file, ask-once, adapters in
+  the user workspace, contract-doc link); provenance note mentions `meta.data_source`.
+
 ## 0.6.0 — 2026-07-17 · Refresh mode
 
 Live-validated same day on real MU data: no-event refresh reused 10 groups, refetched 7
