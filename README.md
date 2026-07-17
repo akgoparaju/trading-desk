@@ -23,7 +23,7 @@ Data sources are yours to connect (or none: the built-in `stooq+web` mode needs 
 claude mcp add --transport http alphavantage "https://mcp.alphavantage.co/mcp?apikey=YOUR_KEY"
 # or connect any market-data MCP (FMP, Polygon, ...) — see docs/CANONICAL_CONTRACT.md
 ```
-The first run asks which connected source to use and remembers it (`trading_desk_config.json`). After install, the first session shows a ONE-TIME notice if the optional FSI plugins are absent; say `set up FSI` any time to get the 2-command install.
+The first run asks which connected source to use and remembers it (`trading_desk_config.json`). After install, the first session shows a ONE-TIME notice if the optional FSI plugins are absent; To install FSI: `/plugin marketplace add anthropics/financial-services`, then `/plugin install equity-research` and `/plugin install financial-analysis`.
 
 Optional: get an Alpha Vantage key from [alphavantage.co](https://www.alphavantage.co/support/#api-key) and connect the MCP yourself (command above). There is no bundled server — a source is only present if you added it.
 
@@ -61,7 +61,7 @@ The report lands in the **parent** `trading_desk_<TICKER>/` (a sibling of the da
 
 ## FSI integration (optional)
 
-Deep fundamental and valuation work can reuse the `equity-research` and `financial-analysis` skills from the [claude-for-financial-services](https://github.com/anthropics/claude-for-financial-services) marketplace. When those plugins are installed, trading-desk hands off to them for richer modeling. When they are absent, it runs a compressed fundamental pass instead and discloses the reduced depth — and at runtime, `full-trade-analysis` (and standalone `composite-score`) will **offer once, interactively, to install them** before falling back to the compressed pass. It never auto-installs. The soft dependency is declared in `.claude-plugin/marketplace.json` (`allowCrossMarketplaceDependenciesOn`); nothing about the FSI plugins is required for Phase 1.
+Deep fundamental and valuation work can reuse the `equity-research` and `financial-analysis` skills from the claude-for-financial-services marketplace (`/plugin marketplace add anthropics/financial-services`). When those plugins are installed, trading-desk hands off to them for richer modeling. When they are absent, it runs a compressed fundamental pass instead and discloses the reduced depth — and at runtime, `full-trade-analysis` (and standalone `composite-score`) will **offer once, interactively, to install them** before falling back to the compressed pass. It never auto-installs. The soft dependency is declared in `.claude-plugin/marketplace.json` (`allowCrossMarketplaceDependenciesOn`); nothing about the FSI plugins is required for Phase 1.
 
 ## Skills
 
