@@ -1,5 +1,48 @@
 # Changelog
 
+## Unreleased — Refresh mode (Feature B)
+
+Event-aware selective-refetch refresh so an existing ticker workspace can be re-run
+cheaply. Selective FETCHING, never selective SCORING — one new snapshot per refresh,
+all modules re-emit. Adds 34 tests (suite 623 → 657 green).
+
+### Added
+- **`scripts/refresh_plan.py` — deterministic refresh planner.** CLI
+  `--ticker-dir <path> [--as-of YYYY-MM-DD] [--out <path>]`. Locates the newest
+  previous bundle (`detail_reports_*` by name; legacy `td_bundle_*` / bare-bundle
+  fallback), reads the previous manifest + snapshot, and emits `refresh_plan.json`
+  deciding per manifest group **refetch vs reuse**:
+  - **Always-refetch** the fast-moving surface: `global_quote`, `daily_adjusted`,
+    `spy_daily_adjusted`, `news_sentiment`, `pc_ratio_realtime`, `web_spot_check`
+    (+ `options_chain` when present last run; `absent last run` → still refetch to
+    fill the gap).
+  - **Window-based** for the rest, REUSING `scripts.qc._STALENESS_WINDOWS` (bound by
+    identity, not copied) so an authorized reuse provably passes the QC staleness
+    check with the reused file's ORIGINAL `retrieved_utc`.
+  - **Event override:** an earnings date in `(previous_as_of, as_of]` forces the
+    statement set (income/balance/cash-flow/earnings/estimates/overview/calendar/
+    insider) + `judgment_review_required`; a dividend ex-date in-window forces
+    overview + earnings_calendar only.
+  - `iv_history`: reuse if the newest sample ≤14d old, else refresh; and an
+    `estimated_refetch_calls` count.
+  - Exit 2 with "nothing to refresh — run a full analysis first" when no previous
+    bundle is found.
+- **`skills/refresh-analysis/SKILL.md`.** Triggers "refresh [ticker]", "update the
+  analysis", "re-score [ticker]", "update the score". Presents the plan, assembles
+  a new append-only `detail_reports_<as_of>/` bundle (copy reused raw files +
+  manifest entries verbatim, refetch the rest per market-snapshot conventions),
+  builds + QC-gates the snapshot, **re-runs ALL modules** with judgment
+  carry-forward (disclosed `[carried forward from <date>]` unless an event forces
+  honest re-affirmation), renders the full report AND a delta vs the previous
+  bundle (both QC-gated), and appends a dated `thesis_entry.md` section with the
+  invalidation-leg check. Never edits the previous bundle.
+- **`tests/test_refresh_plan.py`** (34 tests): always-refetch set; window
+  reuse/refetch boundaries (insider 89d reuse / 91d refetch, short-interest 14/15,
+  treasury 7/8); earnings between-runs vs before/after/boundary; dividend override;
+  options-chain absent-last-run; iv_history 10d/14d/20d; legacy layout; no-bundle
+  exit 2; call arithmetic; determinism; plan-file write + stdout path; a contract
+  test that the planner's window table IS `qc._STALENESS_WINDOWS`.
+
 ## 0.5.0 — 2026-07-17 · First real-world feedback batch — Real-world feedback: data-mode preflight, web fallback, trading_desk layout
 
 Docs + skills layer for the v6 real-world feedback batch (script layer landed at `61d31fa`).
