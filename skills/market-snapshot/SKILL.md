@@ -36,7 +36,7 @@ Fetching is the client agent's job; the pipeline is source-neutral (see `${CLAUD
 
 ### Step 0b — Tier preflight (Alpha Vantage only)
 
-Applies when `primary_source == "alphavantage"`. The bundled `.mcp.json` connects to Alpha Vantage even with **no key exported** — AV serves empty-key traffic at an anonymous **~25-call/day** free quota. Do NOT assume a connected MCP means a usable key. Detect the tier explicitly, up front, and disclose it — before burning calls a rerun cannot afford. (The env-var check and the classify/ask happen first; the one probe call reuses the AV tools once Step 1 loads them, so it costs nothing extra.) A foreign MCP or `stooq+web` source skips this substep — it has no AV tier; its fetch pass is Step 2-MCP / Step 2-ALT respectively.
+Applies when `primary_source == "alphavantage"`. NOTE: the plugin ships NO MCP servers (as of 0.8.0) — Alpha Vantage is present only if the USER added it (`claude mcp add --transport http alphavantage "https://mcp.alphavantage.co/mcp?apikey=YOUR_KEY"`). When it IS connected, beware: AV serves empty/invalid-key traffic at an anonymous **~25-call/day** free quota. Do NOT assume a connected MCP means a usable key. Detect the tier explicitly, up front, and disclose it — before burning calls a rerun cannot afford. (The env-var check and the classify/ask happen first; the one probe call reuses the AV tools once Step 1 loads them, so it costs nothing extra.) A foreign MCP or `stooq+web` source skips this substep — it has no AV tier; its fetch pass is Step 2-MCP / Step 2-ALT respectively.
 
 1. **Check the env var:**
    ```bash
@@ -49,7 +49,7 @@ Applies when `primary_source == "alphavantage"`. The bundled `.mcp.json` connect
 3. **Classify + ANNOUNCE** one of these to the user:
    - **`data_mode=alpha_vantage`** — premium; the full fetch path (Steps 1–6) runs unchanged.
    - **`data_mode=av_free_degraded`** — env unset OR a free-tier key. State explicitly WHICH:
-     - env unset → "no `ALPHAVANTAGE_API_KEY` exported — running on Alpha Vantage's anonymous ~25-call/day quota"
+     - empty/invalid key (e.g. the MCP URL was added with an unset env var) → "AV key missing/invalid — running on Alpha Vantage's anonymous ~25-call/day quota"
      - free-tier key → "free-tier key detected"
      - Warn what degrades: **no adjusted multi-year history** (premium `TIME_SERIES_DAILY_ADJUSTED outputsize=full` is entitlement-blocked), **no options chain** (HISTORICAL_OPTIONS blocked), **no IV history**, and a **~25-call daily budget** — so at most **ONE run/day**. Fall back to Step 2-ALT per field-group as blocks are hit.
    - **`data_mode=web_fallback`** — no AV MCP at all; the entire fetch pass is the Step 2-ALT web-research path.
@@ -57,6 +57,16 @@ Applies when `primary_source == "alphavantage"`. The bundled `.mcp.json` connect
    > "(1) stop — set up a key (recommended; a free key takes ~1 min at [alphavantage.co](https://www.alphavantage.co/support/#api-key), premium for full depth), or (2) proceed in `{mode}` with the disclosures above."
 
    **Unattended → proceed and disclose** (never silently). Record the mode as a **top-level** manifest key `data_mode` (Step 0.5 skeleton) — the builder copies it into `meta.data_mode`.
+
+
+
+### Step 0b.5 — FAILING SOURCES ARE UNAVAILABLE SOURCES (anti-loop rule, ALL sources)
+
+If the chosen source's MCP tools error on connection/auth (server unreachable, "api key not set", repeated tool failures): retry AT MOST TWICE, then STOP treating the source as present. A registered-but-failing server routes exactly like an absent one:
+1. ANNOUNCE plainly: "<source> is connected but failing (<error>) — treating it as unavailable."
+2. Print the fix (e.g. for AV: export the key and re-add the MCP, or `claude mcp remove alphavantage` to silence it).
+3. FALL BACK per the config's `fallbacks` chain (default `stooq+web`, which needs no key) and record `data_mode` accordingly.
+NEVER loop retries against a failing server — that burns the session without producing a snapshot (real-user finding, 2026-07-17).
 
 ### Step 0c — Fetch-pass routing (by source)
 

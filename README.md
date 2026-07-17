@@ -13,10 +13,19 @@ A Claude Code plugin that produces short (≈3-page) trade decision reports buil
 ```
 /plugin marketplace add akgoparaju/trading-desk
 /plugin install trading-desk
-export ALPHAVANTAGE_API_KEY=your_key
 ```
 
-Get an API key from [alphavantage.co](https://www.alphavantage.co/support/#api-key). Set `ALPHAVANTAGE_API_KEY` in your environment before running any skill — the bundled MCP server reads it from there.
+**The plugin installs skills + scripts only — NO MCP servers, no auto-dependencies.**
+Data sources are yours to connect (or none: the built-in `stooq+web` mode needs no key):
+
+```bash
+# optional — Alpha Vantage (recommended for full depth incl. options chains):
+claude mcp add --transport http alphavantage "https://mcp.alphavantage.co/mcp?apikey=YOUR_KEY"
+# or connect any market-data MCP (FMP, Polygon, ...) — see docs/CANONICAL_CONTRACT.md
+```
+The first run asks which connected source to use and remembers it (`trading_desk_config.json`).
+
+Optional: get an Alpha Vantage key from [alphavantage.co](https://www.alphavantage.co/support/#api-key) and connect the MCP yourself (command above). There is no bundled server — a source is only present if you added it.
 
 ## Data modes
 

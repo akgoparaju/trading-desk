@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0 — 2026-07-17 · No bundled MCP servers
+
+Removed the bundled `.mcp.json` (real-user finding: the auto-registered Alpha Vantage
+server on a keyless machine errors instead of being absent, and the agent retries a
+"present" source instead of falling back to web). The plugin now installs skills +
+scripts ONLY — zero MCP servers, zero auto-dependencies. Data sources are user-added
+(one-liner in the README); the built-in `stooq+web` mode needs no key at all. New
+preflight anti-loop rule: a source failing twice is treated as UNAVAILABLE (announce,
+print the fix, fall back) — never retried in a loop.
+
 ## 0.7.0 — 2026-07-17 · Bring-your-own data source · Bring-your-own-MCP source abstraction (Feature A)
 
 Market-data source abstraction so the pipeline is no longer Alpha-Vantage-only. Fetching
