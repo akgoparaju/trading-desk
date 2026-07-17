@@ -34,7 +34,15 @@ Newest first across both layouts: the new `./trading_desk_<TICKER>/detail_report
   - `module_sentiment.json` → run the **sentiment-positioning** skill.
   - `module_risk.json` → run the **risk-analytics** skill.
   - `module_fundamental.json` → this is where the run chooses **deep FSI reuse vs the compressed pass**. If invoked from **full-trade-analysis**, honor its Phase-0 FSI decision. If running **standalone** and the FSI plugins are **absent** (no `equity-research:*` skills): check `./trading_desk_config.json` for a recorded `fsi_offer` first (honor it silently); absent → you MUST make the same offer once and RECORD the answer to the config (`"fsi_offer": {"asked": true, "choice": ...}`) — never auto-install, never silently skip the ask on a user-initiated run:
-    > "Deep fundamental mode uses the claude-for-financial-services plugins (2 commands: `/plugin marketplace add` their marketplace, then `/plugin install equity-research financial-analysis`). Install now, or proceed with the built-in compressed fundamental pass?"
+    > "Deep fundamental mode uses the claude-for-financial-services plugins. Install now, or proceed with the built-in compressed fundamental pass?"
+
+If the user chooses install, hand them these EXACT commands (verified marketplace source — do not improvise them; the user runs them in their own prompt, you cannot):
+```
+/plugin marketplace add anthropics/financial-services
+/plugin install equity-research
+/plugin install financial-analysis
+```
+Then tell them: the new plugins load in the NEXT session — this run continues with the compressed pass, and the next analysis will use deep FSI mode automatically.
 
     Unattended, or if the user declines, run the compressed-pass scorer directly:
     ```bash

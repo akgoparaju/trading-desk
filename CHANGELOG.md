@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.1 — 2026-07-17 · Verified FSI marketplace reference shipped in-package
+
+Real-user finding #5: the FSI offer worked (recorded ask fired) but the agent could
+not hand over install commands — the marketplace source wasn't in the package, and it
+correctly refused to fabricate one. The verified source (`anthropics/financial-services`,
+read from a live registry, not guessed) is now embedded in the offer text (both skills),
+the session-start notice, and the README.
+
 ## 0.9.0 — 2026-07-17 · Post-install FSI notice (SessionStart hook)
 
 Real-user finding #4: install is silent (no post-install hook exists in the plugin

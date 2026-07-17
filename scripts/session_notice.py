@@ -52,9 +52,10 @@ def main():
         "systemMessage": (
             "trading-desk: deep fundamental mode uses the optional FSI plugins "
             "(equity-research + financial-analysis), which are not installed — "
-            "the built-in compressed pass will be used until then. Say "
-            "'set up FSI' in any trading-desk run to be walked through the "
-            "2-command install. (One-time notice.)"),
+            "the built-in compressed pass will be used until then. To install: "
+            "/plugin marketplace add anthropics/financial-services , then "
+            "/plugin install equity-research and /plugin install financial-analysis. "
+            "(One-time notice.)"),
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
             "additionalContext": (

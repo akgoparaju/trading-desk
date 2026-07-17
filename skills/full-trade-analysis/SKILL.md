@@ -32,7 +32,15 @@ State the run parameters back to the user in **one line** before starting. Ask i
 1. If the `equity-research:*` skills are available → skip the offer, reuse per the Depth bullet.
 2. Else read `./trading_desk_config.json` → if it has `"fsi_offer": {"asked": true, ...}` → honor the recorded choice silently.
 3. Else you MUST ask the user now (do not self-classify the run as unattended when a user prompt started it):
-> "Deep fundamental mode uses the claude-for-financial-services plugins (2 commands: `/plugin marketplace add` their marketplace, then `/plugin install equity-research financial-analysis`). Install now, or proceed with the built-in compressed fundamental pass?"
+> "Deep fundamental mode uses the claude-for-financial-services plugins. Install now, or proceed with the built-in compressed fundamental pass?"
+
+If the user chooses install, hand them these EXACT commands (verified marketplace source — do not improvise them; the user runs them in their own prompt, you cannot):
+```
+/plugin marketplace add anthropics/financial-services
+/plugin install equity-research
+/plugin install financial-analysis
+```
+Then tell them: the new plugins load in the NEXT session — this run continues with the compressed pass, and the next analysis will use deep FSI mode automatically.
 4. WRITE the answer to `./trading_desk_config.json`: `"fsi_offer": {"asked": true, "choice": "install"|"compressed", "date": "<YYYY-MM-DD>"}` — the recorded artifact is what makes this ask-once instead of ask-never or ask-always. Re-open only when the user says "set up FSI" / "change fundamental mode".
 Genuinely unattended (scheduled/cron re-runs) → compressed pass + disclose + record `"choice": "compressed", "unattended": true`. Never auto-install.
 
