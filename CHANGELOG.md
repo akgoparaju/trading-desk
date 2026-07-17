@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — Real-world feedback: data-mode preflight, web fallback, trading_desk layout
+## 0.5.0 — 2026-07-17 · First real-world feedback batch — Real-world feedback: data-mode preflight, web fallback, trading_desk layout
 
 Docs + skills layer for the v6 real-world feedback batch (script layer landed at `61d31fa`).
 Prose-only changes; the 623-test suite stays green.
