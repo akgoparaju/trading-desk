@@ -28,10 +28,13 @@ State the run parameters back to the user in **one line** before starting. Ask i
 - **Position context** — record ONLY if the user volunteers it. **Never solicit holdings.** v1 sizes a fresh position; existing-position deltas are out of scope (note it if offered).
 - **Depth** — if an FSI equity-research **initiation** already exists for the ticker, reuse its coverage for the fundamental read; else the compressed snapshot pass is used. This check is **best-effort** — absence is fine and disclosed, never a blocker.
 
-**FSI runtime offer (ASK ONCE, never auto-install).** Detect whether the FSI plugins are installed — are the `equity-research:*` skills available? If they are **ABSENT** and the run is **interactive**, ask once:
+**FSI runtime offer (MANDATORY ask-once, RECORDED — never auto-install).** This is not optional prose; it is a gate with a required artifact:
+1. If the `equity-research:*` skills are available → skip the offer, reuse per the Depth bullet.
+2. Else read `./trading_desk_config.json` → if it has `"fsi_offer": {"asked": true, ...}` → honor the recorded choice silently.
+3. Else you MUST ask the user now (do not self-classify the run as unattended when a user prompt started it):
 > "Deep fundamental mode uses the claude-for-financial-services plugins (2 commands: `/plugin marketplace add` their marketplace, then `/plugin install equity-research financial-analysis`). Install now, or proceed with the built-in compressed fundamental pass?"
-
-**Unattended → proceed with the compressed pass and disclose.** Never auto-install. If the FSI skills are already present, skip the offer and reuse them per the Depth bullet.
+4. WRITE the answer to `./trading_desk_config.json`: `"fsi_offer": {"asked": true, "choice": "install"|"compressed", "date": "<YYYY-MM-DD>"}` — the recorded artifact is what makes this ask-once instead of ask-never or ask-always. Re-open only when the user says "set up FSI" / "change fundamental mode".
+Genuinely unattended (scheduled/cron re-runs) → compressed pass + disclose + record `"choice": "compressed", "unattended": true`. Never auto-install.
 
 The source + data-mode preflight (Phase 1) runs inside market-snapshot — it reads `./trading_desk_config.json` (ask-once source selection) and detects the AV tier; fold both outcomes into the scope echo once known.
 

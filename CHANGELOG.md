@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.1 — 2026-07-17 · FSI offer hardened
+
+Real-user finding: the FSI install offer never surfaced. It was advisory prose an agent
+could skim past ("unattended → proceed"). Now a recorded ask-once, same mechanism as
+source selection: check config → absent + user-initiated run → MUST ask → write
+`fsi_offer` to `trading_desk_config.json`. The required artifact makes skipping visible.
+
 ## 0.8.0 — 2026-07-17 · No bundled MCP servers
 
 Removed the bundled `.mcp.json` (real-user finding: the auto-registered Alpha Vantage
