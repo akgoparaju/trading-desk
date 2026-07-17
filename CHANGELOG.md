@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased · Bring-your-own-MCP source abstraction (Feature A)
+## 0.7.0 — 2026-07-17 · Bring-your-own data source · Bring-your-own-MCP source abstraction (Feature A)
 
 Market-data source abstraction so the pipeline is no longer Alpha-Vantage-only. Fetching
 stays the client agent's job; the builder accepts a fixed, source-neutral set of raw file

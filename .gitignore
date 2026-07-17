@@ -5,3 +5,5 @@ td_bundle_*/
 iv_history_*.json
 snapshot_*.json
 .DS_Store
+trading_desk_config.json
+trading_desk_config/
