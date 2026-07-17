@@ -22,8 +22,10 @@ Trigger phrases: "render report for MU", "trade decision report AAPL", "delta re
 In the invoker's CWD, find the newest bundle for the ticker:
 
 ```bash
-ls -dt ./td_bundle_<TICKER>_* 2>/dev/null | head -1
+ls -dt ./trading_desk_<TICKER>/detail_reports_* ./td_bundle_<TICKER>_* 2>/dev/null | head -1
 ```
+
+Newest first across both layouts: the new `./trading_desk_<TICKER>/detail_reports_<date>/` bundles and the legacy `./td_bundle_<TICKER>_<date>/` bundles (fallback for old runs).
 
 A **full report requires all seven module files plus a snapshot**: `module_technical`, `module_risk`, `module_sentiment`, `module_fundamental`, `module_composite`, `module_tradeplan`, `module_options`. If any is missing, the renderer exits 2 naming it — run the missing upstream skill first (composite-score runs the four evidence skills; trade-plan runs composite then options-strategy; then synthesize). Renormalized absences *inside* a module are fine; the **files** must exist.
 
@@ -32,7 +34,7 @@ A **full report requires all seven module files plus a snapshot**: `module_techn
 ## Step 2 — Render the skeleton
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_report.py --bundle ./td_bundle_<TICKER>_<YYYY-MM-DD>
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_report.py --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>
 ```
 
 The script writes `<TICKER>_Trade_Report_<date>.md` (exact path — bundle or parent per the output-location rule above — printed to stdout). It contains three pages, all tables and numbers already filled from the bundle, with empty `<!-- SLOT:name -->` marks for your prose:
@@ -65,7 +67,7 @@ Reuse the bundle's `brief_<dim>.md` files (they already cite only in-bundle numb
 ## Step 4 — Run the blocking §12 QC gate
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/report_qc.py --bundle ./td_bundle_<TICKER>_<YYYY-MM-DD> \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/report_qc.py --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> \
   --report <path printed by render_report.py, e.g. ./<TICKER>_Trade_Report_<date>.md>
 ```
 
@@ -89,11 +91,11 @@ When the user wants a change-report vs a prior bundle:
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_report.py --bundle ./<new_bundle> --delta --previous ./<old_bundle>
 ```
 
-Both bundles need `module_composite`. Output: `<TICKER>_Delta_Report_<date>.md` with composite delta table (old/new/Δ, grade change bolded), EV delta, level changes, structures added/removed, and a `delta_interpretation` slot. Fill that one slot, then QC the delta (auto-detected by filename — it runs checks number_provenance / footer_integrity / no_empty_slots only). **Pass `--previous` to the QC too** so the Δ columns (which are script-computed differences, not bundle leaves) and the old-value columns are recognized as in-bundle:
+Both bundles need `module_composite`. Output: `<TICKER>_Delta_Report_<date>.md` — written to the **same location rule as the full report** (the bundle's parent under the `detail_reports_<date>/` layout, inside the bundle for legacy) and printed to stdout. It carries a composite delta table (old/new/Δ, grade change bolded), EV delta, level changes, structures added/removed, and a `delta_interpretation` slot. Fill that one slot, then QC the delta (auto-detected by filename — it runs checks number_provenance / footer_integrity / no_empty_slots only). **Pass `--previous` to the QC too** so the Δ columns (which are script-computed differences, not bundle leaves) and the old-value columns are recognized as in-bundle:
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/report_qc.py --bundle ./<new_bundle> \
-  --report ./<new_bundle>/<TICKER>_Delta_Report_<date>.md --previous ./<old_bundle>
+  --report <path printed by render_report.py --delta> --previous ./<old_bundle>
 ```
 
 A module absent in either bundle → that section reads "n/a (module absent in {which})".

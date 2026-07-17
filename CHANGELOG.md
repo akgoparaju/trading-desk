@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased — Real-world feedback: data-mode preflight, web fallback, trading_desk layout
+
+Docs + skills layer for the v6 real-world feedback batch (script layer landed at `61d31fa`).
+Prose-only changes; the 623-test suite stays green.
+
+### Added
+- **Data-mode preflight (market-snapshot Step 0).** Explicit key/tier detection up front:
+  env-var check + one `GLOBAL_QUOTE` probe classify the run as `alpha_vantage` (premium),
+  `av_free_degraded` (free key OR **no key exported** — the bundled `.mcp.json` still answers at
+  Alpha Vantage's anonymous ~25-call/day quota), or `web_fallback` (no AV MCP). Interactive runs
+  are ASKED before proceeding on a degraded mode; unattended runs proceed and disclose. Recorded as
+  the top-level manifest `data_mode` key → `meta.data_mode`.
+- **Web-fallback fetch pass (market-snapshot Step 2-ALT).** FSI-style cited web research through the
+  same QC'd pipeline: stooq CSV OHLCV (ticker + SPY, `series_source: stooq_csv_close_as_adjusted`),
+  transcribed `web_fundamentals` (statement files win; gaps disclosed in
+  `fundamentals.web_transcribed_fields`) and `overview` substitute, options standing aside. Verbatim
+  transcription rule; the QC arithmetic cross-checks are the transcription audit.
+- **FSI runtime offer** in `full-trade-analysis` Phase 0 and standalone `composite-score`: ask once
+  (interactive) to install the claude-for-financial-services plugins before the compressed fundamental
+  pass; never auto-install.
+- **Free-tier budget guidance** in market-snapshot Important Notes: ~25 calls/day, one run/day,
+  never IV-history sampling; resume-next-day / switch-to-web-fallback on mid-run quota exhaustion.
+
+### Changed
+- **Bundle layout → `trading_desk_<TICKER>/`.** Parent dir (no date) holds the persistent
+  `iv_history_<TICKER>.json` and each dated `detail_reports_<YYYY-MM-DD>/` bundle. The report lands in
+  the parent as `<TICKER>_Trade_Report_<date>.md` (per `render_report.py`'s parent-output rule).
+- **Bundle discovery glob** in all evidence/decision/render skills now lists the new
+  `trading_desk_<TICKER>/detail_reports_*` layout first with legacy `td_bundle_<TICKER>_*` as a
+  labeled fallback for old bundles.
+- **Completeness statement** (full-trade-analysis Phase 6) now names `meta.data_mode` and lists
+  `web_transcribed_fields` when the mode is not `alpha_vantage`.
+- **README** gains a Data modes section (premium / free-or-no-key / web-fallback) and an Output layout
+  map; FSI section notes the runtime offer.
+
 ## 0.4.1 — 2026-07-16 · Rename
 
 Plugin, marketplace, and repo renamed `trade-decision` → **`trading-desk`** before first

@@ -22,8 +22,10 @@ Trigger phrases: "technical analysis MU", "chart check for AAPL", "support and r
 In the invoker's CWD, find the newest bundle for the ticker:
 
 ```bash
-ls -dt ./td_bundle_<TICKER>_* 2>/dev/null | head -1
+ls -dt ./trading_desk_<TICKER>/detail_reports_* ./td_bundle_<TICKER>_* 2>/dev/null | head -1
 ```
+
+Newest first across both layouts: the new `./trading_desk_<TICKER>/detail_reports_<date>/` bundles and the legacy `./td_bundle_<TICKER>_<date>/` bundles (fallback for old runs).
 
 - **If a bundle exists**, use it. Confirm it holds a `snapshot_<TICKER>_*.json` (the score script needs it).
 - **If NO bundle exists**, invoke the `market-snapshot` skill for `<TICKER>` first, then continue with the bundle it produces. Do not attempt to fetch data here yourself.
@@ -34,7 +36,7 @@ ls -dt ./td_bundle_<TICKER>_* 2>/dev/null | head -1
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/score_technical.py \
-  --bundle ./td_bundle_<TICKER>_<YYYY-MM-DD>
+  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>
 ```
 
 The script loads the newest snapshot, builds the S/R ladder (reusing the daily rows and, if present, the options chain), scores the four dimensions, and writes `<bundle>/module_technical.json` (its path is printed to stdout). Exit 2 means the bundle/snapshot could not be read — fix the bundle and re-run.
@@ -43,7 +45,7 @@ The script loads the newest snapshot, builds the S/R ladder (reusing the daily r
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/score_technical.py \
-  --bundle ./td_bundle_<TICKER>_<YYYY-MM-DD> \
+  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> \
   --divergence bearish \
   --divergence-justification "price higher highs, RSI lower highs into 130 resistance"
 ```

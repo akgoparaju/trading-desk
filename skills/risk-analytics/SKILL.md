@@ -24,8 +24,10 @@ Trigger phrases: "risk profile MU", "downside map for AAPL", "how risky is this 
 In the invoker's CWD, find the newest bundle for the ticker:
 
 ```bash
-ls -dt ./td_bundle_<TICKER>_* 2>/dev/null | head -1
+ls -dt ./trading_desk_<TICKER>/detail_reports_* ./td_bundle_<TICKER>_* 2>/dev/null | head -1
 ```
+
+Newest first across both layouts: the new `./trading_desk_<TICKER>/detail_reports_<date>/` bundles and the legacy `./td_bundle_<TICKER>_<date>/` bundles (fallback for old runs).
 
 - **If a bundle exists**, confirm it holds a `snapshot_<TICKER>_*.json`.
 - **If NO bundle exists**, invoke the `market-snapshot` skill for `<TICKER>` first, then continue with the bundle it produces. Do not attempt to fetch data here yourself.
@@ -48,14 +50,14 @@ Both are fed to the script as flags; the script computes the stress *level*. If 
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/score_risk.py \
-  --bundle ./td_bundle_<TICKER>_<YYYY-MM-DD>
+  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>
 ```
 
 With a stress scenario (both flags required together):
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/score_risk.py \
-  --bundle ./td_bundle_<TICKER>_<YYYY-MM-DD> \
+  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> \
   --stress-pct -0.30 \
   --top-risk "HBM demand air-pocket into the next print"
 ```

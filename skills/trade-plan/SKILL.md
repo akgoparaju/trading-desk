@@ -24,8 +24,10 @@ Trigger phrases: "trade plan for MU", "entry exit plan AAPL", "how would I posit
 In the invoker's CWD, find the newest bundle for the ticker:
 
 ```bash
-ls -dt ./td_bundle_<TICKER>_* 2>/dev/null | head -1
+ls -dt ./trading_desk_<TICKER>/detail_reports_* ./td_bundle_<TICKER>_* 2>/dev/null | head -1
 ```
+
+Newest first across both layouts: the new `./trading_desk_<TICKER>/detail_reports_<date>/` bundles and the legacy `./td_bundle_<TICKER>_<date>/` bundles (fallback for old runs).
 
 - **If NO bundle exists**, invoke the `market-snapshot` skill for `<TICKER>` first.
 - **Require `module_composite.json`.** If absent, run the **composite-score** skill first (it in turn runs the missing evidence skills). The trade-plan script exits 2 with "run composite-score first" if the composite is missing — the plan has no EV block, no hurdle, no scenario set without it.
@@ -56,7 +58,7 @@ Profile defaults to the composite's profile; override with `--profile trader|bal
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/trade_plan.py --stock-plan \
-  --bundle ./td_bundle_<TICKER>_<YYYY-MM-DD> \
+  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> \
   --catalyst-in-thesis yes \
   --catalyst-in-thesis-justification "bull case rests on the HBM3E ramp at the next print" \
   --fund-invalidation-metric "HBM revenue growth" \
@@ -85,7 +87,7 @@ Then fold its choices back into the plan:
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/trade_plan.py --synthesize \
-  --bundle ./td_bundle_<TICKER>_<YYYY-MM-DD>
+  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>
 ```
 
 This re-reads `module_tradeplan.json` + `module_options.json` (exit 2 "run options-strategy first" if the latter is missing) and updates `expression` with `synthesized: true`, `structures_selected` (the options module's chosen structures matching the expression mode, with strikes), and `hedge_structure` (the options module's hedge spec, if the plan's hedge is required). If a recommended structure's strikes are absent from `module_options.json`, the script exits 2 (consistency) — the options module must carry real strikes.

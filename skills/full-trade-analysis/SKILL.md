@@ -28,13 +28,20 @@ State the run parameters back to the user in **one line** before starting. Ask i
 - **Position context** — record ONLY if the user volunteers it. **Never solicit holdings.** v1 sizes a fresh position; existing-position deltas are out of scope (note it if offered).
 - **Depth** — if an FSI equity-research **initiation** already exists for the ticker, reuse its coverage for the fundamental read; else the compressed snapshot pass is used. This check is **best-effort** — absence is fine and disclosed, never a blocker.
 
-One-line echo, e.g.: `Running full-trade-analysis MU · profile=balanced (assumed) · horizon: swing into next print · no position context · fundamental: compressed pass (no FSI initiation found).`
+**FSI runtime offer (ASK ONCE, never auto-install).** Detect whether the FSI plugins are installed — are the `equity-research:*` skills available? If they are **ABSENT** and the run is **interactive**, ask once:
+> "Deep fundamental mode uses the claude-for-financial-services plugins (2 commands: `/plugin marketplace add` their marketplace, then `/plugin install equity-research financial-analysis`). Install now, or proceed with the built-in compressed fundamental pass?"
+
+**Unattended → proceed with the compressed pass and disclose.** Never auto-install. If the FSI skills are already present, skip the offer and reuse them per the Depth bullet.
+
+The data-mode preflight (Phase 1) runs inside market-snapshot; fold its outcome into the scope echo once known.
+
+One-line echo, e.g.: `Running full-trade-analysis MU · profile=balanced (assumed) · horizon: swing into next print · no position context · fundamental: compressed pass (no FSI initiation found) · data_mode: alpha_vantage.`
 
 ---
 
 ## Phase 1 — Snapshot
 
-Invoke the **market-snapshot** skill for `<TICKER>`. It builds `./td_bundle_<TICKER>_<YYYY-MM-DD>/`, fetches raw Alpha Vantage data, lets in-repo Python compute every number, fills qualitative text slots, and runs its own blocking gate.
+Invoke the **market-snapshot** skill for `<TICKER>`. It runs the **data-mode preflight** (Step 0 — announces `alpha_vantage | av_free_degraded | web_fallback` and, if interactive, asks before proceeding on a degraded mode), builds `./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>/` under the ticker parent, fetches raw Alpha Vantage data (or cited web sources in fallback), lets in-repo Python compute every number, fills qualitative text slots, and runs its own blocking gate. **Carry the reported `data_mode` forward** — it feeds the Phase 6 completeness statement.
 
 **GATE — snapshot QC (`qc_gate.py` exit 0).** The snapshot skill runs the gate itself. A check may be waived ONLY with a real, written justification (`--waive "check:reason"`). Print the attestation paragraph.
 
@@ -52,7 +59,7 @@ Dispatch evidence scoring to **subagents via the Agent tool**, one per module, s
 - **Wave 2 (after wave 1 completes):** `{ risk-analytics }` — reads the ladder. (The **fundamental** compressed pass is NOT dispatched here — the **composite-score** skill runs `score_fundamental.py` itself in Phase 3 if `module_fundamental.json` is absent. Note this so you don't double-run it.)
 
 **Every subagent prompt MUST contain, verbatim in spirit:**
-1. **The bundle path** — `./td_bundle_<TICKER>_<YYYY-MM-DD>` (absolute is safest).
+1. **The bundle path** — `./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>` (absolute is safest; legacy `./td_bundle_<TICKER>_<date>` bundles also resolve via the discovery glob).
 2. **READ AND FOLLOW its SKILL.md**, naming the exact path:
    - technical → `${CLAUDE_PLUGIN_ROOT}/skills/technical-analysis/SKILL.md`
    - sentiment → `${CLAUDE_PLUGIN_ROOT}/skills/sentiment-positioning/SKILL.md`
@@ -91,7 +98,7 @@ Invoke the **report-renderer** skill for the bundle: `render_report.py` writes t
 
 **GATE — report QC (`report_qc.py` exit 0, BLOCKING).** Fix the **prose**, never the numbers: `no_empty_slots` → fill the slot; `number_provenance` orphan → remove/rephrase to a printed figure (never invent a number); a table-driven check failing (composite_arithmetic / ev_consistency / sizing / strikes / pop_method) is an upstream module bug — fix the module and re-render. A genuinely justified failure may be `--waive "check:reason"` (disclosed, never to hide a fabricated number). Re-run until exit 0.
 
-**Deliver:** the **report path** + the **composite line** (`grade — action, score/100, profile`) + the **expression line** (recommended structure/size for the profile) + the **QC attestation** (gate verdict).
+**Deliver:** the **report path** — `render_report.py` writes it to the **ticker parent** `./trading_desk_<TICKER>/<TICKER>_Trade_Report_<date>.md` (a sibling of the `detail_reports_<date>/` data folder; legacy bundles keep it inside), printed to stdout — plus the **composite line** (`grade — action, score/100, profile`) + the **expression line** (recommended structure/size for the profile) + the **QC attestation** (gate verdict).
 
 ---
 
@@ -104,7 +111,7 @@ Invoke the **report-renderer** skill for the bundle: `render_report.py` writes t
 
 If the user accepts AND a scheduling facility is available (the `schedule` skill or `CronCreate`), create it — the scheduled action is exactly the re-run + `render_report.py --delta --previous <this_bundle>`. If no facility is available (or the user declines), hand them the one-line manual command instead. Never auto-create a schedule the user did not accept.
 
-**(c) Completeness statement (MANDATORY).** Emit the embedded completeness block: which of the five dimensions ran, which renormalized or were missing, whether FSI initiation coverage was reused or the compressed pass ran, and the snapshot's `meta.api_tier_notes`. The report always ships with this statement even under degradation.
+**(c) Completeness statement (MANDATORY).** Emit the embedded completeness block: which of the five dimensions ran, which renormalized or were missing, whether FSI initiation coverage was reused or the compressed pass ran, the snapshot's `meta.data_mode`, and its `meta.api_tier_notes`. **When `data_mode` is not `alpha_vantage`, name it explicitly and list `fundamentals.web_transcribed_fields`** (the fields sourced from cited web transcription) so a reader sees the reduced-provenance surface. The report always ships with this statement even under degradation.
 
 ---
 
@@ -136,6 +143,7 @@ _Sourced from bundle module JSONs · rubric versions in the report footer._
 - **Dimensions run:** technical / fundamental / sentiment / risk / thesis-conviction — <ran | renormalized | missing> each.
 - **Renormalized / missing:** <list any dimension the composite excluded or rescaled, or "none">.
 - **Fundamental depth:** <FSI initiation reused | compressed_snapshot_pass>.
+- **Data mode:** <meta.data_mode; when not alpha_vantage, add: web-transcribed fields = <fundamentals.web_transcribed_fields, or "none">, options = stand-aside>.
 - **API tier notes:** <snapshot meta.api_tier_notes, verbatim>.
 - **Gates:** snapshot QC <PASS/WAIVED:…> · report QC <PASS/WAIVED:…>.
 ```
@@ -154,6 +162,7 @@ _Sourced from bundle module JSONs · rubric versions in the report footer._
 ## Important Notes
 
 - **Single-snapshot rule (pipeline-wide).** One `snapshot.json` feeds every module and every subagent. Nobody re-fetches market data; a missing figure is a snapshot extension request, not a fetch.
+- **Data mode gates the depth, not the pipeline.** The market-snapshot preflight sets `alpha_vantage | av_free_degraded | web_fallback`. A degraded/fallback run still produces an honest, QC-passing report — options stand aside, fundamentals may be web-transcribed — but the completeness statement must name the mode. Only a FAILED snapshot QC gate stops the line.
 - **Subagent prompts forbid arithmetic-in-prose.** Every subagent must be told: cite only numbers already in the module JSON / snapshot; a number you would compute is a script change, not a prose change. This is the same rule the modules encode — the orchestrator enforces it at dispatch.
 - **Token hygiene.** Subagents return **paths + a ≤5-line summary**, never briefs or file dumps. Briefs live in the bundle; the report-renderer condenses them. **The options chain file is never read by anyone** but `scripts/chain.py`.
 - **Model discipline.** Evidence subagents run on a sonnet-or-opus-class scorer, never a frontier orchestrator model — the work is bounded and script-driven.

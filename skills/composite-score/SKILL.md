@@ -23,17 +23,22 @@ Trigger phrases: "score it", "composite for MU", "composite score AAPL", "what's
 In the invoker's CWD, find the newest bundle for the ticker:
 
 ```bash
-ls -dt ./td_bundle_<TICKER>_* 2>/dev/null | head -1
+ls -dt ./trading_desk_<TICKER>/detail_reports_* ./td_bundle_<TICKER>_* 2>/dev/null | head -1
 ```
+
+Newest first across both layouts: the new `./trading_desk_<TICKER>/detail_reports_<date>/` bundles and the legacy `./td_bundle_<TICKER>_<date>/` bundles (fallback for old runs).
 
 - **If NO bundle exists**, invoke the `market-snapshot` skill for `<TICKER>` first, then continue with the bundle it produces.
 - **Ensure the four evidence module JSONs are present** in the bundle. For each missing one, run its skill first:
   - `module_technical.json` → run the **technical-analysis** skill.
   - `module_sentiment.json` → run the **sentiment-positioning** skill.
   - `module_risk.json` → run the **risk-analytics** skill.
-  - `module_fundamental.json` → run the compressed-pass scorer directly:
+  - `module_fundamental.json` → this is where the run chooses **deep FSI reuse vs the compressed pass**. If invoked from **full-trade-analysis**, honor its Phase-0 FSI decision. If running **standalone** and the FSI plugins are **absent** (no `equity-research:*` skills) **and interactive**, make the same offer once — never auto-install:
+    > "Deep fundamental mode uses the claude-for-financial-services plugins (2 commands: `/plugin marketplace add` their marketplace, then `/plugin install equity-research financial-analysis`). Install now, or proceed with the built-in compressed fundamental pass?"
+
+    Unattended, or if the user declines, run the compressed-pass scorer directly:
     ```bash
-    python3 ${CLAUDE_PLUGIN_ROOT}/scripts/score_fundamental.py --bundle ./td_bundle_<TICKER>_<YYYY-MM-DD>
+    python3 ${CLAUDE_PLUGIN_ROOT}/scripts/score_fundamental.py --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>
     ```
     This is the snapshot-only compressed pass (deep FSI initiation/model reuse not applied) — **note that mode disclosure in your brief** (the module carries `fundamental_mode: "compressed_snapshot_pass"`).
 
@@ -90,8 +95,8 @@ Ask the user for the profile if interactive; otherwise default `balanced`. The p
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/score_composite.py \
-  --bundle ./td_bundle_<TICKER>_<YYYY-MM-DD> \
-  --scenarios ./td_bundle_<TICKER>_<YYYY-MM-DD>/scenarios.json \
+  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> \
+  --scenarios ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>/scenarios.json \
   --scenario-reasoning "HBM demand is the asymmetric driver; base assumes in-line ramp" \
   --variant some --variant-justification "differentiated on gross-margin path vs street" \
   --catalyst-clarity clear --catalyst-clarity-justification "HBM3E ramp dated to next print" \

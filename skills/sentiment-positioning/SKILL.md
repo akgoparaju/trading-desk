@@ -21,8 +21,10 @@ Trigger phrases: "sentiment check MU", "positioning for AAPL", "what's the stree
 In the invoker's CWD, find the newest bundle for the ticker:
 
 ```bash
-ls -dt ./td_bundle_<TICKER>_* 2>/dev/null | head -1
+ls -dt ./trading_desk_<TICKER>/detail_reports_* ./td_bundle_<TICKER>_* 2>/dev/null | head -1
 ```
+
+Newest first across both layouts: the new `./trading_desk_<TICKER>/detail_reports_<date>/` bundles and the legacy `./td_bundle_<TICKER>_<date>/` bundles (fallback for old runs).
 
 - **If a bundle exists**, confirm it holds a `snapshot_<TICKER>_*.json`.
 - **If NO bundle exists**, invoke the `market-snapshot` skill for `<TICKER>` first, then continue with the bundle it produces. Do not attempt to fetch data here yourself.
@@ -47,14 +49,14 @@ Each justification is one line. If you cannot justify a non-default flag from th
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/score_sentiment.py \
-  --bundle ./td_bundle_<TICKER>_<YYYY-MM-DD>
+  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>
 ```
 
 With judgment flags (each non-default value paired with its justification):
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/score_sentiment.py \
-  --bundle ./td_bundle_<TICKER>_<YYYY-MM-DD> \
+  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> \
   --rating-actions positive --rating-actions-justification "3 upgrades post-print" \
   --inst-flow accumulating --inst-flow-justification "13F net buys last quarter" \
   --insider-baseline unusual --insider-baseline-justification "CFO cluster sales at highs"

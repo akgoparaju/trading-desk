@@ -26,8 +26,10 @@ Trigger phrases: "options strategy for MU bullish", "options play NVDA", "what o
 In the invoker's CWD, find the newest bundle for the ticker:
 
 ```bash
-ls -dt ./td_bundle_<TICKER>_* 2>/dev/null | head -1
+ls -dt ./trading_desk_<TICKER>/detail_reports_* ./td_bundle_<TICKER>_* 2>/dev/null | head -1
 ```
+
+Newest first across both layouts: the new `./trading_desk_<TICKER>/detail_reports_<date>/` bundles and the legacy `./td_bundle_<TICKER>_<date>/` bundles (fallback for old runs).
 
 - **If NO bundle (or no snapshot with a chain) exists**, invoke the **market-snapshot** skill for `<TICKER>` first — options-strategy needs the on-disk chain that market-snapshot writes and references at `snapshot.options.chain_file_path`.
 - The script resolves that chain file **relative to the bundle** and loads it **only** through `chain.load_contracts`. If the chain is missing or unreadable, the script exits 2.
@@ -46,11 +48,11 @@ ls -dt ./td_bundle_<TICKER>_* 2>/dev/null | head -1
 ```bash
 # pipeline (invoked by trade-plan):
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/options_strategy.py \
-  --bundle ./td_bundle_<TICKER>_<YYYY-MM-DD> --mode pipeline
+  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> --mode pipeline
 
 # standalone:
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/options_strategy.py \
-  --bundle ./td_bundle_<TICKER>_<YYYY-MM-DD> --mode standalone --direction bullish
+  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> --mode standalone --direction bullish
 ```
 
 The script writes `<bundle>/module_options.json` (path printed to stdout). **How it's built (all mechanical):**
