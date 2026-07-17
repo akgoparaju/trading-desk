@@ -67,6 +67,8 @@ _NUM_RE = re.compile(r"\$?-?\d[\d,]*\.?\d*%?")
 # ISO date substrings (YYYY-MM-DD) are stripped before number extraction so a date
 # never contributes three orphan integers.
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# Full ISO-8601 timestamp (date + time), e.g. 2026-07-17T18:38:07Z.
+_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?Z?")
 # A semver-shaped version token (rubric/expression/schema/plugin versions), with or
 # without a leading 'v'. Matched EXACTLY against the bundle's own versions in
 # number_provenance -- an out-of-bundle version (e.g. v9.99.99) orphans.
@@ -128,7 +130,8 @@ def extract_numbers(text):
     out-of-bundle date or version in prose ORPHANS rather than being silently
     scrubbed away; see check_number_provenance.
     """
-    scrubbed = _DATE_RE.sub(" ", text)
+    scrubbed = _TS_RE.sub(" ", text)   # full timestamps before bare dates
+    scrubbed = _DATE_RE.sub(" ", scrubbed)
     scrubbed = _VERSION_TOKEN_RE.sub(" ", scrubbed)
     scrubbed = _LABEL_RE.sub(" ", scrubbed)
     out = []
@@ -478,7 +481,17 @@ def check_number_provenance(report_text, docs, extra_values=None,
             orphans.append(m)
     scanned = _VERSION_TOKEN_RE.sub(" ", scanned)
 
-    # 3) Date tokens: exact-match, then remove so their integers do not re-enter.
+    # 3a) FULL ISO timestamps first (date scrub alone leaves the time-of-day
+    #     digits to orphan as numbers — live-refresh finding: reused sources'
+    #     retrieved_utc minutes tripped provenance). The timestamp is verified
+    #     by its DATE component (times come from bundle retrieved_utc strings;
+    #     a fabricated timestamp is still caught by its date).
+    for m in _TS_RE.findall(scanned):
+        if m[:10] not in allowed_dates:
+            orphans.append(m)
+    scanned = _TS_RE.sub(" ", scanned)
+
+    # 3b) Date tokens: exact-match, then remove so their integers do not re-enter.
     for m in _DATE_RE.findall(scanned):
         if m not in allowed_dates:
             orphans.append(m)

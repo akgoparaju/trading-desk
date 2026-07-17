@@ -953,6 +953,29 @@ class TestReportQCProvenanceHardening(unittest.TestCase):
             self.assertIn("number_provenance", out)
             self.assertIn("2031-01-01", out)
 
+    def test_bundle_timestamp_time_digits_do_not_orphan(self):
+        # Live-refresh finding: reused sources put full ISO timestamps in the
+        # footer; the date scrub left the :MM:SS digits to orphan as numbers.
+        # A timestamp whose DATE is bundle-sourced must pass whole.
+        with tempfile.TemporaryDirectory() as d:
+            report = self._prep(d)
+            # the fixture bundle's as_of date with an arbitrary time-of-day,
+            # as a retrieved_utc echo would appear in the Sources footer line
+            _fill_slots(report)
+            with open(report, "a") as fh:
+                fh.write("\nSource retrieved 2026-07-16T18:38:07Z.\n")
+            rc, out, err = _qc(d, report)
+            self.assertEqual(rc, 0, out + err)
+
+    def test_fake_timestamp_date_still_orphans(self):
+        with tempfile.TemporaryDirectory() as d:
+            report = self._prep(d)
+            _fill_slots(report, overrides={
+                "tension": "Data pulled 2031-01-01T09:30:00Z, allegedly."})
+            rc, out, err = _qc(d, report)
+            self.assertEqual(rc, 1, out + err)
+            self.assertIn("number_provenance", out)
+
     def test_bogus_page_header_in_prose_fails(self):
         with tempfile.TemporaryDirectory() as d:
             report = self._prep(d)

@@ -95,6 +95,28 @@ def _parse_iso(ts):
     return dt
 
 
+def _source_age_days(s, field_group):
+    """Age in days of the newest meta.sources entry for ``field_group`` vs as_of.
+
+    None when as_of or the source's retrieved_utc is absent/unparseable.
+    """
+    meta = _get(s, "meta") or {}
+    as_of = _parse_iso(meta.get("as_of_utc"))
+    if as_of is None:
+        return None
+    best = None
+    for src in meta.get("sources") or []:
+        if not isinstance(src, dict) or src.get("field_group") != field_group:
+            continue
+        retrieved = _parse_iso(src.get("retrieved_utc"))
+        if retrieved is None:
+            continue
+        age = (as_of - retrieved).total_seconds() / 86400.0
+        if best is None or age < best:
+            best = age
+    return best
+
+
 def check_mktcap(s):
     """shares x price within +-2% of price.mktcap_overview, staleness-aware.
 
@@ -129,6 +151,18 @@ def check_mktcap(s):
                            f"overview cap matches shares x prev_close ({diff_prev:.2%} diff) "
                            f"but not shares x last ({diff:.2%}) — vendor mktcap is prior-session "
                            f"stale; share count reconciles (tol {_MKTCAP_TOL:.0%})")
+    # REUSE-AWARE SKIP (live-refresh finding): a refresh legally reuses an
+    # in-window overview whose vendor mktcap reflects ITS retrieval day; after a
+    # multi-session price move neither last nor prev_close can reconcile it, yet
+    # nothing is wrong. When the overview source is older than 2 days the check
+    # is unevaluable against a moved price -- SKIP with disclosure rather than
+    # false-FAIL. Fresh overviews (<= 2d) keep full teeth.
+    ov_age = _source_age_days(s, "overview")
+    if ov_age is not None and ov_age > 2:
+        return _result("check_mktcap", None,
+                       f"SKIP: vendor mktcap is {ov_age:.0f}d old (reused in-window "
+                       f"source) and price has moved ({diff:.2%} vs last) -- "
+                       f"share-count reconciliation deferred to the next full fetch")
     return _result("check_mktcap", False,
                    f"computed {computed:.4g} vs overview {overview:.4g}: "
                    f"{diff:.2%} diff (tol {_MKTCAP_TOL:.0%}; prev_close reconciliation also failed)")

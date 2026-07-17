@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased — Refresh mode (Feature B)
+## 0.6.0 — 2026-07-17 · Refresh mode
+
+Live-validated same day on real MU data: no-event refresh reused 10 groups, refetched 7
+(7 AV calls, ~13 min), carried judgments forward tagged, and caught a real −5.65% session
+(composite 66.95→62.85, B→B; both invalidation legs verified intact; previous bundle
+byte-identical). Review + live-run fixes: strict-inside reuse boundary with a gate
+cross-check test over every staleness window; ISO-timestamp tokens verified whole by
+their date (time digits no longer orphan); reuse-aware mktcap skip (stale in-window
+vendor cap + moved price is unevaluable, not wrong); corrected qc_gate/report_qc
+invocations in the skill. — Refresh mode (Feature B)
 
 Event-aware selective-refetch refresh so an existing ticker workspace can be re-run
 cheaply. Selective FETCHING, never selective SCORING — one new snapshot per refresh,

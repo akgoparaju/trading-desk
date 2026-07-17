@@ -161,6 +161,29 @@ class TestPerCheckMutations(unittest.TestCase):
             s["price"]["last"] = s["price"]["prev_close"] * 1.04
         self.assertIs(self._run_one(m, "check_mktcap")["passed"], False)
 
+    def test_mktcap_skips_on_reused_stale_overview_with_moved_price(self):
+        # Live-refresh finding: an in-window REUSED overview (vendor cap from its
+        # retrieval day) + a multi-session price move is unevaluable, not wrong.
+        def m(s):
+            # two-session move: BOTH last and prev_close far from the vendor cap
+            s["price"]["prev_close"] = 106.0
+            s["price"]["last"] = 112.0
+            s["price"]["mktcap_computed"] = (
+                s["price"]["last"] * s["price"]["shares_diluted_m"] * 1e6)
+            for src in s["meta"]["sources"]:
+                if src["field_group"] == "overview":
+                    src["retrieved_utc"] = "2026-07-06T12:00:00Z"  # 10d before as_of
+        r = self._run_one(m, "check_mktcap")
+        self.assertIsNone(r["passed"])
+        self.assertIn("deferred to the next full fetch", r["detail"])
+
+    def test_mktcap_still_fails_on_fresh_overview(self):
+        # Same divergence but a same-day overview: the check keeps its teeth.
+        def m(s):
+            s["price"]["prev_close"] = 106.0
+            s["price"]["last"] = 112.0
+        self.assertIs(self._run_one(m, "check_mktcap")["passed"], False)
+
     def test_ma_ordering_fails(self):
         def m(s): s["technicals"]["ma50"] = 105.0  # ma50 > last breaks uptrend
         self.assertIs(self._run_one(m, "check_ma_ordering")["passed"], False)

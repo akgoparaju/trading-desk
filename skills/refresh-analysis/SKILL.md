@@ -63,7 +63,11 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_snapshot.py \
 
 Then fill the qualitative TEXT slots: **carry forward the previous snapshot's text slots** (`inst_flow_notes`, and any prose events context), but **UPDATE `sentiment.news_sentiment_summary` and `events.catalysts`** from the FRESH `news_sentiment` / `earnings_calendar` fetches — they were always refetched, so their summaries must reflect the new data, not the old. Never edit a numeric field by hand.
 
-**GATE — snapshot QC (`qc_gate.py` exit 0, BLOCKING).** Waivers per usual (`--waive "check:reason"`, real justification only). Reused in-window files pass staleness by construction. Print the attestation.
+**GATE — snapshot QC (BLOCKING, exit 0):**
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/qc_gate.py <new_bundle>/snapshot_<TICKER>_<as_of>.json
+```
+(The snapshot path is POSITIONAL — there is no `--bundle` flag on this CLI.) Waivers per usual (`--waive "check:reason"`, real justification only). Reused in-window files pass staleness by construction. Print the attestation.
 
 ---
 
@@ -82,7 +86,8 @@ Re-run the full module chain against the new bundle, in dependency order — **t
 ## Step 6 — Render BOTH reports (blocking)
 
 ```bash
-# Full report → lands in the parent as <TICKER>_Trade_Report_<as_of>.md
+# Full report → written to trading_desk_<TICKER>/ (the TICKER folder, one level above
+# the detail_reports_<as_of>/ bundle) as <TICKER>_Trade_Report_<as_of>.md
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_report.py \
   --bundle ./trading_desk_<TICKER>/detail_reports_<as_of>
 # Delta report vs the previous bundle
