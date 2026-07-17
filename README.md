@@ -23,7 +23,7 @@ Data sources are yours to connect (or none: the built-in `stooq+web` mode needs 
 claude mcp add --transport http alphavantage "https://mcp.alphavantage.co/mcp?apikey=YOUR_KEY"
 # or connect any market-data MCP (FMP, Polygon, ...) — see docs/CANONICAL_CONTRACT.md
 ```
-The first run asks which connected source to use and remembers it (`trading_desk_config.json`).
+The first run asks which connected source to use and remembers it (`trading_desk_config.json`). After install, the first session shows a ONE-TIME notice if the optional FSI plugins are absent; say `set up FSI` any time to get the 2-command install.
 
 Optional: get an Alpha Vantage key from [alphavantage.co](https://www.alphavantage.co/support/#api-key) and connect the MCP yourself (command above). There is no bundled server — a source is only present if you added it.
 

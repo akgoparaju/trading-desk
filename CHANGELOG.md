@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.0 — 2026-07-17 · Post-install FSI notice (SessionStart hook)
+
+Real-user finding #4: install is silent (no post-install hook exists in the plugin
+system) and the in-skill FSI offer only fires when an analysis runs — so a fresh
+install surfaced nothing. The plugin now ships a SessionStart hook (harness-executed
+script, not prose): shows a one-time notice right after install when FSI is absent
+and no fsi_offer is recorded (marker in the plugin data dir), injects a reminder for
+the model to make the recorded offer if an analysis starts, and stays silent forever
+after — and always silent when FSI is installed or a choice is recorded.
+
 ## 0.8.1 — 2026-07-17 · FSI offer hardened
 
 Real-user finding: the FSI install offer never surfaced. It was advisory prose an agent
