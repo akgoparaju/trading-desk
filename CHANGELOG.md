@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- **Detail report argues the case (Task C4): why-this-call, context narrative,
+  evidence notes, full options render.** The detail docket's pages 3-6 no longer
+  dump arithmetic — they argue the thesis, rendering the captured judgment the
+  pipeline already wrote.
+  - `render_pdf.py`: new **WHY THIS CALL** page (after the exec repeat) —
+    pure module-JSON rendering of `ev.scenario_reasoning`, each conviction subscore
+    with its flag value + justification (variant / catalyst_clarity / invalidation
+    from `module_composite.flags`), the trade-plan judgment flags
+    (catalyst-in-thesis + fundamental-invalidation from `module_tradeplan.flags`),
+    the fundamental moat flag (from `module_fundamental.flags`, may cite C-IDs), and
+    the sentiment judgment flags (rating_actions / inst_flow / insider_baseline).
+    New **COMPANY CONTEXT** sections (THE BUSINESS / WHAT'S MOVING THE STOCK / THE
+    CASES / RISKS (ARGUED) + a FINDINGS footnote block) rendered ONLY from a
+    `module_context.json` carrying `qc.qc_passed`; absent/unstamped → one disclosure
+    line (which rides the WHY page, not a near-empty page of its own).
+  - Per-dimension EVIDENCE sections now render the ~200-word `evidence_notes` slot
+    as the BODY and demote the arithmetic to a small-type **SCORING TRAIL** exhibit;
+    bundles without `evidence_notes` keep the brief/arithmetic fallback.
+  - Mechanical fixes: chart-to-section mapping corrected (drawdown_history +
+    vol_regime → Risk; vol_term_structure / skew / expected_move_cone / oi_walls →
+    Options); the **Options** section renders the FULL module (vol dashboard
+    mini-table, recommended + declined tables with reasons, per-structure management
+    rules, warnings_global, hedge_structure); the downside map is de-duplicated to
+    chart + a compact 5-row NEAREST DOWNSIDE ANCHORS table; a scripted deep-entry
+    commentary line prints under the trade plan when any entry sits >25% below last.
+  - `report_qc.py`: the `--pdf-slots` provenance scan documents + covers the new
+    `evidence_notes` map (a fabricated number in a note orphans like any slot prose).
+  - Tests: WHY-THIS-CALL justification rendering, context appear/omit (stamped vs
+    unstamped), evidence_notes orphan scan, chart-mapping assertions, options
+    full-render, downside dedup, deep-entry trigger. 852 tests (was 818), all green.
+  - Files: `scripts/render_pdf.py`, `scripts/report_qc.py`, `tests/test_render_pdf.py`.
+
 - **Coverage-first pipeline wiring (Task C3, SKILL prose): always-initiate,
   context-grounded judgments, compressed demoted to floor.** Deep coverage is now
   the DEFAULT read; the compressed pass is the FSI-absent floor only; the context

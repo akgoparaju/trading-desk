@@ -824,14 +824,32 @@ def run_report_qc(bundle, report_path, delta=False, previous=None):
 # are the LLM-authored prose the render embeds; every number in them must trace to
 # the bundle exactly like a report prose slot. ``qc_passed``/``checked_utc`` are
 # the stamp keys and are NOT prose (skipped when collecting slot strings).
+#
+# The pdf_slots shape (C4 extension): thesis_bullets / desk_read / positioning /
+# delta_interpretation, PLUS ``evidence_notes`` — a dict of ~200-word per-dimension
+# prose notes {"technical","fundamental","sentiment","risk","options"} that
+# render_pdf embeds as the BODY of each EVIDENCE section (the arithmetic string is
+# demoted to a small "SCORING TRAIL" exhibit). Those notes are LLM-authored prose
+# that MUST pass number_provenance exactly like every other slot: collect_slot_strings
+# recurses the whole structure, so each evidence_notes value is scanned and a
+# fabricated number in a note orphans. Older bundles without evidence_notes are
+# unaffected (the key is simply absent; render_pdf falls back to the brief /
+# arithmetic).
 _SLOT_STAMP_KEYS = ("qc_passed", "checked_utc")
+# The evidence_notes sub-keys (contract-pinned, informational). Their VALUES are
+# prose and are scanned; this tuple documents the expected dimensions.
+_EVIDENCE_NOTE_DIMS = ("technical", "fundamental", "sentiment", "risk", "options")
 
 
 def collect_slot_strings(slots):
     """Every prose string across the pdf_slots structure (recursing dict/list).
 
     Skips the stamp keys (qc_passed/checked_utc) so a re-run over an already-
-    stamped file never scans the stamp itself. Returns a flat list of strings.
+    stamped file never scans the stamp itself. The recursion is exhaustive over
+    dicts and lists, so the C4 ``evidence_notes`` map (per-dimension ~200-word
+    notes) is scanned identically to the other slots — a fabricated number in an
+    evidence note orphans exactly like one in a thesis bullet. Returns a flat list
+    of strings.
     """
     out = []
 

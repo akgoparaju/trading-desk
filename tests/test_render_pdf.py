@@ -87,6 +87,78 @@ def _clean_slots():
     }
 
 
+def _clean_slots_with_notes():
+    """_clean_slots plus an evidence_notes map whose numbers are fixture leaves.
+
+    Every number cited (100 / 95 / 90 / 82) is a fixture-bundle leaf, so the
+    slots gate PASSES; a fabricated number in a note (tested separately) orphans.
+    """
+    slots = _clean_slots()
+    slots["evidence_notes"] = {
+        "technical": ("Trend structure holds above the 95 support shelf; "
+                      "momentum is constructive but not extended into the print."),
+        "fundamental": "Valuation sits below the 5-year median; growth intact.",
+        "sentiment": "Street constructive; positioning is not crowded.",
+        "risk": "Realized vol elevated; the downside is anchored at 82.",
+        "options": "IV is cheap vs realized; defined-risk is favored into 90.",
+    }
+    return slots
+
+
+def _context_doc(stamped=True):
+    """A minimal, gate-shaped module_context.json for the docket tests.
+
+    Numbers in the prose are kept to fixture-bundle leaves (100/95/90) so the
+    context gate would pass; ``stamped`` controls whether the qc attestation is
+    written (a stamped module renders the CONTEXT NARRATIVE; an unstamped one is
+    omitted with a disclosure line).
+    """
+    mod = {
+        "skill": "company-context", "version": "1.0.0", "ticker": "MU",
+        "as_of": "2026-07-16", "mode": "web_compressed",
+        "business": {
+            "what_they_sell": "Memory and storage semiconductors.",
+            "revenue_drivers": ["DRAM pricing", "HBM ramp"],
+            "segments": ["Compute & Networking", "Mobile"],
+        },
+        "competitive": {
+            "position": "A scale cost leader (C1).",
+            "moat_evidence": ["cost-curve lead"],
+            "competitors": ["Samsung", "SK Hynix"],
+        },
+        "live_tape": [
+            {"date": "2026-07-15", "event": "HBM qualification headline",
+             "why_it_matters": "validates the ramp (C2)"},
+        ],
+        "cases": {
+            "bull": {"narrative": "The HBM ramp drives margins (C1).",
+                     "conditions": ["revisions stay positive"]},
+            "base": {"narrative": "Consolidation below the shelf.",
+                     "conditions": ["support at 95 holds"]},
+            "bear": {"narrative": "A DRAM-oversupply air-pocket.",
+                     "conditions": ["pricing rolls over"]},
+        },
+        "risks": [
+            {"risk": "DRAM oversupply", "why": "cyclical pricing risk",
+             "anchor": "https://example.com/dram"},
+        ],
+        "findings": [
+            {"id": "C1", "claim": "Scale cost leader", "source": "coverage/research.md"},
+            {"id": "C2", "claim": "HBM qualified", "source": "https://example.com/hbm"},
+        ],
+        "qc": ({"qc_passed": True, "checked_utc": "2026-07-16T00:00:00Z"}
+               if stamped else None),
+    }
+    return mod
+
+
+def _write_context(bundle, module):
+    path = os.path.join(bundle, "module_context.json")
+    with open(path, "w") as fh:
+        json.dump(module, fh)
+    return path
+
+
 def _write_slots(bundle, slots):
     path = os.path.join(bundle, "pdf_slots.json")
     with open(path, "w") as fh:
@@ -354,6 +426,171 @@ class TestActionShort(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# C4 pure functions: chart mapping, deep-entry trigger, nearest-anchors dedup,
+# evidence-note resolution, context gate, conviction subscore parsing.
+# --------------------------------------------------------------------------- #
+
+class TestChartSectionMapping(unittest.TestCase):
+    """The chart-to-section mapping (fix 4a): risk vs options vs per-dimension."""
+
+    def test_risk_charts_map_to_risk_dimension(self):
+        # drawdown_history + vol_regime describe RISK, not technical.
+        self.assertEqual(rp._DIM_CHARTS["risk"],
+                         ["drawdown_history", "vol_regime"])
+        # they are NOT under technical anymore.
+        self.assertNotIn("drawdown_history", rp._DIM_CHARTS["technical"])
+        self.assertNotIn("vol_regime", rp._DIM_CHARTS["technical"])
+
+    def test_options_charts_are_the_options_set(self):
+        # vol_term_structure / skew / expected_move_cone / oi_walls are OPTIONS.
+        self.assertEqual(
+            rp._OPTIONS_CHARTS,
+            ["vol_term_structure", "skew", "expected_move_cone", "oi_walls"])
+
+    def test_options_charts_not_under_any_dimension(self):
+        # None of the options charts leaks back into a dimension mapping.
+        for c in rp._OPTIONS_CHARTS:
+            for dim, charts in rp._DIM_CHARTS.items():
+                self.assertNotIn(c, charts,
+                                 "%s must not be under dimension %s" % (c, dim))
+
+    def test_fundamental_keeps_its_valuation_charts(self):
+        self.assertEqual(rp._DIM_CHARTS["fundamental"], ["revisions", "pe_band"])
+
+
+class TestDeepEntryTrigger(unittest.TestCase):
+    """The deep-entry commentary line trigger (fix 4d): any entry >25% below last."""
+
+    def _docs(self, last, entry_levels):
+        return {
+            "snapshot": {"price": {"last": last}},
+            "module_tradeplan": {"stock_plan": {
+                "entries": [{"level": lv} for lv in entry_levels]}},
+        }
+
+    def test_no_deep_entry_when_all_shallow(self):
+        # 95 / 90 vs last 100 -> deepest is 10% below -> no line.
+        self.assertFalse(rp._has_deep_entry(self._docs(100.0, [95.0, 90.0])))
+
+    def test_deep_entry_fires_past_25pct(self):
+        # 70 vs last 100 -> 30% below -> fires.
+        self.assertTrue(rp._has_deep_entry(self._docs(100.0, [95.0, 70.0])))
+
+    def test_boundary_exactly_25pct_does_not_fire(self):
+        # 75 vs 100 -> exactly 25% -> strict '>' means NO line.
+        self.assertFalse(rp._has_deep_entry(self._docs(100.0, [75.0])))
+
+    def test_missing_last_is_no_line(self):
+        self.assertFalse(rp._has_deep_entry(self._docs(None, [70.0])))
+
+    def test_line_text_is_the_scripted_static_sentence(self):
+        # It is a fixed sentence, not LLM prose.
+        self.assertIn("structural supports", rp._DEEP_ENTRY_LINE)
+        self.assertIn("conditional adds", rp._DEEP_ENTRY_LINE)
+        self.assertIn("not", rp._DEEP_ENTRY_LINE.lower())
+
+
+class TestNearestDownsideAnchors(unittest.TestCase):
+    """The downside dedup (fix 4c): a compact <=5 nearest-anchor companion."""
+
+    def _docs(self, rows):
+        return {"module_risk": {"tables": {"downside_map": rows}}}
+
+    def test_caps_at_five_nearest_by_distance(self):
+        rows = [{"level": 100 - i, "pct_from_last": -i / 100.0}
+                for i in range(1, 9)]  # 8 rows, 1%..8% down
+        near = rp._nearest_downside_anchors(self._docs(rows), n=5)
+        self.assertEqual(len(near), 5)
+        # the five nearest are the 1%..5% rows (levels 99..95).
+        levels = {r["level"] for r in near}
+        self.assertEqual(levels, {99, 98, 97, 96, 95})
+
+    def test_sorted_shallowest_first_descent(self):
+        # Displayed shallowest (least-negative) at the top, deepest at the bottom,
+        # so the table reads top-to-bottom like a descent.
+        rows = [{"level": 82, "pct_from_last": -0.18},
+                {"level": 95, "pct_from_last": -0.05},
+                {"level": 90, "pct_from_last": -0.10}]
+        near = rp._nearest_downside_anchors(self._docs(rows), n=5)
+        pcts = [r["pct_from_last"] for r in near]
+        self.assertEqual(pcts, [-0.05, -0.10, -0.18])  # descending -> descent
+
+    def test_empty_map_returns_empty(self):
+        self.assertEqual(rp._nearest_downside_anchors({}, n=5), [])
+
+
+class TestEvidenceNoteResolution(unittest.TestCase):
+    """The evidence-note body resolver (fix 3): note present vs older-bundle fallback."""
+
+    def test_returns_note_when_present(self):
+        slots = {"evidence_notes": {"risk": "The downside is anchored."}}
+        self.assertEqual(rp._evidence_note(slots, "risk"),
+                         "The downside is anchored.")
+
+    def test_absent_evidence_notes_returns_empty(self):
+        # Older bundle with no evidence_notes key -> '' (fallback preserved).
+        self.assertEqual(rp._evidence_note({"thesis_bullets": []}, "risk"), "")
+
+    def test_absent_dimension_returns_empty(self):
+        slots = {"evidence_notes": {"risk": "x"}}
+        self.assertEqual(rp._evidence_note(slots, "technical"), "")
+
+    def test_blank_note_returns_empty(self):
+        self.assertEqual(rp._evidence_note({"evidence_notes": {"risk": "  "}},
+                                           "risk"), "")
+
+
+class TestContextGate(unittest.TestCase):
+    """The context render gate (deliverable 2): only a STAMPED module renders."""
+
+    def test_stamped_module_gates_true(self):
+        self.assertTrue(rp.context_gate_ok(_context_doc(stamped=True)))
+
+    def test_unstamped_module_gates_false(self):
+        # authored but never gated -> treated as absent (disclosure path).
+        self.assertFalse(rp.context_gate_ok(_context_doc(stamped=False)))
+
+    def test_none_gates_false(self):
+        self.assertFalse(rp.context_gate_ok(None))
+
+    def test_load_context_absent_returns_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(rp.load_context(d))
+
+    def test_load_context_reads_module(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_context(d, _context_doc(stamped=True))
+            mod = rp.load_context(d)
+            self.assertIsInstance(mod, dict)
+            self.assertTrue(rp.context_gate_ok(mod))
+
+
+class TestConvictionSubscoreParse(unittest.TestCase):
+    """The conviction-subscore parser feeding WHY THIS CALL (deliverable 1)."""
+
+    def test_flag_style_subscore(self):
+        name, val, just = rp._parse_conviction_subscore(
+            "variant some -> 12/20 (Modestly differentiated: consensus underrates)")
+        self.assertEqual(name, "variant")
+        self.assertEqual(val, "some")
+        self.assertIn("Modestly differentiated", just)
+
+    def test_hyphenated_flag_value(self):
+        name, val, just = rp._parse_conviction_subscore(
+            "invalidation both-legs -> 20/20 (stop + metric)")
+        self.assertEqual(name, "invalidation")
+        self.assertEqual(val, "both-legs")
+        self.assertEqual(just, "stop + metric")
+
+    def test_arithmetic_subscore_has_no_flag_value(self):
+        name, val, just = rp._parse_conviction_subscore(
+            "ev_asymmetry: ev 0.06 / hurdle 0.12 = ratio 0.55 -> 12/40")
+        self.assertEqual(name, "ev_asymmetry")
+        self.assertIsNone(val)  # the arithmetic tail is not a flag word.
+        self.assertIsNone(just)
+
+
+# --------------------------------------------------------------------------- #
 # report_qc --pdf-slots: orphan fails, clean passes + stamp written.
 # --------------------------------------------------------------------------- #
 
@@ -446,6 +683,42 @@ class TestSlotsProvenance(unittest.TestCase):
             self.assertEqual(rc, 1, out + err)
             self.assertIn("2031-01-01", out)
 
+    # -- evidence_notes slots (C4): scanned like every other prose slot. --
+
+    def test_clean_evidence_notes_pass_and_stamp(self):
+        # A slots file with in-bundle evidence_notes passes and stamps.
+        with tempfile.TemporaryDirectory() as d:
+            _mk_bundle(d)
+            path = _write_slots(d, _clean_slots_with_notes())
+            rc, out, err = _qc_slots(d, path)
+            self.assertEqual(rc, 0, out + err)
+            with open(path) as fh:
+                stamped = json.load(fh)
+            self.assertIs(stamped.get("qc_passed"), True)
+            # evidence_notes preserved through the stamp write.
+            self.assertEqual(len(stamped["evidence_notes"]), 5)
+
+    def test_fabricated_number_in_evidence_note_orphans(self):
+        # A fabricated number in an evidence note must orphan (the note is prose).
+        with tempfile.TemporaryDirectory() as d:
+            _mk_bundle(d)
+            slots = _clean_slots_with_notes()
+            slots["evidence_notes"]["risk"] = "A hidden 5150 stop lurks below."
+            path = _write_slots(d, slots)
+            rc, out, err = _qc_slots(d, path)
+            self.assertEqual(rc, 1, out + err)
+            self.assertIn("number_provenance", out)
+            self.assertIn("5150", out)
+            with open(path) as fh:
+                self.assertNotIn("qc_passed", json.load(fh))
+
+    def test_collect_slot_strings_includes_evidence_notes(self):
+        # The collect function scans every evidence note (contract pin).
+        slots = _clean_slots_with_notes()
+        collected = rq.collect_slot_strings(slots)
+        for note in slots["evidence_notes"].values():
+            self.assertIn(note, collected)
+
 
 # --------------------------------------------------------------------------- #
 # render_pdf refuses exec/detail when the slots stamp is absent (exit 2).
@@ -496,12 +769,14 @@ class TestSlotsGateEnforced(unittest.TestCase):
 
 @unittest.skipUnless(_CAN_RENDER, "reportlab+matplotlib required for render smoke")
 class TestRenderSmoke(unittest.TestCase):
-    def _prep_stamped(self, d, charts=True):
+    def _prep_stamped(self, d, charts=True, slots=None, context=None):
         _mk_bundle(d)
-        path = _write_slots(d, _clean_slots())
+        path = _write_slots(d, slots or _clean_slots())
         # Run the real slots gate to write the stamp (also exercises the gate).
         rc, out, err = _qc_slots(d, path)
         self.assertEqual(rc, 0, out + err)
+        if context is not None:
+            _write_context(d, context)
         if charts:
             from scripts import render_charts
             docs = render_charts.load_docs(d)
@@ -518,19 +793,151 @@ class TestRenderSmoke(unittest.TestCase):
             self.assertEqual(_pdf_page_count(pdf), 2)
 
     def test_detail_renders_full_docket(self):
-        # The detail is the multi-page evidence docket: 2 exec pages + one or
-        # more PACKED dimension pages (two/three small sections flow onto one
-        # page -- density fix) + options + downside/monitoring + appendix. The
-        # floor is therefore 2 exec + >=1 dim + 3 tail = 6; the minimal fixture
-        # (chart-less sections all pack onto a single dim page) renders exactly
-        # 6. A regression that dropped a whole section-block would fall below.
+        # The detail (C4) is: 2 exec pages + 1 WHY-THIS-CALL page (which also
+        # carries the context DISCLOSURE line when no stamped context module) +
+        # >=1 PACKED dimension page + options + downside/monitoring + appendix.
+        # No dedicated context page renders in the no-context branch (fix 4e: a
+        # one-line disclosure never opens a near-empty page). The floor is
+        # therefore 2 exec + 1 why + >=1 dim + 3 tail = 7. A regression that
+        # dropped a whole section-block would fall below.
         with tempfile.TemporaryDirectory() as d:
             self._prep_stamped(d)
             rc, out, err = _render(d, "detail")
             self.assertEqual(rc, 0, out + err)
             pdf = os.path.join(d, "MU_Detail_2026-07-16.pdf")
             self.assertTrue(os.path.isfile(pdf), out + err)
-            self.assertGreaterEqual(_pdf_page_count(pdf), 6)
+            self.assertGreaterEqual(_pdf_page_count(pdf), 7)
+
+    def test_detail_renders_why_this_call_from_flags(self):
+        # WHY THIS CALL renders the captured judgment: the composite flag values
+        # AND their justification text (deliverable 1) — pure module-JSON prose.
+        # The fixture sentiment flags are empty and the fixture tradeplan lacks a
+        # catalyst-in-thesis justification, so we ENRICH those two module JSONs
+        # in-bundle (without touching the shared fixture builders) to exercise the
+        # trade-plan + sentiment sub-blocks.
+        with tempfile.TemporaryDirectory() as d:
+            self._prep_stamped(d)
+            # Enrich the sentiment flags (rating_actions/inst_flow/insider_baseline).
+            sent_path = os.path.join(d, "module_sentiment.json")
+            with open(sent_path) as fh:
+                sent = json.load(fh)
+            sent["flags"] = {
+                "rating_actions": "neutral",
+                "rating_actions_justification": "no rating changes this cycle",
+                "inst_flow": "unknown", "inst_flow_justification": None,
+                "insider_baseline": "normal", "insider_baseline_justification": None,
+            }
+            with open(sent_path, "w") as fh:
+                json.dump(sent, fh)
+            # Enrich the tradeplan catalyst-in-thesis justification.
+            tp_path = os.path.join(d, "module_tradeplan.json")
+            with open(tp_path) as fh:
+                tp = json.load(fh)
+            tp["flags"]["catalyst_in_thesis_justification"] = \
+                "bull case rests on the print"
+            with open(tp_path, "w") as fh:
+                json.dump(tp, fh)
+
+            rc, out, err = _render(d, "detail")
+            self.assertEqual(rc, 0, out + err)
+            text = _pdf_text(os.path.join(d, "MU_Detail_2026-07-16.pdf"))
+            self.assertIn(b"WHY THIS CALL", text)
+            # scenario reasoning paragraph (from module_composite.ev).
+            self.assertIn(b"HBM demand asymmetric", text)
+            # a conviction flag JUSTIFICATION (not just the value).
+            self.assertIn(b"consensus underrates HBM", text)
+            # a trade-plan judgment justification.
+            self.assertIn(b"bull case rests on the print", text)
+            # a fundamental-invalidation justification from tradeplan flags.
+            self.assertIn(b"HBM is the margin thesis", text)
+            # sentiment flags render (rating actions justification present).
+            self.assertIn(b"rating actions", text)
+            self.assertIn(b"no rating changes this cycle", text)
+
+    def test_context_sections_omitted_without_module(self):
+        # No module_context in the bundle -> narrative omitted, disclosure shown.
+        with tempfile.TemporaryDirectory() as d:
+            self._prep_stamped(d)  # no context written
+            rc, out, err = _render(d, "detail")
+            self.assertEqual(rc, 0, out + err)
+            text = _pdf_text(os.path.join(d, "MU_Detail_2026-07-16.pdf"))
+            self.assertIn(b"No gated company-context", text)
+            # the narrative headers are NOT present.
+            self.assertNotIn(b"THE BUSINESS", text)
+            self.assertNotIn(b"THE CASES", text)
+
+    def test_context_sections_omitted_when_unstamped(self):
+        # An authored-but-UNSTAMPED module is treated as absent (disclosure path).
+        with tempfile.TemporaryDirectory() as d:
+            self._prep_stamped(d, context=_context_doc(stamped=False))
+            rc, out, err = _render(d, "detail")
+            self.assertEqual(rc, 0, out + err)
+            text = _pdf_text(os.path.join(d, "MU_Detail_2026-07-16.pdf"))
+            self.assertIn(b"No gated company-context", text)
+            self.assertNotIn(b"THE BUSINESS", text)
+
+    def test_context_sections_render_when_stamped(self):
+        # A STAMPED module renders the full CONTEXT NARRATIVE: business, cases,
+        # risks, and the findings footnote block (deliverable 2).
+        with tempfile.TemporaryDirectory() as d:
+            self._prep_stamped(d, context=_context_doc(stamped=True))
+            rc, out, err = _render(d, "detail")
+            self.assertEqual(rc, 0, out + err)
+            text = _pdf_text(os.path.join(d, "MU_Detail_2026-07-16.pdf"))
+            self.assertIn(b"THE BUSINESS", text)
+            self.assertIn(b"Memory and storage", text)
+            self.assertIn(b"THE CASES", text)
+            self.assertIn(b"RISKS", text)
+            self.assertIn(b"FINDINGS", text)
+            # a live_tape event rides under WHAT'S MOVING THE STOCK.
+            self.assertIn(b"HBM qualification", text)
+            # the findings registry (id + source) appears.
+            self.assertIn(b"C1", text)
+            # the stamped module adds a dedicated page (>= the no-context floor).
+            self.assertGreaterEqual(
+                _pdf_page_count(os.path.join(d, "MU_Detail_2026-07-16.pdf")), 8)
+
+    def test_options_section_renders_full_module(self):
+        # The options section renders the FULL module (fix 4b), not 2 rows:
+        # vol dashboard mini-table, per-structure management rules, declined
+        # reasons, and warnings_global.
+        with tempfile.TemporaryDirectory() as d:
+            self._prep_stamped(d)
+            rc, out, err = _render(d, "detail")
+            self.assertEqual(rc, 0, out + err)
+            text = _pdf_text(os.path.join(d, "MU_Detail_2026-07-16.pdf"))
+            self.assertIn(b"Vol dashboard", text)
+            self.assertIn(b"IV pctile", text)
+            # per-structure management rules ('Manage: ...').
+            self.assertIn(b"Manage:", text)
+            # a declined structure WITH its reason.
+            self.assertIn(b"cash_secured_put", text)
+            self.assertIn(b"earnings within 30d", text)
+            # the global binary-event warning.
+            self.assertIn(b"BINARY EVENT", text)
+
+    def test_downside_map_dedup_uses_nearest_table(self):
+        # The dedup (fix 4c): the compact NEAREST-anchors table replaces the full
+        # downside_map dump (chart carries the full ladder).
+        with tempfile.TemporaryDirectory() as d:
+            self._prep_stamped(d)
+            rc, out, err = _render(d, "detail")
+            self.assertEqual(rc, 0, out + err)
+            text = _pdf_text(os.path.join(d, "MU_Detail_2026-07-16.pdf"))
+            self.assertIn(b"NEAREST DOWNSIDE ANCHORS", text)
+
+    def test_evidence_note_becomes_body_with_scoring_trail(self):
+        # With evidence_notes present, the note is the BODY and the arithmetic is
+        # demoted to a small-type SCORING TRAIL exhibit (fix 3).
+        with tempfile.TemporaryDirectory() as d:
+            self._prep_stamped(d, slots=_clean_slots_with_notes())
+            rc, out, err = _render(d, "detail")
+            self.assertEqual(rc, 0, out + err)
+            text = _pdf_text(os.path.join(d, "MU_Detail_2026-07-16.pdf"))
+            # the note prose appears as body.
+            self.assertIn(b"constructive but not extended", text)
+            # the SCORING TRAIL exhibit label appears.
+            self.assertIn(b"SCORING TRAIL", text)
 
     def test_delta_renders_one_page(self):
         with tempfile.TemporaryDirectory() as old, tempfile.TemporaryDirectory() as new:

@@ -116,6 +116,44 @@ def slots_gate_ok(bundle):
     return load_slots(bundle).get("qc_passed") is True
 
 
+def _context_path(bundle):
+    return os.path.join(bundle, "module_context.json")
+
+
+def load_context(bundle):
+    """Load module_context.json (or None if absent/unreadable/unparseable).
+
+    The company-context module (C2) is OPTIONAL in a bundle: only a coverage-first
+    run authors it. When present AND stamped (``qc.qc_passed``) the detail report
+    renders the CONTEXT NARRATIVE sections from it; when absent or unstamped, those
+    sections are omitted with a one-line disclosure (see ``context_gate_ok``).
+    """
+    path = _context_path(bundle)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def context_gate_ok(context):
+    """True iff a loaded context module carries qc.qc_passed=true.
+
+    The CONTEXT NARRATIVE sections render ONLY from a context module that passed
+    its own provenance+structure gate (report_qc --context stamps ``qc.qc_passed``
+    INTO module.qc). An un-stamped module — authored but never gated — is treated
+    the same as an absent one: the sections are omitted with a disclosure line, so
+    ungated prose can never reach the page. Mirrors slots_gate_ok's trust-on-write
+    posture (an accidental-bypass guard, not forgery-resistant).
+    """
+    if not isinstance(context, dict):
+        return False
+    qc = context.get("qc")
+    return isinstance(qc, dict) and qc.get("qc_passed") is True
+
+
 def _charts_dir(bundle):
     return os.path.join(bundle, "charts")
 
@@ -982,7 +1020,11 @@ def _draw_exec_page1(doc, bundle, docs, slots, diff, prev_date):
 
     # Trade-plan table.
     tp_top = rb_bottom - 14
-    _trade_plan_table(doc, M, tp_top, main_w, tp)
+    tp_bottom = _trade_plan_table(doc, M, tp_top, main_w, tp)
+
+    # Deep-entry commentary line (fix 4d) — a scripted static line under the plan
+    # when any entry sits >25% below last (trigger computed, sentence fixed).
+    _draw_deep_entry_line(doc, docs, tp_bottom - 8)
 
     # Sidebar: key stats + score panel + desk read.
     sb_top = ps_top - 13 - 12
@@ -1076,8 +1118,16 @@ def render_exec(bundle, docs, slots, diff, prev_date, out_path):
 # monitoring + integrity + appendix.
 # --------------------------------------------------------------------------- #
 
-def _draw_dimension_section(doc, bundle, docs, dim, module_key, chart_names, y_top):
-    """One per-dimension section: brief prose + subscore table + charts.
+def _draw_dimension_section(doc, bundle, docs, dim, module_key, chart_names,
+                            y_top, slots=None):
+    """One per-dimension EVIDENCE section: note-as-body + SCORING TRAIL + charts.
+
+    Body priority (fix): the ~200-word evidence NOTE from pdf_slots is the body;
+    when present, the arithmetic strings are DEMOTED into a small-type "SCORING
+    TRAIL" exhibit box (they prove the score but no longer masquerade as the
+    argument). Fallback chain when no note is authored (older bundles): the
+    brief_<dim>.md prose, else the arithmetic strings inline — the CURRENT
+    behavior, preserved.
 
     Returns the y reached; the caller starts a new page when it runs low.
     """
@@ -1088,10 +1138,39 @@ def _draw_dimension_section(doc, bundle, docs, dim, module_key, chart_names, y_t
         label, _fmt(module.get("score"))), w=doc.CONTENT_W)
 
     y = y_top - 16
-    brief = _load_brief(bundle, dim)
     text_w = doc.CONTENT_W * 0.58
-    if brief:
-        # Render the brief prose paragraphs (wrapped) in the left column.
+    note = _evidence_note(slots, dim)
+    brief = _load_brief(bundle, dim)
+
+    if note:
+        # NOTE is the body; arithmetic demoted to the SCORING TRAIL exhibit below.
+        for para in note.split("\n\n"):
+            para = " ".join(para.split())
+            if not para:
+                continue
+            for ln in doc.wrap(para, doc.FONT, 8, text_w):
+                doc.text(M, y, ln, font=doc.FONT, size=8, rgb=doc.GRAY_DK)
+                y -= 10.5
+            y -= 4
+        y -= 2
+        # SCORING TRAIL exhibit box (small-type, the arithmetic proof).
+        trail = [s.get("arithmetic") for s in (module.get("subscores") or [])
+                 if s.get("arithmetic")]
+        if trail:
+            doc.text(M, y, "SCORING TRAIL", font=doc.FONT_B, size=6.4,
+                     rgb=doc.GRAY_MD)
+            y -= 8.5
+            box_top = y + 4
+            ty = y
+            for arith in trail:
+                for ln in doc.wrap("• %s" % arith, doc.FONT, 6.6, text_w - 8):
+                    doc.text(M + 4, ty, ln, font=doc.FONT, size=6.6,
+                             rgb=doc.GRAY_MD)
+                    ty -= 8.4
+            doc.rect(M, ty + 2, text_w, box_top - (ty + 2), stroke_rgb=doc.GRAY_LT)
+            y = ty - 4
+    elif brief:
+        # No note -> the brief prose (preserved fallback).
         for para in brief.split("\n\n"):
             para = " ".join(para.split())
             if not para:
@@ -1101,10 +1180,10 @@ def _draw_dimension_section(doc, bundle, docs, dim, module_key, chart_names, y_t
                 y -= 10.5
             y -= 4
     else:
-        # No brief -> show the module's scored rationale (arithmetic strings).
-        note = module.get("renormalization_note")
-        if note:
-            for ln in doc.wrap(str(note), doc.FONT_I, 7.6, text_w):
+        # No note, no brief -> the module's scored rationale inline (preserved).
+        rnote = module.get("renormalization_note")
+        if rnote:
+            for ln in doc.wrap(str(rnote), doc.FONT_I, 7.6, text_w):
                 doc.text(M, y, ln, font=doc.FONT_I, size=7.6, rgb=doc.GRAY_MD)
                 y -= 10
             y -= 4
@@ -1142,26 +1221,54 @@ def _draw_dimension_section(doc, bundle, docs, dim, module_key, chart_names, y_t
 
 
 def _draw_options_section(doc, bundle, docs, y_top):
-    """Options section: verdict line, recommended/declined tables, hedge."""
+    """The FULL options module render (fix 4b) — not the 2-row summary it was.
+
+    Renders every load-bearing part of module_options: the vol dashboard mini-table
+    (verdict/iv30/rv20/diff/pctile/term), the recommended structures table with
+    per-structure MANAGEMENT rules beneath each, the declined table WITH reasons,
+    ``warnings_global``, and the hedge_structure when present. The options charts
+    (vol_term_structure / skew / expected_move_cone / oi_walls) now live UNDER this
+    section (mapping fix 4a), placed by the caller after the tables.
+    """
     M = doc.MARGIN
+    W = doc.CONTENT_W
     opt = docs.get("module_options") or {}
     vd = opt.get("vol_dashboard", {}) or {}
-    doc.section_head(M, y_top, "OPTIONS & VOLATILITY", w=doc.CONTENT_W)
+    doc.section_head(M, y_top, "OPTIONS & VOLATILITY", w=W)
     y = y_top - 15
 
-    verdict = vd.get("verdict", "n/a")
-    iv30, rv20 = vd.get("iv30"), vd.get("rv20")
-    vline = "Vol verdict: %s" % str(verdict).replace("_", " ")
-    if iv30 is not None and rv20 is not None:
-        vline += "  —  IV30 %.0f%% vs RV20 %.0f%%" % (iv30 * 100, rv20 * 100)
-    doc.text(M, y, vline, font=doc.FONT_B, size=8.4, rgb=doc.INK)
-    y -= 16
+    # -- Vol dashboard mini-table: verdict / IV30 / RV20 / diff / pctile / term. --
+    doc.text(M, y, "Vol dashboard", font=doc.FONT_B, size=8, rgb=doc.ACCENT)
+    doc.hairline(M, y - 3, M + W, rgb=doc.GRAY_LT)
+    y -= 12
 
-    # Recommended structures table.
+    def _pct0(v):
+        return "%.0f%%" % (v * 100) if isinstance(v, (int, float)) else "n/a"
+
+    def _ppt(v):  # a diff already expressed as a fraction -> signed percentage pts
+        return "%+.0f%%" % (v * 100) if isinstance(v, (int, float)) else "n/a"
+
+    vd_cells = [
+        ("Verdict", str(vd.get("verdict", "n/a")).replace("_", " ")),
+        ("IV30", _pct0(vd.get("iv30"))),
+        ("RV20", _pct0(vd.get("rv20"))),
+        ("IV-RV diff", _ppt(vd.get("diff"))),
+        ("IV pctile (1y)", fmt_pct_int(vd.get("iv_pctile_1yr"))),
+        ("Term", str(vd.get("term_structure", "n/a")).replace("_", " ")),
+    ]
+    seg = W / len(vd_cells)
+    for i, (lab, val) in enumerate(vd_cells):
+        cx = M + seg * i
+        doc.text(cx, y, lab, font=doc.FONT, size=6.6, rgb=doc.GRAY_MD)
+        doc.text(cx, y - 9, doc.truncate(val, doc.FONT_B, 7.6, seg - 4),
+                 font=doc.FONT_B, size=7.6, rgb=doc.INK)
+    y -= 24
+
+    # -- Recommended structures + per-structure management rules. --
     rec = opt.get("recommended_structures") or []
     doc.text(M, y, "Recommended structures", font=doc.FONT_B, size=8,
              rgb=doc.ACCENT)
-    doc.hairline(M, y - 3, M + doc.CONTENT_W, rgb=doc.GRAY_LT)
+    doc.hairline(M, y - 3, M + W, rgb=doc.GRAY_LT)
     y -= 12
     cols = [M, M + 150, M + 230, M + 320, M + 400]
     for j, hd in enumerate(("Structure", "Strikes", "Net", "PoP", "PoP method")):
@@ -1180,37 +1287,67 @@ def _draw_options_section(doc, bundle, docs, y_top):
                  rgb=doc.GRAY_DK)
         doc.text(cols[3], y, pop_s, font=doc.FONT, size=7.4, rgb=doc.GRAY_DK)
         doc.text(cols[4], y, doc.truncate(pm, doc.FONT, 7.4,
-                 doc.CONTENT_W - 400 + M - 4), font=doc.FONT, size=7.4,
+                 W - 400 + M - 4), font=doc.FONT, size=7.4,
                  rgb=doc.GRAY_DK)
         y -= 11
-    y -= 6
+        # Per-structure management rules (the rich content the 2-row summary dropped).
+        mgmt = st.get("management") or []
+        if mgmt:
+            rules = "Manage: " + " · ".join(str(r) for r in mgmt)
+            for ln in doc.wrap(rules, doc.FONT_I, 7.0, W - 12):
+                doc.text(M + 10, y, ln, font=doc.FONT_I, size=7.0, rgb=doc.GRAY_MD)
+                y -= 9.2
+        # Per-structure warnings, if any.
+        for wn in (st.get("warnings") or []):
+            for ln in doc.wrap("⚠ %s" % wn, doc.FONT_I, 7.0, W - 12):
+                doc.text(M + 10, y, ln, font=doc.FONT_I, size=7.0, rgb=doc.RED)
+                y -= 9.2
+        y -= 3
+    y -= 3
 
-    # Declined table.
+    # -- Declined table WITH reasons. --
     declined = opt.get("declined") or []
     if declined:
         doc.text(M, y, "Declined", font=doc.FONT_B, size=8, rgb=doc.ACCENT)
-        doc.hairline(M, y - 3, M + doc.CONTENT_W, rgb=doc.GRAY_LT)
+        doc.hairline(M, y - 3, M + W, rgb=doc.GRAY_LT)
         y -= 12
         for d in declined:
             doc.text(M, y, doc.truncate(d.get("name", ""), doc.FONT_B, 7.4, 140),
                      font=doc.FONT_B, size=7.4, rgb=doc.INK)
             doc.text(M + 150, y, doc.truncate(d.get("reason", ""), doc.FONT, 7.4,
-                     doc.CONTENT_W - 150), font=doc.FONT, size=7.4, rgb=doc.GRAY_DK)
+                     W - 150), font=doc.FONT, size=7.4, rgb=doc.GRAY_DK)
             y -= 11
         y -= 6
 
-    # Hedge line.
+    # -- Global warnings (binary-event / liquidity gates). --
+    warnings = opt.get("warnings_global") or []
+    for wn in warnings:
+        for ln in doc.wrap("⚠ %s" % wn, doc.FONT_B, 7.4, W):
+            doc.text(M, y, ln, font=doc.FONT_B, size=7.4, rgb=doc.RED)
+            y -= 10
+        y -= 2
+
+    # -- Hedge structure (when present). --
     hedge = opt.get("hedge_structure")
     if isinstance(hedge, dict):
         cost = hedge.get("cost")
         cpp = hedge.get("cost_pct_of_spot")
+        legs = hedge.get("legs") or []
+        leg_s = " / ".join(
+            "%s %s %s" % (lg.get("side", ""), lg.get("type", ""),
+                          fmt_price(lg.get("strike"))) for lg in legs)
         htxt = "Hedge: %s" % hedge.get("type", "n/a")
+        if leg_s:
+            htxt += " (%s)" % leg_s
         if cost is not None:
             htxt += " · cost %s" % fmt_price(cost)
         if isinstance(cpp, (int, float)):
             htxt += " (%.1f%% of spot)" % (cpp * 100)
-        doc.text(M, y, htxt, font=doc.FONT_I, size=7.6, rgb=doc.GRAY_DK)
-        y -= 12
+        for ln in doc.wrap(htxt, doc.FONT_I, 7.6, W):
+            doc.text(M, y, ln, font=doc.FONT_I, size=7.6, rgb=doc.GRAY_DK)
+            y -= 10
+        y -= 2
+    return y
     return y
 
 
@@ -1249,14 +1386,46 @@ def _draw_downside_monitoring(doc, bundle, docs, y_top):
     return min(min(y - 160, my), ty)
 
 
-def _draw_downside_map_table(doc, docs, x, y_top):
-    """The downside-map anchor table; suspect rows grayed + reason-annotated."""
+def _nearest_downside_anchors(docs, n=5):
+    """The ``n`` anchors NEAREST last (smallest |pct_from_last|), sorted by depth.
+
+    Dedup fix (4c): the downside map was rendered BOTH as a chart AND as the full
+    downside_map table below it — the same data twice. We keep the chart and demote
+    the table to a COMPACT n-row companion of the anchors nearest the current price
+    (the levels that matter first on a decline), not the full ladder. Rows are
+    picked by smallest absolute distance from last, then displayed shallowest-first
+    (least-negative pct_from_last at the top, most-negative at the bottom) so the
+    table reads top-to-bottom like a descent.
+    """
     risk = docs.get("module_risk") or {}
     dmap = ((risk.get("tables") or {}).get("downside_map") or [])
     if not dmap:
+        return []
+
+    def _dist(r):
+        p = r.get("pct_from_last")
+        return abs(p) if isinstance(p, (int, float)) else 1e9
+
+    def _depth(r):
+        p = r.get("pct_from_last")
+        return p if isinstance(p, (int, float)) else 0.0
+
+    nearest = sorted(dmap, key=_dist)[:n]
+    return sorted(nearest, key=_depth, reverse=True)
+
+
+def _draw_downside_map_table(doc, docs, x, y_top):
+    """The compact NEAREST-anchors table (<=5 rows); suspect rows grayed + reason.
+
+    Dedup fix (4c): only the 5 anchors nearest the current price are shown here —
+    the chart above carries the full ladder, so this is a focused companion, not a
+    duplicate of the whole downside_map.
+    """
+    dmap = _nearest_downside_anchors(docs, n=5)
+    if not dmap:
         return y_top
     w = doc.CONTENT_W
-    doc.text(x, y_top, "DOWNSIDE ANCHORS", font=doc.FONT_B, size=8,
+    doc.text(x, y_top, "NEAREST DOWNSIDE ANCHORS", font=doc.FONT_B, size=8,
              rgb=doc.ACCENT)
     doc.hairline(x, y_top - 3, x + w, rgb=doc.GRAY_LT)
     cols = [x, x + 110, x + 175]
@@ -1389,41 +1558,457 @@ def _draw_integrity_footer_page(doc, docs, y_top):
     return y
 
 
+# --------------------------------------------------------------------------- #
+# WHY THIS CALL — the argued case, rendered PURELY from module-JSON judgment
+# fields (no new prose). One sub-block per module: the composite scenario
+# reasoning, each conviction subscore with its flag value + justification, the
+# trade-plan judgment flags, the fundamental moat flag, and the sentiment
+# judgment flags. This is the section that turns pages 3-6 from arithmetic dumps
+# into an argument: every captured justification the pipeline wrote, printed.
+# --------------------------------------------------------------------------- #
+
+def _flag_chip(doc, x, y, label, value):
+    """Draw a compact 'label: VALUE' flag chip. Returns the chip's right edge.
+
+    The value is drawn in a small tinted pill; unknown/None values render 'n/a'.
+    """
+    val_s = str(value) if value not in (None, "") else "n/a"
+    label_s = "%s:" % label
+    doc.text(x, y, label_s, font=doc.FONT, size=7.4, rgb=doc.GRAY_DK)
+    lw = doc.string_width(label_s, doc.FONT, 7.4)
+    px = x + lw + 4
+    pill_w = doc.string_width(val_s, doc.FONT_B, 7.4) + 8
+    doc.rect(px, y - 2.5, pill_w, 11, fill_rgb=(0.93, 0.90, 0.85))
+    doc.text(px + 4, y, val_s, font=doc.FONT_B, size=7.4, rgb=doc.ACCENT)
+    return px + pill_w
+
+
+def _why_subblock(doc, x, y, w, title, chip_label, chip_value, justification):
+    """One WHY-THIS-CALL sub-block: title, an optional flag chip, and the
+    justification text wrapped below. Returns the y reached.
+
+    Pure module-JSON rendering: ``chip_value`` is the flag's captured value and
+    ``justification`` the captured judgment text (may cite C-IDs — rendered as-is,
+    they are chrome the reader follows into the CONTEXT NARRATIVE findings).
+    """
+    doc.text(x, y, title, font=doc.FONT_B, size=7.8, rgb=doc.INK)
+    ty = y
+    if chip_label is not None:
+        lw = doc.string_width(title, doc.FONT_B, 7.8)
+        _flag_chip(doc, x + lw + 10, y, chip_label, chip_value)
+    ty -= 11
+    if justification:
+        for ln in doc.wrap(str(justification), doc.FONT, 7.4, w - 6):
+            doc.text(x + 6, ty, ln, font=doc.FONT, size=7.4, rgb=doc.GRAY_DK)
+            ty -= 9.6
+    return ty - 4
+
+
+def _parse_conviction_subscore(s):
+    """Split a conviction subscore string into (name, flag_value, justification).
+
+    The composite writes each as e.g.
+      "variant some -> 12/20 (Modestly differentiated: ...)"
+      "catalyst_clarity clear -> 20/20 (Dated, identifiable ...)"
+      "ev_asymmetry: ev 0.0664 / hurdle ... = ratio 0.55 -> 12/40"
+    We take the leading token as the subscore name, the parenthetical (if any) as
+    the captured justification, and the words between the name and '->' as the flag
+    value. Best-effort + defensive: an unparseable string yields (raw, None, None).
+    """
+    import re as _re
+    raw = str(s)
+    just = None
+    m = _re.search(r"\(([^)]*)\)\s*$", raw)
+    head = raw
+    if m:
+        just = m.group(1).strip()
+        head = raw[:m.start()].strip()
+    # name is the first whitespace/':'-delimited token.
+    nm = _re.match(r"\s*([A-Za-z_]+)", head)
+    name = nm.group(1) if nm else head
+    flag_val = None
+    # value = the text between the name and the '->' arrow, if that segment is
+    # short (a flag word like 'some'/'clear'/'both-legs'), not an arithmetic tail.
+    seg = head[len(name):].split("->", 1)[0].strip().lstrip(":").strip()
+    if seg and len(seg.split()) <= 2 and "/" not in seg and "=" not in seg:
+        flag_val = seg
+    return name, flag_val, just
+
+
+def _draw_why_this_call(doc, docs, y_top):
+    """The WHY THIS CALL section: the argued case from module-JSON judgment.
+
+    Sub-blocks, in order:
+      * composite ev.scenario_reasoning (the thesis in one paragraph);
+      * each conviction subscore with its flag value + justification (variant,
+        catalyst_clarity, invalidation — from module_composite);
+      * trade-plan judgment flags (catalyst-in-thesis + justification,
+        fundamental-invalidation justification) from module_tradeplan.flags;
+      * fundamental moat flag + justification from module_fundamental.flags
+        (may cite C-IDs — rendered as-is);
+      * sentiment judgment flags (rating_actions / inst_flow / insider_baseline +
+        justifications) from module_sentiment.flags.
+    Returns the y reached.
+    """
+    M = doc.MARGIN
+    W = doc.CONTENT_W
+    doc.section_head(M, y_top, "WHY THIS CALL", w=W)
+    y = y_top - 16
+
+    comp = docs.get("module_composite") or {}
+    tp = docs.get("module_tradeplan") or {}
+    fund = docs.get("module_fundamental") or {}
+    sent = docs.get("module_sentiment") or {}
+
+    # -- Scenario reasoning (the thesis paragraph). --
+    reasoning = (comp.get("ev") or {}).get("scenario_reasoning")
+    if reasoning:
+        doc.text(M, y, "Scenario reasoning", font=doc.FONT_B, size=7.8, rgb=doc.INK)
+        y -= 11
+        for ln in doc.wrap(str(reasoning), doc.FONT, 7.6, W):
+            doc.text(M + 6, y, ln, font=doc.FONT, size=7.6, rgb=doc.GRAY_DK)
+            y -= 9.8
+        y -= 6
+
+    # -- Conviction subscores (variant / catalyst_clarity / invalidation ...). --
+    cflags = comp.get("flags") or {}
+    conv = (comp.get("thesis_conviction") or {}).get("subscores") or []
+    if conv:
+        doc.text(M, y, "Conviction", font=doc.FONT_B, size=8, rgb=doc.ACCENT)
+        doc.hairline(M, y - 3, M + W, rgb=doc.GRAY_LT)
+        y -= 12
+        for sub in conv:
+            name, flag_val, just = _parse_conviction_subscore(sub)
+            # Prefer the composite's flags dict for value + justification when the
+            # subscore name matches a captured flag (richer, uncondensed text).
+            if flag_val is None:
+                flag_val = cflags.get(name)
+            fj = cflags.get("%s_justification" % name)
+            just = fj or just
+            title = str(name).replace("_", " ")
+            y = _why_subblock(doc, M, y, W, title, "flag", flag_val, just)
+
+    # -- Trade-plan judgment flags. --
+    tflags = tp.get("flags") or {}
+    if tflags:
+        doc.text(M, y, "Trade plan", font=doc.FONT_B, size=8, rgb=doc.ACCENT)
+        doc.hairline(M, y - 3, M + W, rgb=doc.GRAY_LT)
+        y -= 12
+        y = _why_subblock(
+            doc, M, y, W, "catalyst in thesis", "flag",
+            tflags.get("catalyst_in_thesis"),
+            tflags.get("catalyst_in_thesis_justification"))
+        fund_metric = tflags.get("fund_invalidation_metric")
+        fund_thresh = tflags.get("fund_invalidation_threshold")
+        chip = None
+        if fund_metric:
+            chip = fund_metric + (" %s" % fund_thresh if fund_thresh else "")
+        y = _why_subblock(
+            doc, M, y, W, "fundamental invalidation", "metric", chip,
+            tflags.get("fund_invalidation_justification"))
+
+    # -- Fundamental moat flag (may cite C-IDs — rendered as-is). --
+    fflags = fund.get("flags") or {}
+    moat = fflags.get("moat")
+    moat_just = fflags.get("moat_justification")
+    if moat is not None or moat_just:
+        doc.text(M, y, "Fundamental — moat", font=doc.FONT_B, size=8,
+                 rgb=doc.ACCENT)
+        doc.hairline(M, y - 3, M + W, rgb=doc.GRAY_LT)
+        y -= 12
+        y = _why_subblock(doc, M, y, W, "moat", "rating", moat, moat_just)
+
+    # -- Sentiment judgment flags. --
+    sflags = sent.get("flags") or {}
+    sent_keys = ("rating_actions", "inst_flow", "insider_baseline")
+    if any(k in sflags for k in sent_keys):
+        doc.text(M, y, "Sentiment", font=doc.FONT_B, size=8, rgb=doc.ACCENT)
+        doc.hairline(M, y - 3, M + W, rgb=doc.GRAY_LT)
+        y -= 12
+        for k in sent_keys:
+            if k not in sflags:
+                continue
+            title = k.replace("_", " ")
+            y = _why_subblock(doc, M, y, W, title, "flag", sflags.get(k),
+                              sflags.get("%s_justification" % k))
+    return y
+
+
+# --------------------------------------------------------------------------- #
+# CONTEXT NARRATIVE — rendered ONLY from a stamped module_context.json (C2).
+# Four sections (THE BUSINESS / WHAT'S MOVING THE STOCK / THE CASES / RISKS)
+# plus a FINDINGS footnote block. Absent or un-stamped module -> one disclosure
+# line, sections omitted. This is pure module-JSON rendering (no new prose).
+# --------------------------------------------------------------------------- #
+
+def _draw_context_disclosure(doc, y_top):
+    """The single line shown when no stamped context module is in the bundle."""
+    M = doc.MARGIN
+    doc.section_head(M, y_top, "COMPANY CONTEXT", w=doc.CONTENT_W)
+    y = y_top - 16
+    doc.text(M, y, "No gated company-context module in this bundle — business, "
+             "cases, and risk narrative omitted.", font=doc.FONT_I, size=7.6,
+             rgb=doc.GRAY_MD)
+    return y - 12
+
+
+def _draw_context_narrative(doc, docs, context, y_top):
+    """Render the CONTEXT NARRATIVE sections from a STAMPED module_context.
+
+    THE BUSINESS (what_they_sell + revenue_drivers + segments), WHAT'S MOVING THE
+    STOCK (live_tape dated entries), THE CASES (bull/base/bear narratives +
+    conditions, values tied to the scenario fan by the composite's scenario
+    reasoning above), RISKS (ARGUED) (risk/why/anchor table), and a FINDINGS
+    footnote block (id -> claim -> source, small gray). Returns y reached.
+    """
+    M = doc.MARGIN
+    W = doc.CONTENT_W
+    doc.section_head(M, y_top, "COMPANY CONTEXT", w=W)
+    y = y_top - 16
+
+    biz = context.get("business") or {}
+
+    # -- THE BUSINESS. --
+    doc.text(M, y, "THE BUSINESS", font=doc.FONT_B, size=8, rgb=doc.ACCENT)
+    doc.hairline(M, y - 3, M + W, rgb=doc.GRAY_LT)
+    y -= 12
+    wts = biz.get("what_they_sell")
+    if wts:
+        for ln in doc.wrap(str(wts), doc.FONT, 7.6, W):
+            doc.text(M + 6, y, ln, font=doc.FONT, size=7.6, rgb=doc.GRAY_DK)
+            y -= 9.8
+        y -= 2
+    for label, key in (("Revenue drivers", "revenue_drivers"),
+                       ("Segments", "segments")):
+        items = biz.get(key) or []
+        if items:
+            line = "%s: %s" % (label, "; ".join(str(i) for i in items))
+            for ln in doc.wrap(line, doc.FONT, 7.4, W):
+                doc.text(M + 6, y, ln, font=doc.FONT, size=7.4, rgb=doc.GRAY_DK)
+                y -= 9.4
+            y -= 2
+    y -= 4
+
+    # -- WHAT'S MOVING THE STOCK (live tape). --
+    tape = context.get("live_tape") or []
+    if tape:
+        doc.text(M, y, "WHAT'S MOVING THE STOCK", font=doc.FONT_B, size=8,
+                 rgb=doc.ACCENT)
+        doc.hairline(M, y - 3, M + W, rgb=doc.GRAY_LT)
+        y -= 12
+        for ev in tape:
+            date = ev.get("date", "")
+            event = ev.get("event", "")
+            why = ev.get("why_it_matters", "")
+            head = "%s — %s" % (date, event)
+            doc.text(M + 6, y, doc.truncate(head, doc.FONT_B, 7.4, W - 6),
+                     font=doc.FONT_B, size=7.4, rgb=doc.INK)
+            y -= 9.6
+            if why:
+                for ln in doc.wrap(str(why), doc.FONT, 7.2, W - 12):
+                    doc.text(M + 12, y, ln, font=doc.FONT, size=7.2,
+                             rgb=doc.GRAY_DK)
+                    y -= 9.0
+            y -= 2
+        y -= 4
+
+    # -- THE CASES (bull / base / bear). --
+    cases = context.get("cases") or {}
+    if cases:
+        doc.text(M, y, "THE CASES", font=doc.FONT_B, size=8, rgb=doc.ACCENT)
+        doc.hairline(M, y - 3, M + W, rgb=doc.GRAY_LT)
+        doc.text(M + W, y, "tied to the scenario fan above", font=doc.FONT_I,
+                 size=6.4, rgb=doc.GRAY_MD, align="right")
+        y -= 12
+        for label, key in (("Bull", "bull"), ("Base", "base"), ("Bear", "bear")):
+            case = cases.get(key) or {}
+            narr = case.get("narrative")
+            if not (narr or case.get("conditions")):
+                continue
+            doc.text(M + 6, y, "%s:" % label, font=doc.FONT_B, size=7.6,
+                     rgb=doc.INK)
+            lw = doc.string_width("%s:" % label, doc.FONT_B, 7.6)
+            avail = W - 6 - lw - 4
+            narr_lines = doc.wrap(str(narr), doc.FONT, 7.4, avail) if narr else []
+            if narr_lines:
+                doc.text(M + 6 + lw + 4, y, narr_lines[0], font=doc.FONT,
+                         size=7.4, rgb=doc.GRAY_DK)
+                y -= 9.6
+                for ln in narr_lines[1:]:
+                    doc.text(M + 12, y, ln, font=doc.FONT, size=7.4,
+                             rgb=doc.GRAY_DK)
+                    y -= 9.6
+            else:
+                y -= 9.6
+            conds = case.get("conditions") or []
+            if conds:
+                cline = "Conditions: " + "; ".join(str(c) for c in conds)
+                for ln in doc.wrap(cline, doc.FONT_I, 7.2, W - 12):
+                    doc.text(M + 12, y, ln, font=doc.FONT_I, size=7.2,
+                             rgb=doc.GRAY_MD)
+                    y -= 9.0
+            y -= 3
+        y -= 3
+
+    # -- RISKS (ARGUED). --
+    risks = context.get("risks") or []
+    if risks:
+        doc.text(M, y, "RISKS (ARGUED)", font=doc.FONT_B, size=8, rgb=doc.ACCENT)
+        doc.hairline(M, y - 3, M + W, rgb=doc.GRAY_LT)
+        y -= 12
+        cols = [M, M + W * 0.34]
+        for j, hd in enumerate(("Risk", "Why it matters")):
+            doc.text(cols[j], y, hd, font=doc.FONT_B, size=6.6, rgb=doc.GRAY_MD)
+        y -= 10
+        for r in risks:
+            risk_lines = doc.wrap(str(r.get("risk", "")), doc.FONT_B, 7.2,
+                                  W * 0.34 - 8)
+            why_lines = doc.wrap(str(r.get("why", "")), doc.FONT, 7.2,
+                                 W * 0.64)
+            rows_h = max(len(risk_lines), len(why_lines), 1)
+            for i in range(rows_h):
+                if i < len(risk_lines):
+                    doc.text(cols[0], y, risk_lines[i], font=doc.FONT_B,
+                             size=7.2, rgb=doc.INK)
+                if i < len(why_lines):
+                    doc.text(cols[1], y, why_lines[i], font=doc.FONT, size=7.2,
+                             rgb=doc.GRAY_DK)
+                y -= 9.2
+            anchor = r.get("anchor")
+            if anchor:
+                doc.text(cols[1], y, doc.truncate("anchor: %s" % anchor,
+                         doc.FONT_I, 6.6, W * 0.64), font=doc.FONT_I, size=6.6,
+                         rgb=doc.GRAY_MD)
+                y -= 8.4
+            y -= 2
+        y -= 4
+
+    # -- FINDINGS footnote block (id -> claim -> source). --
+    findings = context.get("findings") or []
+    if findings:
+        doc.text(M, y, "FINDINGS", font=doc.FONT_B, size=7.4, rgb=doc.GRAY_MD)
+        doc.hairline(M, y - 3, M + W, rgb=doc.GRAY_LT)
+        y -= 11
+        for f in findings:
+            fid = f.get("id", "")
+            claim = f.get("claim", "")
+            source = f.get("source", "")
+            line = "%s  %s  [%s]" % (fid, claim, source)
+            for ln in doc.wrap(line, doc.FONT, 6.6, W - 4):
+                doc.text(M + 4, y, ln, font=doc.FONT, size=6.6, rgb=doc.GRAY_MD)
+                y -= 8.4
+            y -= 1
+    return y
+
+
+# --------------------------------------------------------------------------- #
+# Deep-entry commentary (fix 4d): a scripted static line printed under the trade
+# plan when ANY entry sits >25% below last. The trigger is computed; the line is
+# a fixed sentence (no LLM prose).
+# --------------------------------------------------------------------------- #
+
+_DEEP_ENTRY_THRESHOLD = 0.25
+_DEEP_ENTRY_LINE = (
+    "Deep entries reflect structural supports (200-DMA lag after a parabolic "
+    "run); they are conditional adds if the thesis survives the decline, not "
+    "predictions.")
+
+
+def _has_deep_entry(docs):
+    """True iff any stock-plan entry level sits >25% below the snapshot's last.
+
+    Uses the entry's own ``level`` vs snapshot price.last. Missing last or entries
+    -> False (no line). The threshold is strict (>25%, not >=).
+    """
+    snap = docs.get("snapshot") or {}
+    last = (snap.get("price") or {}).get("last")
+    if not isinstance(last, (int, float)) or last <= 0:
+        return False
+    entries = ((docs.get("module_tradeplan") or {}).get("stock_plan") or {}) \
+        .get("entries") or []
+    for e in entries:
+        level = e.get("level")
+        if isinstance(level, (int, float)):
+            if (last - level) / last > _DEEP_ENTRY_THRESHOLD:
+                return True
+    return False
+
+
+def _draw_deep_entry_line(doc, docs, y_top):
+    """Print the deep-entry commentary line when the trigger fires. Returns y."""
+    if not _has_deep_entry(docs):
+        return y_top
+    M = doc.MARGIN
+    y = y_top
+    for ln in doc.wrap(_DEEP_ENTRY_LINE, doc.FONT_I, 7.4, doc.CONTENT_W):
+        doc.text(M, y, ln, font=doc.FONT_I, size=7.4, rgb=doc.GRAY_DK)
+        y -= 9.6
+    return y - 4
+
+
+# --------------------------------------------------------------------------- #
+# Evidence-note resolution (fix: per-dimension EVIDENCE body from slots).
+# --------------------------------------------------------------------------- #
+
+def _evidence_note(slots, dim):
+    """The ~200-word evidence note for a dimension from pdf_slots, or '' if absent.
+
+    Reads ``slots['evidence_notes'][dim]``. Absent key (older bundles) -> '' so the
+    caller falls back to the brief / arithmetic strings (current behavior).
+    """
+    notes = (slots or {}).get("evidence_notes") or {}
+    val = notes.get(dim)
+    return str(val).strip() if isinstance(val, str) and val.strip() else ""
+
+
 def _measure_dimension_height(docs_ticker_asof, footer_bits, bundle, docs, dim,
-                              key, chart_names, y_top):
+                              key, chart_names, y_top, slots=None):
     """Consumed height of a dimension section, WITHOUT drawing to the real doc.
 
     Draws the section onto a throwaway canvas (deterministic, same layout code)
     and returns ``y_top - y_reached``. Used to pack two small sections per page
     while keeping the p N/M footer count exact -- no layout logic is duplicated,
-    so the measured height can never drift from the real render.
+    so the measured height can never drift from the real render. ``slots`` is
+    threaded through so the note-as-body path measures identically to the render.
     """
     scratch = Doc(os.devnull, docs_ticker_asof[0], "Detail",
                   docs_ticker_asof[1], footer_bits)
     scratch.total_pages = 1
     scratch.begin_page()
     y_end = _draw_dimension_section(scratch, bundle, docs, dim, key,
-                                    chart_names, y_top)
+                                    chart_names, y_top, slots=slots)
     # Do NOT save -- the scratch canvas is discarded (os.devnull sink).
     return y_top - y_end
+
+
+# The chart-to-section mapping (fix 4a). subscore_breakdown is a grid; here we
+# keep only the two per-dimension detail charts that belong under each EVIDENCE
+# dimension. Charts that describe RISK (drawdown_history / vol_regime) go under
+# the Risk dimension; the OPTIONS charts (vol_term_structure / skew /
+# expected_move_cone / oi_walls) are rendered under the OPTIONS section, not a
+# dimension (they were previously scattered under technical / sentiment / risk).
+_DIM_CHARTS = {
+    "technical": ["price_volume"],   # trend context lives on the exec price chart
+    "fundamental": ["revisions", "pe_band"],
+    "sentiment": [],                 # sentiment charts are exec-side (score/skew)
+    "risk": ["drawdown_history", "vol_regime"],
+}
+# The options section's own charts (fix 4a: these describe implied vol / skew /
+# expected move / OI walls — all OPTIONS concepts).
+_OPTIONS_CHARTS = ["vol_term_structure", "skew", "expected_move_cone", "oi_walls"]
 
 
 def render_detail(bundle, docs, slots, diff, prev_date, out_path):
     ticker, as_of = _ticker_as_of(docs)
     doc = Doc(out_path, ticker, "Detail", as_of, _footer_bits(docs))
+    context = load_context(bundle)
+    context_ok = context_gate_ok(context)
 
-    # Page count is known ahead: 2 exec + dimension pages + options + downside +
-    # appendix/integrity. Dimension sections are PACKED two-per-page when both
-    # fit (they are typically ~40-50% of a page -- review: excess whitespace),
-    # so the dimension-page count is derived from a measurement pass, not fixed.
-    #
-    # Dimension sections -> their detail charts.
-    dim_charts = {
-        "technical": ["drawdown_history", "vol_regime"],
-        "fundamental": ["revisions", "pe_band"],
-        "sentiment": ["vol_term_structure", "skew"],
-        "risk": ["expected_move_cone", "oi_walls"],
-    }
+    # Page count is known ahead: 2 exec + WHY-THIS-CALL + context + dimension
+    # pages + options + downside + appendix/integrity. Dimension sections are
+    # PACKED two-per-page when both fit, so the dimension-page count is derived
+    # from a measurement pass, not fixed.
+    dim_charts = _DIM_CHARTS
     dim_pages = [
         ("technical", "module_technical"),
         ("fundamental", "module_fundamental"),
@@ -1444,7 +2029,8 @@ def render_detail(bundle, docs, slots, diff, prev_date, out_path):
     pages, cur, y_avail = [], [], page_top
     for dim, key in dim_pages:
         h = _measure_dimension_height(ticker_asof, df, bundle, docs, dim, key,
-                                      dim_charts.get(dim, []), page_top)
+                                      dim_charts.get(dim, []), page_top,
+                                      slots=slots)
         if cur and (y_avail - SECTION_GAP - h) < page_bottom:
             pages.append(cur)
             cur, y_avail = [], page_top
@@ -1453,12 +2039,30 @@ def render_detail(bundle, docs, slots, diff, prev_date, out_path):
     if cur:
         pages.append(cur)
 
-    # 2 exec + packed dim pages + 1 options + 1 downside/monitoring + 1 appendix.
-    doc.total_pages = 2 + len(pages) + 3
+    # 2 exec + 1 why-this-call (carries the context DISCLOSURE inline when no
+    # stamped module) + a dedicated context page ONLY when the narrative exists
+    # (fix 4e: a one-line disclosure never burns a near-empty page) + packed dim
+    # pages + 1 options + 1 downside/monitoring + 1 appendix.
+    doc.total_pages = 2 + 1 + (1 if context_ok else 0) + len(pages) + 3
 
     # Exec pages first (repeated).
     _draw_exec_page1(doc, bundle, docs, slots, diff, prev_date)
     _draw_exec_page2(doc, bundle, docs, slots)
+
+    # WHY THIS CALL page (right after the exec repeat) — the argued case. When no
+    # stamped context module exists, the one-line context disclosure rides at the
+    # bottom of this page rather than opening a near-empty page of its own.
+    top = doc.begin_page()
+    y = _draw_why_this_call(doc, docs, top - 12)
+    if not context_ok:
+        _draw_context_disclosure(doc, y - 24)
+    doc.end_page()
+
+    # COMPANY CONTEXT page — only when a stamped module supplies the narrative.
+    if context_ok:
+        top = doc.begin_page()
+        _draw_context_narrative(doc, docs, context, top - 12)
+        doc.end_page()
 
     # Per-dimension pages (packed).
     for page_sections in pages:
@@ -1470,12 +2074,25 @@ def render_detail(bundle, docs, slots, diff, prev_date, out_path):
                 doc.hairline(doc.MARGIN, y + SECTION_GAP / 2,
                              doc.MARGIN + doc.CONTENT_W, rgb=doc.GRAY_LT)
             y = _draw_dimension_section(doc, bundle, docs, dim, key,
-                                        dim_charts.get(dim, []), y)
+                                        dim_charts.get(dim, []), y, slots=slots)
         doc.end_page()
 
-    # Options page.
+    # Options page — the FULL module render + the OPTIONS charts beneath it.
     top = doc.begin_page()
-    _draw_options_section(doc, bundle, docs, top - 12)
+    y = _draw_options_section(doc, bundle, docs, top - 12)
+    present = [p for p in (_chart_png(bundle, c) for c in _OPTIONS_CHARTS) if p]
+    chart_w = (doc.CONTENT_W - 12) / 2
+    col_x = [doc.MARGIN, doc.MARGIN + chart_w + 12]
+    y -= 8
+    i = 0
+    while i < len(present):
+        row = present[i:i + 2]
+        row_h = 0.0
+        for j, p in enumerate(row):
+            _, dh = doc.place_image(p, col_x[j], y, chart_w, 120)
+            row_h = max(row_h, dh)
+        y -= row_h + 8
+        i += 2
     doc.end_page()
 
     # Downside map + monitoring page.
