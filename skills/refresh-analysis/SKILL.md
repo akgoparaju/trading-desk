@@ -40,6 +40,14 @@ It writes `./trading_desk_<TICKER>/refresh_plan.json` (path printed to stdout). 
 
 **PRESENT the plan to the user in 2-3 lines before executing:** what refetches (count from `estimated_refetch_calls`; note IV refresh adds ~26 separately if `iv_history.action == "refresh"`), what's reused, the **coverage freshness verdict** (current / model-update needed / web_compressed floor), and whether `events.judgment_review_required` is true (an earnings or dividend event fell between the runs → judgments get re-affirmed, not carried). On a free tier, remind the user a no-event refresh is only ~6-8 calls and fits the anonymous quota.
 
+**Scale falsifier monitoring (read, disclose — NEVER redesign).** The plan carries `scales[]` (per-scale falsifier results with `any_tripped` + a pre-registered `action_required`), `scale_review_required`, and `pending_proposals[]`. Read them here and act by contract, never by improvisation:
+
+- **`scale_review_required: true` (a falsifier tripped).** Apply **ONLY** the pre-registered `on_trip` consequence — it is already in the scale's `action_required` string (a `flag+disclose`-class consequence; nothing that silently changes a parameter). **Disclose the trip in the delta** (which scale, which falsifier, the consequence applied). **Recommend invoking the `scale-review` skill** for a deliberate re-examination. **NEVER redesign a scale parameter inline** — a re-base is the scale-review skill's adversarial-gated job, not a refresh's.
+- **`pending_proposals[]` non-empty.** Surface each pending proposal **verbatim** to the user (its filename under `trading_desk_config/scales/proposals/`), with the one-word ratification path: typing **`ratify <name>@<version>`** files it into the active scales (see the ratification flow below). An unratified proposal is never silently skipped.
+- **`scale_review_required: false` and no proposals.** Nothing to surface; the active scales still govern fundamental scoring unchanged.
+
+This monitoring is disclosure-only within the refresh — the refresh **signals**; the scale-review skill **decides** any re-base.
+
 ---
 
 ## Step 3 — Assemble the new bundle (refetch some, copy the rest)
@@ -157,6 +165,20 @@ _Sourced from bundle module JSONs · delta vs <previous_bundle>._
 ```
 
 For the invalidation check: compare the NEW snapshot's price against the previous plan's invalidation levels (`module_tradeplan.json` invalidation legs from the previous bundle). If a leg was breached, **say so plainly** — a triggered invalidation is the single most important thing a refresh can surface.
+
+---
+
+## Ratification flow (`ratify <name>@<version>`)
+
+When the user types **`ratify <name>@<version>`** (in response to a surfaced pending proposal), move the proposal into the active scales — **forward-only, verify first, never recompute the past**:
+
+1. **Verify the proposal exists** — `trading_desk_config/scales/proposals/<name>_<version>.json` is present. Absent → tell the user (naming what proposals ARE pending) and stop.
+2. **Verify it is ratifiable** — the proposal's `status` is `pending_ratification` AND its `votes[]` show **≥2 non-refutations** (`NOT_REFUTED`, the scale-review adversarial gate's survival bar). If either check fails, refuse and say why — a proposal that did not survive the gate is not ratifiable.
+3. **Archive the current scale (if any)** — if `trading_desk_config/scales/<name>.json` already exists, move it to `trading_desk_config/scales/history/<name>_<old_version>.json` (keyed by its OWN `version`). History is retained, never deleted.
+4. **Promote the proposal** — move `proposals/<name>_<version>.json` → `trading_desk_config/scales/<name>.json`, **removing the `status` field** and setting `prior` to the old version (the Bayesian anchor the new parameters moved from). The proposal file leaves `proposals/`.
+5. **Confirm to the user** — `Ratified <name>@<version>` plus a one-line summary of **what changed** (the parameter/band delta vs the prior), so the tuning is never invisible.
+
+**Forward-only, always:** NEVER edit a history file, NEVER re-run or re-score a past bundle against the newly-ratified scale. The new scale governs the NEXT fundamental score; prior reports stand as rendered under the scale that was active when they ran (their footers name it). Ratification is the ONLY path from proposal to active — a refresh never auto-applies a re-base.
 
 ---
 

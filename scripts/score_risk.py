@@ -44,6 +44,26 @@ would have carried here are reallocated into the asymmetry component (18) and th
 distance-from-ATH component (12), which together already express margin of safety
 without double-counting the analyst target.
 
+DOWNSIDE FLOOR MODE (sector-scales batch, spec A2 -- "dcf_bear downside floor"):
+the valuation-floor row in the downside map has TWO modes, disclosed at the module
+top level as ``downside_floor_mode`` ("dcf_bear" | "pe_median"):
+  - SNAPSHOT mode (``--anchors`` absent, the default / FSI-absent floor): the floor
+    is the v1.0 pe_5yr_median x eps_ntm level, with the suspect-flag machinery
+    intact (approx_current_eps breakdown detection). Byte-identical to prior runs.
+  - ANCHORED mode (``--anchors <valuation_anchors.json>`` present + valid): the
+    floor becomes the coverage-derived ``dcf_bear`` level (labeled
+    ``basis: "dcf_bear (coverage anchors)"``), REPLACING the pe-median floor
+    entirely. An anchored floor is a validated fundamentals-derived level, so the
+    suspect machinery does NOT apply -- there is nothing to "suspect" about a DCF
+    bear case a covered model produced. The anchors file is the SAME
+    valuation_anchors.json score_fundamental consumes; malformed anchors exit 2.
+Nearest-first (descending) ordering is unchanged -- the dcf_bear floor simply
+interleaves among the ladder / stress levels by its own level. ``validate_anchors``
+here is a small LOCAL copy of score_fundamental's validator (same required keys +
+positivity): the floor only reads ``dcf_bear``, but validating the full anchor set
+keeps the two consumers' exit-2 contract identical without importing across modules
+(the coupling is not worth it for one shared numeric key).
+
 Reuses scripts.levels (nearest_support, nearest_resistance) on the ladder read
 from module_technical.json, and the build_snapshot / chain I/O helpers for the CLI.
 The scoring functions are pure over already-parsed inputs. stdlib-only.
@@ -432,14 +452,63 @@ _SUSPECT_FLOOR_RATIO = 0.25          # floor/last below this => suspect
 _SUSPECT_PE_BAND = (0.2, 5.0)        # pe_fwd/pe_5yr_median outside this => suspect
 _SUSPECT_REASON = "approx_current_eps method breakdown"
 
+# Anchored-floor basis label (spec A2). Distinct, self-describing string so a
+# DISPLAY consumer can tell an anchored floor from a pe-median floor at a glance.
+_DCF_BEAR_BASIS = "dcf_bear (coverage anchors)"
 
-def valuation_floor(pe_5yr_median, eps_ntm, last=None, pe_fwd=None):
-    """A valuation-floor level from pe_5yr_median x eps_ntm_consensus, or None.
+# Required numeric anchor keys for a valuation_anchors.json (all must be present +
+# positive). A LOCAL copy of score_fundamental._ANCHOR_REQUIRED / validate_anchors:
+# the floor only reads dcf_bear, but validating the full set keeps the two
+# consumers' exit-2 contract identical without importing across modules.
+_ANCHOR_REQUIRED = ("dcf_base", "dcf_bear", "dcf_bull", "comps_low", "comps_high")
 
-    Both scoring inputs must be present. The level is a judgment anchor (where a
-    5-yr median multiple on forward EPS would put the stock), NOT a proven support.
 
-    SUSPECT SUPPRESSION (fix 3): the snapshot builds ``pe_5yr_median`` with the
+def validate_anchors(anchors) -> list:
+    """Return a list of named issues for a valuation_anchors.json dict ([] valid).
+
+    Mirrors score_fundamental.validate_anchors EXACTLY (a local copy, not an
+    import -- one shared numeric key does not justify cross-module coupling):
+    requires dcf_base/dcf_bear/dcf_bull/comps_low/comps_high present + positive;
+    current_pb (optional) must be positive when present. Every problem is reported
+    so a malformed anchors file names all its issues at once.
+    """
+    issues = []
+    if not isinstance(anchors, dict):
+        return ["anchors is not a JSON object"]
+    for key in _ANCHOR_REQUIRED:
+        v = anchors.get(key)
+        if v is None:
+            issues.append(f"missing required anchor: {key}")
+        elif not isinstance(v, (int, float)) or isinstance(v, bool):
+            issues.append(f"anchor {key} must be numeric")
+        elif v <= 0:
+            issues.append(f"anchor {key} must be positive (got {v})")
+    if "current_pb" in anchors and anchors["current_pb"] is not None:
+        cpb = anchors["current_pb"]
+        if not isinstance(cpb, (int, float)) or isinstance(cpb, bool) or cpb <= 0:
+            issues.append("anchor current_pb must be positive when present")
+    return issues
+
+
+def valuation_floor(pe_5yr_median, eps_ntm, last=None, pe_fwd=None, anchors=None):
+    """A valuation-floor level for the downside map, or None.
+
+    TWO MODES (spec A2):
+      - ANCHORED (``anchors`` is a validated valuation_anchors dict): the floor is
+        the coverage-derived ``dcf_bear`` level, labeled
+        ``basis: "dcf_bear (coverage anchors)"`` / ``method: "dcf_bear"``, REPLACING
+        the pe-median path entirely. The pe_5yr_median / eps_ntm / pe_fwd inputs are
+        IGNORED. An anchored floor is a validated fundamentals-derived level, so the
+        suspect machinery below does NOT run -- it is always trusted.
+      - SNAPSHOT (``anchors`` is None, the default): the v1.0 pe_5yr_median x
+        eps_ntm level with the suspect-flag machinery intact (byte-identical to
+        prior runs). Both pe inputs must be present or the floor is None.
+
+    In snapshot mode the level is a judgment anchor (where a 5-yr median multiple on
+    forward EPS would put the stock), NOT a proven support.
+
+    SUSPECT SUPPRESSION (fix 3, snapshot mode only): the snapshot builds
+    ``pe_5yr_median`` with the
     "approx_current_eps" method, which back-projects TODAY's EPS across the 5-yr
     price history. For a name whose EPS regime changed (real MU: the median
     collapses to 1.82), that baseline is garbage and the floor lands absurdly low
@@ -459,6 +528,16 @@ def valuation_floor(pe_5yr_median, eps_ntm, last=None, pe_fwd=None):
           score_fundamental uses to declare the approx method broken.
     A non-suspect floor is returned exactly as before (``suspect`` absent).
     """
+    # ANCHORED mode: the coverage dcf_bear REPLACES the pe-median floor entirely,
+    # and is always trusted (no suspect machinery). The caller validated the
+    # anchors dict already (CLI exit 2 on malformed), so dcf_bear is a positive
+    # number here.
+    if isinstance(anchors, dict):
+        return {"level": _clean(anchors["dcf_bear"]),
+                "type": "valuation_floor",
+                "basis": _DCF_BEAR_BASIS,
+                "method": "dcf_bear"}
+
     if pe_5yr_median is None or eps_ntm is None:
         return None
     level = _clean(pe_5yr_median * eps_ntm)
@@ -610,8 +689,13 @@ def _find_snapshot(bundle):
     return max(matches, key=os.path.getmtime)
 
 
-def build_module(snapshot, ladder, stress_pct, top_risk) -> dict:
-    """Build the full module_risk.json document from parsed inputs + ladder."""
+def build_module(snapshot, ladder, stress_pct, top_risk, anchors=None) -> dict:
+    """Build the full module_risk.json document from parsed inputs + ladder.
+
+    ``anchors`` (a validated valuation_anchors dict) switches the downside floor
+    to ANCHORED mode (dcf_bear); absent, the snapshot pe-median floor is used. The
+    active mode is disclosed at the top level as ``downside_floor_mode``.
+    """
     price = snapshot.get("price", {}) if isinstance(snapshot, dict) else {}
     tech = snapshot.get("technicals", {}) if isinstance(snapshot, dict) else {}
     bench = snapshot.get("benchmark", {}) if isinstance(snapshot, dict) else {}
@@ -633,7 +717,8 @@ def build_module(snapshot, ladder, stress_pct, top_risk) -> dict:
 
     vf = valuation_floor(val.get("pe_5yr_median"),
                          fund.get("eps_ntm_consensus"),
-                         last=last, pe_fwd=val.get("pe_fwd"))
+                         last=last, pe_fwd=val.get("pe_fwd"),
+                         anchors=anchors)
     downside_map = build_downside_map(ladder, last, vf, stress_pct, top_risk)
     vol_profile = build_vol_profile(tech, bench)
 
@@ -652,6 +737,8 @@ def build_module(snapshot, ladder, stress_pct, top_risk) -> dict:
             "stress_pct": stress_pct,
             "top_risk": top_risk,
         },
+        "downside_floor_mode": "dcf_bear" if isinstance(anchors, dict)
+                               else "pe_median",
         "renormalized": scored["renormalized"],
         "signal": None,
     }
@@ -672,6 +759,12 @@ def main(argv=None):
     parser.add_argument("--top-risk", default=None,
                         help="single named top risk for the stress row "
                              "(required whenever --stress-pct is given)")
+    parser.add_argument("--anchors", default=None,
+                        help="path to valuation_anchors.json (same file "
+                             "score_fundamental consumes); switches the downside "
+                             "valuation floor to ANCHORED MODE (dcf_bear, labeled "
+                             "'dcf_bear (coverage anchors)'), replacing the "
+                             "pe-median floor. Absent -> snapshot pe-median floor.")
     parser.add_argument("--out", default=None,
                         help="output path (default <bundle>/module_risk.json)")
     args = parser.parse_args(argv)
@@ -684,6 +777,28 @@ def main(argv=None):
     if not os.path.isdir(args.bundle):
         print(f"ERROR: bundle directory not found: {args.bundle}", file=sys.stderr)
         return 2
+
+    # Anchored-mode input: a malformed/absent anchors file is a hard error (the
+    # caller asked for anchored mode explicitly). Validation mirrors
+    # score_fundamental so the two consumers' exit-2 contract is identical.
+    anchors = None
+    if args.anchors is not None:
+        try:
+            with open(args.anchors) as fh:
+                anchors = json.load(fh)
+        except OSError as exc:
+            print(f"ERROR: cannot read anchors {args.anchors}: {exc}",
+                  file=sys.stderr)
+            return 2
+        except ValueError as exc:
+            print(f"ERROR: anchors {args.anchors} is not valid JSON: {exc}",
+                  file=sys.stderr)
+            return 2
+        issues = validate_anchors(anchors)
+        if issues:
+            print("ERROR: invalid anchors " + args.anchors + ": "
+                  + "; ".join(issues), file=sys.stderr)
+            return 2
 
     snap_path = _find_snapshot(args.bundle)
     if snap_path is None:
@@ -711,7 +826,8 @@ def main(argv=None):
         return 2
     ladder = module_tech.get("ladder") or []
 
-    doc = build_module(snapshot, ladder, args.stress_pct, args.top_risk)
+    doc = build_module(snapshot, ladder, args.stress_pct, args.top_risk,
+                       anchors=anchors)
 
     out = args.out or os.path.join(args.bundle, "module_risk.json")
     with open(out, "w") as fh:

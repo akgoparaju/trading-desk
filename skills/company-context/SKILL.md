@@ -75,7 +75,8 @@ Author in this order (findings-first discipline):
 4. **`live_tape`: 3-6 dated entries** answering *what is moving this stock NOW* (the founding requirement). Each `{"date", "event", "why_it_matters"}`; every date is `YYYY-MM-DD` and **≤ `as_of`** (the gate checks parse + ceiling). Dated off the bundle's news / events.
 5. **`cases`: argued narratives with FALSIFIABLE conditions** tied to scenario targets — bull / base / bear, each a real argument (not a hedge) whose `conditions[]` are the things that would confirm or break it. Reference the driving findings.
 6. **`risks[]`**: each `{"risk", "why", "anchor"}` where `anchor` is the coverage section or URL grounding the risk (parallel to a finding's `source`).
-7. Leave **`qc": null`** — the gate stamps it on pass.
+7. **Sector-regime thesis (record as a normal cited finding).** If the coverage/context work surfaces a **structural break in HOW the sector is valued** — a re-rating regime, a cost-of-equity shift, a consolidation that resets the fair-value band (not just this company's own re-rating) — record it as an ordinary cited `findings[]` entry like any other claim (a `C<n>` with a coverage-section or URL source). This matters downstream: a **sector scale must cite such a finding as its `evidence`** (a scale never rests on an uncited assertion). The scale itself is authored/re-based by the **`scale-review`** skill under its adversarial gate — this module just supplies the cited evidence; it never writes or tunes a scale.
+8. Leave **`qc": null`** — the gate stamps it on pass.
 
 ---
 

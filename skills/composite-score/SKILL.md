@@ -49,9 +49,15 @@ Then tell them: the new plugins load in the NEXT session — this run continues 
     python3 ${CLAUDE_PLUGIN_ROOT}/scripts/score_fundamental.py \
       --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> \
       --moat narrow \
-      --moat-justification "durable HBM share but commoditizing DRAM caps the moat (C3, C5)"
+      --moat-justification "durable HBM share but commoditizing DRAM caps the moat (C3, C5)" \
+      [--anchors ./trading_desk_<TICKER>/coverage/valuation_anchors.json]  # only if the file exists
+      [--scale trading_desk_config/scales/<name>.json]                     # only if a scale governs this ticker
     ```
     The script **exits 2** if `--moat` is given without a justification, and **exits 2** if the justification does not match the citation regex `C\d+` — so name real IDs from the context registry. `--moat wide` scores 10, `narrow` 6, `none` 2.
+
+    **`--anchors` / `--scale` are conditional (coverage-first, single-mapping):**
+    - **`--anchors ./trading_desk_<TICKER>/coverage/valuation_anchors.json`** — pass it **only when the file exists** (the `coverage_distilled` path where the coverage step transcribed DCF/comps anchors). It switches the valuation dimension to **anchored mode** (DCF-band / comps-range / own-history / fcf / justified-band; PEG becomes display-only, emitted as `peg_display`). Absent, valuation stays in the snapshot v1.1 floor (PEG scored). A **malformed** anchors file **exits 2** naming the issue — fix the transcription, never the check.
+    - **`--scale <scale.json>`** — pass it **only when a sector scale governs this ticker**, and a scale governs ONLY via a **cited `module_context` finding that names it** (single-mapping discipline: one scale per ticker, the mapping IS the finding). No such finding → no `--scale`; the justified-band component scores n/a, which is correct. A bad scale file exits 2. `--scale` is ignored in snapshot mode (no `--anchors`).
 
     **The compressed-without-context floor is the last resort.** ONLY when no `module_context.json` exists (the FSI-absent floor where the context module ran `web_compressed` but produced no registry to cite, or context was skipped entirely), run the scorer with **`--moat` omitted**:
     ```bash
@@ -120,8 +126,11 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/score_composite.py \
   --variant some --variant-justification "differentiated on gross-margin path vs street (C4)" \
   --catalyst-clarity clear --catalyst-clarity-justification "HBM3E ramp dated to next print (C2)" \
   --invalidation both-legs --invalidation-justification "thesis: GM stalls <35%; trade stop below 200DMA" \
-  --profile balanced
+  --profile balanced \
+  [--weights-config ./trading_desk_config.json]   # only if the config carries a "weights" key
 ```
+
+**`--weights-config` is conditional.** Pass it **when `./trading_desk_config.json` carries a `"weights"` key**; each configured profile's weights must sum to 1.0 (exit 2 otherwise), and profiles absent from the config fall back to the standard fixed table per-profile. The resulting **`weight_set` stamp lands in the module JSON** (`CUSTOM <set>@<ver>` when any profile is custom, else `standard v1`) and travels into the report, so a reader always sees which weight column produced the call. (The script auto-loads the default `./trading_desk_config.json` when it exists even without the flag — pass it explicitly to make the intent legible.)
 
 Optional repeatable `--entry-level <price>` flags add `ev_at_levels` rows — useful for ad-hoc what-if runs and re-scores; the trade-plan skill computes its own EV-at-level from the same scenario set and does NOT re-invoke this script. The script writes `<bundle>/module_composite.json` (path printed to stdout). Any missing flag/justification, a bad scenario file, a probability sum ≠ 1, or ≥ 3 missing dimensions is exit 2 — fix and re-run.
 
