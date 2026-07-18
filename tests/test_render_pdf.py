@@ -260,42 +260,97 @@ class TestDiffBundles(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 class TestFmtMoneyDelta(unittest.TestCase):
+    # NOTE (fix 1 display precision): the money magnitude now formats to 2dp with
+    # thousands separators, so '$5' is '$5.00' and a 4-figure value gains commas.
     def test_negative_puts_sign_before_dollar(self):
         # the defect: '$-182.44'. The fix: '-$182.44'.
         self.assertEqual(rp.fmt_money_delta(-182.44), "-$182.44")
-        self.assertEqual(rp.fmt_money_delta(-3.0), "-$3")
+        self.assertEqual(rp.fmt_money_delta(-3.0), "-$3.00")
 
     def test_positive_plain(self):
-        self.assertEqual(rp.fmt_money_delta(5.0), "$5")
+        self.assertEqual(rp.fmt_money_delta(5.0), "$5.00")
         self.assertEqual(rp.fmt_money_delta(182.44), "$182.44")
+        self.assertEqual(rp.fmt_money_delta(1254.81), "$1,254.81")
 
     def test_positive_with_plus_lead(self):
-        self.assertEqual(rp.fmt_money_delta(5.0, plus=True), "+$5")
+        self.assertEqual(rp.fmt_money_delta(5.0, plus=True), "+$5.00")
         # negatives never gain a '+', even with plus=True.
-        self.assertEqual(rp.fmt_money_delta(-5.0, plus=True), "-$5")
+        self.assertEqual(rp.fmt_money_delta(-5.0, plus=True), "-$5.00")
 
     def test_zero_is_never_signed(self):
-        self.assertEqual(rp.fmt_money_delta(0), "$0")
-        self.assertEqual(rp.fmt_money_delta(0.0, plus=True), "$0")
+        self.assertEqual(rp.fmt_money_delta(0), "$0.00")
+        self.assertEqual(rp.fmt_money_delta(0.0, plus=True), "$0.00")
 
     def test_non_number_is_na(self):
         self.assertEqual(rp.fmt_money_delta(None), "n/a")
         self.assertEqual(rp.fmt_money_delta(True), "n/a")
 
     def test_what_changed_rows_money_negative_sign_outside(self):
-        # Entry 1 dropping 95 -> 92 => a money row with a -$3 delta and the
+        # Entry 1 dropping 95 -> 92 => a money row with a -$3.00 delta and the
         # value cells sign-correct (no '$-' anywhere in the money row).
         old, new = TestDiffBundles()._two_bundles()
         diff = rp.diff_bundles(old, new)
         rows = rp._what_changed_rows(diff)
         entry_row = [r for r in rows if r[0] == "Entry 1"][0]
         _, old_s, new_s, delta_s, is_down = entry_row
-        self.assertEqual(old_s, "$95")
-        self.assertEqual(new_s, "$92")
-        self.assertEqual(delta_s, "-$3")
+        self.assertEqual(old_s, "$95.00")
+        self.assertEqual(new_s, "$92.00")
+        self.assertEqual(delta_s, "-$3.00")
         self.assertTrue(is_down)
         for cell in (old_s, new_s, delta_s):
             self.assertNotIn("$-", cell)
+
+
+# --------------------------------------------------------------------------- #
+# Display-precision formatters + action short-map (fix 1 + fix 2).
+# --------------------------------------------------------------------------- #
+
+class TestDisplayFormatters(unittest.TestCase):
+    def test_fmt_price_2dp_and_separators(self):
+        self.assertEqual(rp.fmt_price(853.2), "$853.20")
+        self.assertEqual(rp.fmt_price(1254.81), "$1,254.81")
+        self.assertEqual(rp.fmt_price(681.436), "$681.44")   # rounds to 2dp
+        self.assertEqual(rp.fmt_price(103.21), "$103.21")
+
+    def test_fmt_price_na_for_non_numbers(self):
+        self.assertEqual(rp.fmt_price(None), "n/a")
+        self.assertEqual(rp.fmt_price(True), "n/a")
+        self.assertEqual(rp.fmt_price("x"), "n/a")
+
+    def test_fmt_ratio_2dp(self):
+        self.assertEqual(rp.fmt_ratio(18.3879), "18.39")
+        self.assertEqual(rp.fmt_ratio(0.138), "0.14")
+        self.assertEqual(rp.fmt_ratio(1.65828), "1.66")
+        self.assertEqual(rp.fmt_ratio(4.5), "4.50")
+
+    def test_fmt_ratio_na_for_non_numbers(self):
+        self.assertEqual(rp.fmt_ratio(None), "n/a")
+        self.assertEqual(rp.fmt_ratio(True), "n/a")
+
+    def test_fmt_pct_int_0dp(self):
+        self.assertEqual(rp.fmt_pct_int(92.3077), "92")
+        self.assertEqual(rp.fmt_pct_int(8.7), "9")       # rounds
+        self.assertEqual(rp.fmt_pct_int(103.0), "103")
+
+    def test_fmt_pct_int_na_for_non_numbers(self):
+        self.assertEqual(rp.fmt_pct_int(None), "n/a")
+        self.assertEqual(rp.fmt_pct_int(True), "n/a")
+
+
+class TestActionShort(unittest.TestCase):
+    def test_known_actions_map_to_short_forms(self):
+        self.assertEqual(rp.action_short("Buy/Add"), "BUY / ADD")
+        self.assertEqual(rp.action_short("Hold/Accumulate-on-weakness"),
+                         "HOLD / ACCUMULATE")
+        self.assertEqual(rp.action_short("Hold/Trim"), "HOLD / TRIM")
+        self.assertEqual(rp.action_short("Reduce/Avoid"), "REDUCE / AVOID")
+
+    def test_unknown_action_uppercased_fallback(self):
+        self.assertEqual(rp.action_short("Watch"), "WATCH")
+
+    def test_empty_action_is_question_mark(self):
+        self.assertEqual(rp.action_short(""), "?")
+        self.assertEqual(rp.action_short(None), "?")
 
 
 # --------------------------------------------------------------------------- #

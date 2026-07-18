@@ -411,6 +411,25 @@ class TestExtractFootballField(unittest.TestCase):
             self.assertEqual(support["lo"], 85.0)
             self.assertEqual(support["hi"], 85.0)
 
+    def test_suspect_valuation_floor_omitted_from_anchors(self):
+        # A suspect valuation floor (approx_current_eps breakdown) is NOT drawn
+        # as a valuation-floor anchor; a NON-suspect floor still is (fix 3).
+        with tempfile.TemporaryDirectory() as d:
+            docs = _mk_bundle(d)
+            # Baseline: the fixture's non-suspect valuation_floor IS present.
+            base = rc.extract_football_field(docs)
+            self.assertIn("Valuation floor", {r["label"] for r in base["rows"]})
+            # Flag it suspect -> the anchor is omitted.
+            for r in docs["module_risk"]["tables"]["downside_map"]:
+                if r.get("type") == "valuation_floor":
+                    r["suspect"] = True
+                    r["suspect_reason"] = "approx_current_eps method breakdown"
+            data = rc.extract_football_field(docs)
+            self.assertNotIn("Valuation floor",
+                             {r["label"] for r in data["rows"]})
+            # other anchors survive.
+            self.assertIn("Consensus PT", {r["label"] for r in data["rows"]})
+
 
 class TestExtractScoreBars(unittest.TestCase):
     def test_score_bars_five_dims_with_weights(self):
@@ -484,6 +503,37 @@ class TestExtractCatalystTimeline(unittest.TestCase):
                 self.assertNotEqual(a, b)
 
 
+class TestShortEvent(unittest.TestCase):
+    """Word-boundary truncation (fix 1): never slice inside a number token."""
+
+    def test_short_text_unchanged(self):
+        self.assertEqual(rc._short_event("Earnings"), "Earnings")
+
+    def test_truncates_at_word_boundary_not_mid_number(self):
+        # "Second down day -5.65%" over a tight limit must NOT become "904.…" /
+        # "-5.…"; the last kept token is a WHOLE word, so no digit is split.
+        out = rc._short_event("Second down day -5.65%", limit=12)
+        self.assertTrue(out.endswith("…"))
+        body = out[:-1].rstrip()
+        # every whitespace-separated token kept is intact (a prefix of the source
+        # words in order), so no number token is cut mid-digit.
+        src_words = "Second down day -5.65%".split()
+        for i, tok in enumerate(body.split()):
+            self.assertEqual(tok, src_words[i])
+
+    def test_number_token_never_partially_kept(self):
+        # A limit landing in the middle of the number keeps only the prior words.
+        out = rc._short_event("gap up 1234.56 today", limit=10)
+        self.assertNotIn("1234.5", out)  # no partial number
+        self.assertTrue(out.endswith("…"))
+
+    def test_single_overlong_token_hard_sliced(self):
+        # One token longer than the budget still has to be cut somewhere.
+        out = rc._short_event("supercalifragilistic", limit=8)
+        self.assertTrue(out.endswith("…"))
+        self.assertLessEqual(len(out), 8)
+
+
 class TestExtractPriceVolume(unittest.TestCase):
     def test_price_volume_series_and_events(self):
         with tempfile.TemporaryDirectory() as d:
@@ -530,6 +580,22 @@ class TestExtractDownsideLadder(unittest.TestCase):
             self.assertIn(70.0, levels)   # valuation floor
             self.assertIn(60.0, levels)   # stress scenario
             self.assertEqual(data["last"], 100.0)
+
+    def test_suspect_floor_excluded_from_ladder(self):
+        # A downside_map row flagged suspect (approx_current_eps breakdown) is
+        # NOT rendered as a ladder rung; non-suspect rows are untouched (fix 3).
+        with tempfile.TemporaryDirectory() as d:
+            docs = _mk_bundle(d)
+            dmap = docs["module_risk"]["tables"]["downside_map"]
+            for r in dmap:
+                if r.get("type") == "valuation_floor":
+                    r["suspect"] = True
+                    r["suspect_reason"] = "approx_current_eps method breakdown"
+            data = rc.extract_downside_ladder(docs)
+            levels = [r["level"] for r in data["rungs"]]
+            self.assertNotIn(70.0, levels)   # suspect floor gone
+            self.assertIn(60.0, levels)      # stress scenario still present
+            self.assertIn(95.0, levels)      # normal rung untouched
 
 
 class TestExtractDrawdownHistory(unittest.TestCase):

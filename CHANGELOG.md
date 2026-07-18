@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.10.2 — 2026-07-17 · Display precision, grade-box labels, valuation-floor breakdown suppression
+
+Final display-integrity round on the PDF docket, verified visually against a full
+MU-shaped bundle (exec/detail/delta rendered, every page inspected).
+
+- **Display-precision discipline (the "amateur tell").** Three new pure formatters in
+  `render_pdf.py` — `fmt_price(v)` (2dp + thousands separators, e.g. `$853.20`,
+  `$1,254.81`), `fmt_ratio(v)` (2dp bare multiples, e.g. `18.39`, `0.14`, `1.66`), and
+  `fmt_pct_int(v)` (0dp percentiles, e.g. `92`) — now route EVERY script-minted
+  displayed number in the exec/detail/delta chrome: header price, key-stats sidebar
+  (beta/P-E/PEG/IV percentile/52wk), trade-plan levels, grade box, What-Changed money,
+  options strikes/net/hedge cost, downside-map levels, invalidation stops, footer money.
+  `fmt_money_delta` now formats its magnitude to 2dp + separators (`$5.00`, not `$5`).
+  Slot prose is left untouched (user text). All unit-tested. The slots provenance gate
+  is unaffected (it checks the md/slots, and its rounding-expansion already tolerates
+  0-2dp) — confirmed PASS on the live bundle.
+- **Catalyst-timeline truncation.** `_short_event` now truncates at WORD boundaries
+  (whole tokens + ellipsis), never inside a number token (`"...-5.65%"` is no longer
+  cut to `"904.…"`); a single overlong token still hard-slices.
+- **Grade-box label truncation.** A new `action_short` map ({`Buy/Add`→`BUY / ADD`,
+  `Hold/Accumulate-on-weakness`→`HOLD / ACCUMULATE`, `Hold/Trim`→`HOLD / TRIM`,
+  `Reduce/Avoid`→`REDUCE / AVOID`}, fallback: uppercase + stringWidth fit) so the grade
+  line reads `B · HOLD / ACCUMULATE` untruncated. Unit-tested.
+- **Valuation-floor method-breakdown suppression (end-to-end).** `score_risk.valuation_floor`
+  now flags the row `suspect: true, suspect_reason: "approx_current_eps method breakdown"`
+  (instead of dropping it) when `floor/last < 0.25` OR `pe_fwd/pe_5yr_median` falls outside
+  `[0.2, 5.0]` (mirrors `score_fundamental`'s scoring sanity band, documented in code).
+  `build_downside_map` carries the flag. DISPLAY consumers skip suspect rows:
+  `render_charts` (football-field anchors + downside-ladder exclude them), `render_pdf`
+  (downside-map table shows the row GRAYED with its reason; anchors omit). The real-MU
+  ~$134 floor on an ~$850 stock is now suppressed from the anchors chart / ladder and
+  grayed in the detail table — verified visually.
+- **Files:** `scripts/render_pdf.py`, `scripts/render_charts.py`, `scripts/score_risk.py`,
+  `tests/test_render_pdf.py`, `tests/test_render_charts.py`, `tests/test_score_risk.py`.
+  Suite: 776 tests green (12 skips base / 2 skips render-venv); +19 new tests.
+
 ## 0.10.1 — 2026-07-17 · Docket polish + R5 live validation
 
 Review-round polish on the PDF docket, verified against a real MU refresh bundle (R5).

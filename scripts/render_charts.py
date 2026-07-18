@@ -308,11 +308,15 @@ def extract_football_field(docs):
         rows.append({"label": "Ladder support", "lo": nearest[0],
                      "hi": nearest[0], "kind": "dot", "color": "accent"})
 
-    # Valuation floor from the risk downside_map.
+    # Valuation floor from the risk downside_map. SUSPECT floors (the
+    # approx_current_eps method breakdown, e.g. real MU's ~$134 floor) are
+    # OMITTED from the anchors chart -- they are a garbage anchor, kept in the
+    # downside map only for continuity (fix 3).
     risk = docs.get("module_risk") or {}
     dmap = ((risk.get("tables") or {}).get("downside_map") or [])
     floors = [float(r["level"]) for r in dmap
-              if r.get("type") == "valuation_floor" and r.get("level") is not None]
+              if r.get("type") == "valuation_floor" and r.get("level") is not None
+              and not r.get("suspect")]
     if floors:
         rows.append({"label": "Valuation floor", "lo": min(floors),
                      "hi": max(floors), "kind": "band", "color": "gray"})
@@ -441,6 +445,11 @@ def extract_downside_ladder(docs):
     for r in dmap:
         lvl = r.get("level")
         if lvl is None:
+            continue
+        # SUSPECT floors (approx_current_eps method breakdown) are excluded from
+        # the downside ladder extract -- they render grayed in the detail PDF
+        # table instead, never as a ladder rung (fix 3).
+        if r.get("suspect"):
             continue
         rungs.append({"level": float(lvl), "type": r.get("type", ""),
                       "pct_from_last": r.get("pct_from_last")})
@@ -576,8 +585,30 @@ def _money(v):
 
 
 def _short_event(text, limit=42):
+    """Truncate an event label to ``limit`` chars at a WORD boundary + ellipsis.
+
+    Never cuts inside a token (review finding: "Second down day -5.65%" was
+    truncated to "904.…", slicing a number mid-digit -- an amateur tell). We keep
+    whole space-separated words up to the limit; if even the first word overflows
+    we fall back to a hard char slice (a single very long token still has to be
+    cut somewhere, but that is not a number-splitting regression of a phrase).
+    """
     text = (text or "").strip()
-    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+    if len(text) <= limit:
+        return text
+    budget = limit - 1  # room for the ellipsis
+    words = text.split()
+    kept = ""
+    for w in words:
+        trial = w if not kept else kept + " " + w
+        if len(trial) <= budget:
+            kept = trial
+        else:
+            break
+    if kept:
+        return kept.rstrip() + "…"
+    # First word alone exceeds the budget -> hard slice (no phrase to break).
+    return text[:budget].rstrip() + "…"
 
 
 # --------------------------------------------------------------------------- #

@@ -424,16 +424,60 @@ def score_liquidity(adv, net, mktcap) -> dict:
 # Tables: downside_map + vol_profile
 # --------------------------------------------------------------------------- #
 
-def valuation_floor(pe_5yr_median, eps_ntm):
+# Suspect-floor detection thresholds (see valuation_floor). The 0.25 floor/last
+# ratio catches a collapsed floor directly; the [0.2, 5.0] pe_fwd/pe_5yr_median
+# band MIRRORS score_fundamental.score_valuation's sanity band so the SCORING and
+# DISPLAY paths agree on when the approx_current_eps method has broken down.
+_SUSPECT_FLOOR_RATIO = 0.25          # floor/last below this => suspect
+_SUSPECT_PE_BAND = (0.2, 5.0)        # pe_fwd/pe_5yr_median outside this => suspect
+_SUSPECT_REASON = "approx_current_eps method breakdown"
+
+
+def valuation_floor(pe_5yr_median, eps_ntm, last=None, pe_fwd=None):
     """A valuation-floor level from pe_5yr_median x eps_ntm_consensus, or None.
 
-    Both inputs must be present. The level is a judgment anchor (where a 5-yr
-    median multiple on forward EPS would put the stock), NOT a proven support.
+    Both scoring inputs must be present. The level is a judgment anchor (where a
+    5-yr median multiple on forward EPS would put the stock), NOT a proven support.
+
+    SUSPECT SUPPRESSION (fix 3): the snapshot builds ``pe_5yr_median`` with the
+    "approx_current_eps" method, which back-projects TODAY's EPS across the 5-yr
+    price history. For a name whose EPS regime changed (real MU: the median
+    collapses to 1.82), that baseline is garbage and the floor lands absurdly low
+    (~$134 on a ~$850 stock), yet the DISPLAY paths (football-field anchors,
+    downside ladder) were still drawing it. score_fundamental already GATES the
+    SCORING side on a sanity band; here we mirror that on the DISPLAY side. Rather
+    than DROP the row (which would break downside-map continuity), we RETURN it
+    flagged ``suspect: true`` so consumers can gray it / omit it from anchors while
+    the row still exists for the map.
+
+    The rule (documented, kept simple): the floor is SUSPECT when EITHER
+      (a) a reference ``last`` is given and floor/last < 0.25 (the floor has
+          collapsed to under a quarter of the current price -- an impossible
+          "value" anchor), OR
+      (b) both ``pe_fwd`` and ``pe_5yr_median`` are given (>0) and their ratio
+          pe_fwd/pe_5yr_median falls OUTSIDE [0.2, 5.0] -- the SAME band
+          score_fundamental uses to declare the approx method broken.
+    A non-suspect floor is returned exactly as before (``suspect`` absent).
     """
     if pe_5yr_median is None or eps_ntm is None:
         return None
-    return {"level": _clean(pe_5yr_median * eps_ntm), "type": "valuation_floor",
-            "basis": "valuation", "method": "pe_5yr_median x eps_ntm"}
+    level = _clean(pe_5yr_median * eps_ntm)
+    row = {"level": level, "type": "valuation_floor",
+           "basis": "valuation", "method": "pe_5yr_median x eps_ntm"}
+
+    suspect = False
+    if last not in (None, 0) and level is not None:
+        if level / last < _SUSPECT_FLOOR_RATIO:
+            suspect = True
+    if (pe_fwd is not None and pe_fwd > 0
+            and pe_5yr_median is not None and pe_5yr_median > 0):
+        ratio = pe_fwd / pe_5yr_median
+        if ratio < _SUSPECT_PE_BAND[0] or ratio > _SUSPECT_PE_BAND[1]:
+            suspect = True
+    if suspect:
+        row["suspect"] = True
+        row["suspect_reason"] = _SUSPECT_REASON
+    return row
 
 
 def build_downside_map(ladder, last, val_floor, stress_pct, top_risk) -> list:
@@ -456,9 +500,15 @@ def build_downside_map(ladder, last, val_floor, stress_pct, top_risk) -> list:
 
     if val_floor is not None and last is not None and val_floor["level"] < last:
         pct = _clean(val_floor["level"] / last - 1) if last else None
-        rows.append({"level": val_floor["level"], "type": val_floor["type"],
-                     "basis": val_floor["basis"], "method": val_floor["method"],
-                     "pct_from_last": pct})
+        vf_row = {"level": val_floor["level"], "type": val_floor["type"],
+                  "basis": val_floor["basis"], "method": val_floor["method"],
+                  "pct_from_last": pct}
+        # Carry the suspect flag so DISPLAY consumers can gray/omit the row while
+        # keeping it in the map for continuity (fix 3).
+        if val_floor.get("suspect"):
+            vf_row["suspect"] = True
+            vf_row["suspect_reason"] = val_floor.get("suspect_reason")
+        rows.append(vf_row)
 
     rows.sort(key=lambda r: r["level"], reverse=True)
 
@@ -582,7 +632,8 @@ def build_module(snapshot, ladder, stress_pct, top_risk) -> dict:
                    beta_n_days=beta_n_days, ohlcv_rows=ohlcv_rows)
 
     vf = valuation_floor(val.get("pe_5yr_median"),
-                         fund.get("eps_ntm_consensus"))
+                         fund.get("eps_ntm_consensus"),
+                         last=last, pe_fwd=val.get("pe_fwd"))
     downside_map = build_downside_map(ladder, last, vf, stress_pct, top_risk)
     vol_profile = build_vol_profile(tech, bench)
 

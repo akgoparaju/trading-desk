@@ -136,18 +136,20 @@ def _fmt(x):
 
 
 def fmt_money_delta(v, plus=False):
-    """Money string with the sign OUTSIDE the dollar sign.
+    """Money string with the sign OUTSIDE the dollar sign, 2dp + separators.
 
-    -182.44 -> '-$182.44' (not '$-182.44'); 5.0 -> '$5'; with plus=True a
-    positive value gains a leading '+' ('+$5') for signed delta columns. Zero
-    is never signed. PURE (formatting only) so it is unit-tested directly.
+    -182.44 -> '-$182.44' (not '$-182.44'); 5.0 -> '$5.00'; 1254.81 ->
+    '$1,254.81'; with plus=True a positive value gains a leading '+' ('+$5.00')
+    for signed delta columns. Zero is never signed. The magnitude is formatted
+    to 2dp with thousands separators (display-precision discipline). PURE
+    (formatting only) so it is unit-tested directly.
     """
     if v is None or not isinstance(v, (int, float)) or isinstance(v, bool):
         return "n/a"
     if v < 0:
-        return "-$%s" % _fmt(-v)
+        return "-%s" % fmt_price(-v)
     sign = "+" if (plus and v > 0) else ""
-    return "%s$%s" % (sign, _fmt(v))
+    return "%s%s" % (sign, fmt_price(v))
 
 
 def _delta(o, n):
@@ -164,6 +166,75 @@ def _grade_for(score):
     if score is None:
         return "?"
     return "B" if score >= 60 else "C"
+
+
+# --------------------------------------------------------------------------- #
+# Display-precision formatters (the "amateur tell" fix). PURE, unit-tested.
+#
+# WHY: raw floats ($853.2, Beta 1.65828, IV percentile 92.3077) leak an
+# unfinished look into an institutional PDF. Every DISPLAYED number in the
+# script-minted exec/detail/delta chrome (tables, sidebar, boxes, footer) is
+# routed through one of these three formatters. They format for DISPLAY only --
+# they never touch the bundle values the provenance gate checks (that gate reads
+# the md/slots prose, not the PDF), and its rounding-expansion already tolerates
+# these 0-2dp roundings, so the slots gate is unaffected.
+# --------------------------------------------------------------------------- #
+
+def fmt_price(v):
+    """A price to 2 decimal places with thousands separators, '$'-prefixed.
+
+    853.2 -> '$853.20'; 1254.81 -> '$1,254.81'; 681.436 -> '$681.44'. Non-numbers
+    (or bool) -> 'n/a'. Negative prices keep the sign inside ('-$5.00') -- price
+    columns are unsigned in practice, but this stays well-defined.
+    """
+    if v is None or isinstance(v, bool) or not isinstance(v, (int, float)):
+        return "n/a"
+    return "${:,.2f}".format(v)
+
+
+def fmt_ratio(v):
+    """A dimensionless ratio to 2 decimal places (no unit, no separators).
+
+    18.3879 -> '18.39'; 0.138 -> '0.14'; 1.65828 -> '1.66'. Non-numbers -> 'n/a'.
+    Used for P/E, PEG, beta, and other bare multiples where 2dp is enough.
+    """
+    if v is None or isinstance(v, bool) or not isinstance(v, (int, float)):
+        return "n/a"
+    return "{:.2f}".format(v)
+
+
+def fmt_pct_int(v):
+    """A percentile / integer-percent to 0 decimal places (rounded, no '%').
+
+    92.3077 -> '92'; 8.7 -> '9'; 103.0 -> '103'. Non-numbers -> 'n/a'. Used for
+    percentile displays (IV percentile) where fractional precision is noise.
+    """
+    if v is None or isinstance(v, bool) or not isinstance(v, (int, float)):
+        return "n/a"
+    return "{:.0f}".format(v)
+
+
+# Grade-box action labels are long ("Hold/Accumulate-on-weakness") and were being
+# truncated mid-phrase in the fixed-width box. This maps the canonical pipeline
+# actions to compact, fully-visible short forms; unknown actions fall back to an
+# uppercased form fitted by stringWidth at draw time (see _grade_box).
+_ACTION_SHORT = {
+    "Buy/Add": "BUY / ADD",
+    "Hold/Accumulate-on-weakness": "HOLD / ACCUMULATE",
+    "Hold/Trim": "HOLD / TRIM",
+    "Reduce/Avoid": "REDUCE / AVOID",
+}
+
+
+def action_short(action):
+    """Compact grade-box action label. PURE (map lookup), unit-tested.
+
+    Known canonical actions map to their short form; anything else is uppercased
+    (the caller then stringWidth-fits it into the box). None/empty -> '?'.
+    """
+    if not action:
+        return "?"
+    return _ACTION_SHORT.get(action, str(action).upper())
 
 
 # --------------------------------------------------------------------------- #
@@ -523,8 +594,11 @@ def _grade_box(doc, x, y_top, w, comp):
 
     doc.rect(x, y_top - h, w, h, fill_rgb=doc.ACCENT)
     light = (0.96, 0.90, 0.84)
-    doc.text(x + 8, y_top - 15, doc.truncate("%s · %s" % (grade, action),
-             doc.FONT_B, 12, w - 12), font=doc.FONT_B, size=12, rgb=doc.WHITE)
+    # Short-form action so the grade line ("B · HOLD / ACCUMULATE") is never
+    # truncated mid-phrase; still stringWidth-fitted as a final safety net.
+    doc.text(x + 8, y_top - 15, doc.truncate("%s · %s" % (grade,
+             action_short(action)), doc.FONT_B, 12, w - 12), font=doc.FONT_B,
+             size=12, rgb=doc.WHITE)
     doc.text(x + 8, y_top - 28, "Composite %s/100 · %s" % (
         _fmt(score), profile), font=doc.FONT, size=7.6, rgb=light)
     if ev_cur is not None:
@@ -532,7 +606,7 @@ def _grade_box(doc, x, y_top, w, comp):
         doc.text(x + 8, y_top - 39, "EV(current) %+.1f%%%s" % (ev_cur * 100, hz),
                  font=doc.FONT, size=7.6, rgb=light)
     if breakeven is not None:
-        doc.text(x + 8, y_top - 50, "Breakeven entry $%s" % _fmt(breakeven),
+        doc.text(x + 8, y_top - 50, "Breakeven entry %s" % fmt_price(breakeven),
                  font=doc.FONT, size=7.6, rgb=light)
     return h
 
@@ -637,26 +711,26 @@ def _key_stats(doc, x, y_top, w, docs):
             return "$%.0fB" % (v / 1e9)
         if v >= 1e6:
             return "$%.0fM" % (v / 1e6)
-        return "$%s" % _fmt(v)
+        return fmt_price(v)
 
     def pct(v):
         return "%.1f%%" % (v * 100) if isinstance(v, (int, float)) else "n/a"
 
     rows = [
         ("Mkt cap", money(price.get("mktcap_computed"))),
-        ("52wk hi / lo", "%s / %s" % (_fmt(price.get("wk52_high")),
-                                      _fmt(price.get("wk52_low")))),
+        ("52wk hi / lo", "%s / %s" % (fmt_price(price.get("wk52_high")),
+                                      fmt_price(price.get("wk52_low")))),
         ("ADV (3m)", money(price.get("adv_dollar_3m"))),
-        ("Beta", _fmt(bench.get("beta"))),
+        ("Beta", fmt_ratio(bench.get("beta"))),
         ("Realized vol 30", pct(tech.get("rv30_ann"))),
         ("Short interest", pct((sent.get("short_interest_pct") or 0) / 100)
          if sent.get("short_interest_pct") is not None else "n/a"),
-        ("P/E ttm", _fmt(val.get("pe_ttm"))),
-        ("P/E fwd", _fmt(val.get("pe_fwd"))),
-        ("PEG", _fmt(val.get("peg"))),
+        ("P/E ttm", fmt_ratio(val.get("pe_ttm"))),
+        ("P/E fwd", fmt_ratio(val.get("pe_fwd"))),
+        ("PEG", fmt_ratio(val.get("peg"))),
         ("FCF yield", pct(val.get("fcf_yield"))),
-        ("EPS ttm", _fmt(fund.get("eps_ttm"))),
-        ("IV percentile", _fmt(sent.get("iv_pctile_1yr"))),
+        ("EPS ttm", fmt_ratio(fund.get("eps_ttm"))),
+        ("IV percentile", fmt_pct_int(sent.get("iv_pctile_1yr"))),
         ("Next earnings", ne.get("date") or "n/a"),
     ]
     doc.text(x, y_top, "KEY STATISTICS", font=doc.FONT_B, size=8.5, rgb=doc.ACCENT)
@@ -746,26 +820,27 @@ def _trade_plan_table(doc, x, y_top, w, tradeplan):
     dc = sp.get("dont_chase", {}) or {}
     if dc.get("above") is not None:
         rows.append(("Don't-chase", "above %s (%s)" % (
-            _fmt(dc.get("above")), dc.get("convention", "")), ""))
+            fmt_price(dc.get("above")), dc.get("convention", "")), ""))
     for i, e in enumerate(sp.get("entries", []) or [], start=1):
         ev = e.get("ev_at_level")
         ev_s = ("%+.1f%%" % (ev * 100)) if isinstance(ev, (int, float)) else ""
         rows.append(("Entry %d" % i, "%s · %s" % (
-            _fmt(e.get("level")), e.get("condition", "")), ev_s))
+            fmt_price(e.get("level")), e.get("condition", "")), ev_s))
     exits = sp.get("exits", {}) or {}
     pt = exits.get("profit_take") or {}
     if pt:
-        rows.append(("Profit-take", "%s (%s)" % (_fmt(pt.get("level")),
+        rows.append(("Profit-take", "%s (%s)" % (fmt_price(pt.get("level")),
                      pt.get("type", "")), ""))
     bt = exits.get("bull_target") or {}
     if bt:
         note = " · %s" % bt.get("note") if bt.get("note") else ""
-        rows.append(("Bull target", "%s%s" % (_fmt(bt.get("level")), note), ""))
+        rows.append(("Bull target", "%s%s" % (fmt_price(bt.get("level")), note),
+                     ""))
     inv = sp.get("invalidation", {}) or {}
     tl = inv.get("technical_leg") or {}
     fl = inv.get("fundamental_leg") or {}
     rows.append(("Invalidation", "%s %s; %s %s" % (
-        tl.get("condition", ""), _fmt(tl.get("level")),
+        tl.get("condition", ""), fmt_price(tl.get("level")),
         fl.get("metric", ""), fl.get("threshold", "")), ""))
     sz = sp.get("sizing", {}) or {}
     if sz.get("recommended_pct") is not None:
@@ -862,11 +937,11 @@ def _draw_exec_page1(doc, bundle, docs, slots, diff, prev_date):
     tk_w = doc.string_width(doc.ticker, doc.FONT_B, 34)
     last = price.get("last")
     prev = price.get("prev_close")
-    doc.text(M + tk_w + 12, hb_top - 20, "$%s" % _fmt(last), font=doc.FONT_B,
+    doc.text(M + tk_w + 12, hb_top - 20, fmt_price(last), font=doc.FONT_B,
              size=12, rgb=doc.INK)
     if last is not None and prev:
         chg = (last / prev - 1) * 100
-        pw = doc.string_width("$%s" % _fmt(last), doc.FONT_B, 12)
+        pw = doc.string_width(fmt_price(last), doc.FONT_B, 12)
         col = doc.RED if chg < 0 else doc.GREEN
         doc.text(M + tk_w + 12 + pw + 8, hb_top - 20, "%+.2f%% (1d)" % chg,
                  font=doc.FONT_B, size=9, rgb=col)
@@ -1093,7 +1168,7 @@ def _draw_options_section(doc, bundle, docs, y_top):
         doc.text(cols[j], y, hd, font=doc.FONT_B, size=6.6, rgb=doc.GRAY_MD)
     y -= 10
     for st in rec:
-        strikes = "/".join(_fmt(s) for s in (st.get("strikes") or []))
+        strikes = "/".join(fmt_price(s) for s in (st.get("strikes") or []))
         net = st.get("net_credit") or st.get("net_debit")
         pop = st.get("pop")
         pop_s = "%.0f%%" % (pop * 100) if isinstance(pop, (int, float)) else "n/a"
@@ -1101,7 +1176,8 @@ def _draw_options_section(doc, bundle, docs, y_top):
         doc.text(cols[0], y, doc.truncate(st.get("name", ""), doc.FONT, 7.4, 145),
                  font=doc.FONT, size=7.4, rgb=doc.INK)
         doc.text(cols[1], y, strikes, font=doc.FONT, size=7.4, rgb=doc.GRAY_DK)
-        doc.text(cols[2], y, _fmt(net), font=doc.FONT, size=7.4, rgb=doc.GRAY_DK)
+        doc.text(cols[2], y, fmt_price(net), font=doc.FONT, size=7.4,
+                 rgb=doc.GRAY_DK)
         doc.text(cols[3], y, pop_s, font=doc.FONT, size=7.4, rgb=doc.GRAY_DK)
         doc.text(cols[4], y, doc.truncate(pm, doc.FONT, 7.4,
                  doc.CONTENT_W - 400 + M - 4), font=doc.FONT, size=7.4,
@@ -1130,7 +1206,7 @@ def _draw_options_section(doc, bundle, docs, y_top):
         cpp = hedge.get("cost_pct_of_spot")
         htxt = "Hedge: %s" % hedge.get("type", "n/a")
         if cost is not None:
-            htxt += " · cost %s" % _fmt(cost)
+            htxt += " · cost %s" % fmt_price(cost)
         if isinstance(cpp, (int, float)):
             htxt += " (%.1f%% of spot)" % (cpp * 100)
         doc.text(M, y, htxt, font=doc.FONT_I, size=7.6, rgb=doc.GRAY_DK)
@@ -1156,14 +1232,56 @@ def _draw_downside_monitoring(doc, bundle, docs, y_top):
     doc.text(mx, my, "MONITORING", font=doc.FONT_B, size=8, rgb=doc.ACCENT)
     my -= 13
     for line in (
-        "Technical stop: %s %s" % (tl.get("condition", ""), _fmt(tl.get("level"))),
+        "Technical stop: %s %s" % (tl.get("condition", ""),
+                                   fmt_price(tl.get("level"))),
         "Fundamental leg: %s %s" % (fl.get("metric", ""), fl.get("threshold", "")),
     ):
         for ln in doc.wrap(line, doc.FONT, 7.6, doc.CONTENT_W * 0.5 - 20):
             doc.text(mx, my, ln, font=doc.FONT, size=7.6, rgb=doc.GRAY_DK)
             my -= 10
         my -= 3
-    return min(y - 160, my)
+
+    # Downside-map anchor table (full width, below the chart + monitoring block).
+    # SUSPECT floors (approx_current_eps method breakdown) are shown GRAYED with
+    # their reason -- kept for continuity, visibly discounted, never a live anchor
+    # (fix 3). The chart above already omits suspect rungs.
+    ty = _draw_downside_map_table(doc, docs, M, min(y - 160, my) - 16)
+    return min(min(y - 160, my), ty)
+
+
+def _draw_downside_map_table(doc, docs, x, y_top):
+    """The downside-map anchor table; suspect rows grayed + reason-annotated."""
+    risk = docs.get("module_risk") or {}
+    dmap = ((risk.get("tables") or {}).get("downside_map") or [])
+    if not dmap:
+        return y_top
+    w = doc.CONTENT_W
+    doc.text(x, y_top, "DOWNSIDE ANCHORS", font=doc.FONT_B, size=8,
+             rgb=doc.ACCENT)
+    doc.hairline(x, y_top - 3, x + w, rgb=doc.GRAY_LT)
+    cols = [x, x + 110, x + 175]
+    y = y_top - 13
+    for j, hd in enumerate(("Level", "Type", "% from last")):
+        doc.text(cols[j], y, hd, font=doc.FONT_B, size=6.6, rgb=doc.GRAY_MD)
+    y -= 11
+    for r in dmap:
+        suspect = bool(r.get("suspect"))
+        rgb = doc.GRAY_MD if suspect else doc.INK
+        rgb2 = doc.GRAY_MD if suspect else doc.GRAY_DK
+        typ = str(r.get("type", "")).replace("_", " ")
+        pct = r.get("pct_from_last")
+        pct_s = "%+.1f%%" % (pct * 100) if isinstance(pct, (int, float)) else ""
+        doc.text(cols[0], y, fmt_price(r.get("level")), font=doc.FONT_B, size=7.4,
+                 rgb=rgb)
+        doc.text(cols[1], y, typ, font=doc.FONT, size=7.4, rgb=rgb2)
+        doc.text(cols[2], y, pct_s, font=doc.FONT, size=7.4, rgb=rgb2)
+        if suspect:
+            reason = "suspect — %s" % (r.get("suspect_reason") or "")
+            doc.text(cols[2] + 70, y, doc.truncate(reason, doc.FONT_I, 7.0,
+                     w - (cols[2] - x) - 70), font=doc.FONT_I, size=7.0,
+                     rgb=doc.GRAY_MD)
+        y -= 11
+    return y
 
 
 def _parse_grade_history(bundle):
@@ -1484,11 +1602,11 @@ def _invalidation_status_line(diff):
     fund_same = fund["old"] == fund["new"]
     if tech_same and fund_same:
         return ("Invalidation: both legs UNCHANGED — technical stop %s, "
-                "fundamental leg carried." % _fmt(tech["new"]))
+                "fundamental leg carried." % fmt_price(tech["new"]))
     parts = []
     if not tech_same:
-        parts.append("technical stop %s → %s" % (_fmt(tech["old"]),
-                                                      _fmt(tech["new"])))
+        parts.append("technical stop %s → %s" % (fmt_price(tech["old"]),
+                                                      fmt_price(tech["new"])))
     if not fund_same:
         parts.append("fundamental leg revised")
     return "Invalidation: " + "; ".join(parts) + "."

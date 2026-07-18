@@ -397,6 +397,49 @@ class TestDownsideMap(unittest.TestCase):
         self.assertIsNone(sr.valuation_floor(pe_5yr_median=None, eps_ntm=6.0))
         self.assertIsNone(sr.valuation_floor(pe_5yr_median=12.0, eps_ntm=None))
 
+    def test_valuation_floor_not_suspect_when_healthy(self):
+        # Healthy inputs (pe_fwd/pe_5yr_median in band, floor a sane % of last):
+        # no suspect flag at all (backward-compatible shape).
+        vf = sr.valuation_floor(pe_5yr_median=12.0, eps_ntm=6.0,
+                                last=100.0, pe_fwd=10.0)
+        self.assertEqual(vf["level"], 72.0)
+        self.assertNotIn("suspect", vf)
+
+    def test_valuation_floor_suspect_when_floor_collapses_vs_last(self):
+        # Real-MU shape: median collapses (1.82) so floor 1.82*74 ~= 134 on a
+        # ~850 stock -> floor/last < 0.25 -> suspect (approx_current_eps breakdown).
+        vf = sr.valuation_floor(pe_5yr_median=1.82, eps_ntm=74.0, last=853.2)
+        self.assertTrue(vf.get("suspect"))
+        self.assertEqual(vf["suspect_reason"],
+                         "approx_current_eps method breakdown")
+        # the level is still emitted (not dropped) for downside-map continuity.
+        self.assertIsNotNone(vf["level"])
+
+    def test_valuation_floor_suspect_when_pe_ratio_out_of_band(self):
+        # pe_fwd/pe_5yr_median outside [0.2, 5.0] mirrors score_fundamental's
+        # sanity band -> suspect even if floor/last is unremarkable.
+        vf = sr.valuation_floor(pe_5yr_median=1.0, eps_ntm=50.0,
+                                last=80.0, pe_fwd=12.0)  # ratio 12 > 5
+        self.assertTrue(vf.get("suspect"))
+        self.assertEqual(vf["suspect_reason"],
+                         "approx_current_eps method breakdown")
+
+    def test_suspect_row_carried_into_downside_map(self):
+        # build_downside_map propagates the suspect flag + reason onto the row so
+        # DISPLAY consumers can gray/omit it (fix 3).
+        ladder = _ladder([(90.0, "swing_low")])
+        vf = sr.valuation_floor(pe_5yr_median=1.82, eps_ntm=20.0, last=200.0)
+        self.assertTrue(vf.get("suspect"))
+        rows = sr.build_downside_map(ladder, last=200.0, val_floor=vf,
+                                     stress_pct=None, top_risk=None)
+        vfr = [r for r in rows if r["type"] == "valuation_floor"][0]
+        self.assertTrue(vfr.get("suspect"))
+        self.assertEqual(vfr["suspect_reason"],
+                         "approx_current_eps method breakdown")
+        # a normal ladder row carries no suspect flag.
+        normal = [r for r in rows if r["type"] == "swing_low"][0]
+        self.assertNotIn("suspect", normal)
+
     def test_stress_row_arithmetic(self):
         # last 100 x (1 + -0.30) = 70
         ladder = _ladder([(90.0, "swing_low"), (96.0, "ma50")])
