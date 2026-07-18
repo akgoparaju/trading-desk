@@ -64,6 +64,14 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/score_risk.py \
 
 The script loads the newest snapshot, reads the ladder from `module_technical.json`, scores the four dimensions, builds the downside map (ladder entries below `last` + a valuation-floor row when computable + the stress row when flagged) and the volatility-profile context block, and writes `<bundle>/module_risk.json` (its path is printed to stdout). `--stress-pct` without `--top-risk` is a hard error (exit 2). Exit 2 also means the bundle/snapshot could not be read or the technical module is missing — fix that and re-run.
 
+**When coverage anchors exist** (`./trading_desk_<TICKER>/coverage/valuation_anchors.json`), add:
+
+```bash
+  --anchors ./trading_desk_<TICKER>/coverage/valuation_anchors.json
+```
+
+The valuation floor then becomes the coverage DCF bear case (`dcf_bear`, basis `dcf_bear (coverage anchors)`), replacing the `pe_5yr_median × eps_ntm` floor entirely — the module records `downside_floor_mode: "dcf_bear"`. Without `--anchors`, the pe-median floor and its suspect-flag machinery are unchanged (`downside_floor_mode: "pe_median"`). A malformed anchors file is exit 2 naming the issue — fix the file, never fall back silently.
+
 ---
 
 ## Step 4 — Read the module JSON and write the brief
@@ -100,7 +108,7 @@ Report to the user (and to any calling skill):
 - **Higher score means better conditions.** This module scores risk-*reward*, not danger. A near-100 score is a calm, discounted, asymmetric, liquid, cash-rich setup. State the convention in the brief so it can never be read backwards.
 - **Single-snapshot rule.** No fetching. A missing figure (e.g. `null` beta) contributes 0 to its component and is named "n/a" in the arithmetic; if an entire dimension is null, the script renormalizes the score over the remaining max and sets `renormalized: true` — disclose that, never hide it.
 - **PT-upside is scored elsewhere (single-mapping).** Consensus analyst-target upside is scored in the sentiment-positioning module's street view, NOT here — even though the design spec (§5.3) listed it in both. Listing one fact in two modules violates the spec's own single-mapping rule ("each snapshot fact scores in exactly one module"). We resolve it by scoring PT-upside only in sentiment; the ~10 points it would have carried here are reallocated into the asymmetry component (18) and distance-from-ATH (12), which already express margin of safety without double-counting the analyst target. Do not narrate consensus-target upside as a risk-analytics factor.
-- **Ladder is the only legal source of levels.** The downside map's structural rows all come from `module_technical.json`'s `ladder`. The valuation floor (`pe_5yr_median × eps_ntm`) and the stress row (`last × (1 + stress_pct)`) are the only two script-computed anchors, and both carry explicit `type`/`basis` provenance. No other level may appear in the brief.
+- **Ladder is the only legal source of levels.** The downside map's structural rows all come from `module_technical.json`'s `ladder`. The valuation floor (`dcf_bear` from coverage anchors when `--anchors` is passed; otherwise `pe_5yr_median × eps_ntm`) and the stress row (`last × (1 + stress_pct)`) are the only two script-computed anchors, and both carry explicit `type`/`basis` provenance. No other level may appear in the brief.
 - **Correlation is context, not a score.** `corr` (and `beta_n_days`) sit in `vol_profile` for the SPY correlation note; only `beta` feeds the volatility-state score. Do not treat correlation as a scored factor.
 - **Rubric version travels with the numbers.** The rubric version (`1.0.0`) is printed in the module JSON and MUST appear in the brief footer, so any reader can tell which scoring rule produced the score.
 - **Snapshot is read-only.** This module never edits `snapshot.json`.

@@ -452,6 +452,117 @@ class TestDownsideMap(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# Anchored downside floor (spec A2): with --anchors the valuation floor in the
+# downside map uses dcf_bear (labeled "dcf_bear (coverage anchors)"), REPLACING
+# the pe-median-derived floor entirely. The suspect-flag machinery is for
+# snapshot mode only; an anchored floor is a validated fundamentals-derived
+# level, never "suspect". validate_anchors is a LOCAL copy mirroring
+# score_fundamental's (same required keys + positivity), so a malformed anchors
+# file exits 2 the same way. Nearest-first ordering logic is unchanged -- the
+# dcf_bear floor interleaves among the ladder / stress levels by its own level.
+# --------------------------------------------------------------------------- #
+
+def _anchors(**over):
+    """A valid valuation_anchors dict; override per test (mirror of the
+    score_fundamental fixture so the contract stays identical)."""
+    base = {
+        "dcf_base": 120.0, "dcf_bear": 95.0, "dcf_bull": 150.0,
+        "comps_low": 100.0, "comps_high": 140.0,
+    }
+    base.update(over)
+    return base
+
+
+class TestValidateAnchors(unittest.TestCase):
+    def test_valid(self):
+        self.assertEqual(sr.validate_anchors(_anchors()), [])
+
+    def test_not_a_dict(self):
+        issues = sr.validate_anchors(["x"])
+        self.assertTrue(any("not a JSON object" in i for i in issues))
+
+    def test_missing_each_required(self):
+        for key in ("dcf_base", "dcf_bear", "dcf_bull", "comps_low",
+                    "comps_high"):
+            a = _anchors()
+            del a[key]
+            issues = sr.validate_anchors(a)
+            self.assertTrue(any(key in i for i in issues), key)
+
+    def test_nonpositive_rejected(self):
+        issues = sr.validate_anchors(_anchors(dcf_bear=-5.0))
+        self.assertTrue(any("dcf_bear" in i and "positive" in i for i in issues))
+
+    def test_nonnumeric_rejected(self):
+        issues = sr.validate_anchors(_anchors(dcf_bear="cheap"))
+        self.assertTrue(any("dcf_bear" in i and "numeric" in i for i in issues))
+
+    def test_current_pb_optional(self):
+        self.assertEqual(sr.validate_anchors(_anchors(current_pb=2.5)), [])
+
+    def test_current_pb_bad(self):
+        issues = sr.validate_anchors(_anchors(current_pb=-1.0))
+        self.assertTrue(any("current_pb" in i for i in issues))
+
+
+class TestAnchoredValuationFloor(unittest.TestCase):
+    def test_anchored_floor_is_dcf_bear(self):
+        # dcf_bear 95.0 -> floor level 95.0, labeled basis "dcf_bear (coverage
+        # anchors)"; the pe-median inputs are IGNORED in anchored mode.
+        vf = sr.valuation_floor(pe_5yr_median=12.0, eps_ntm=6.0,
+                                last=100.0, pe_fwd=10.0, anchors=_anchors())
+        self.assertEqual(vf["level"], 95.0)
+        self.assertEqual(vf["type"], "valuation_floor")
+        self.assertEqual(vf["basis"], "dcf_bear (coverage anchors)")
+        self.assertEqual(vf["method"], "dcf_bear")
+
+    def test_anchored_floor_never_suspect(self):
+        # An anchored floor is a validated fundamentals-derived level; the
+        # snapshot-mode suspect machinery does NOT apply even if pe inputs are
+        # garbage (real-MU shape) or the floor is far below last.
+        vf = sr.valuation_floor(pe_5yr_median=1.82, eps_ntm=74.0, last=853.2,
+                                pe_fwd=12.0, anchors=_anchors(dcf_bear=95.0))
+        self.assertEqual(vf["level"], 95.0)
+        self.assertNotIn("suspect", vf)
+
+    def test_anchored_floor_ignores_pe_median_even_when_pe_missing(self):
+        # With anchors, the floor computes from dcf_bear regardless of whether
+        # the pe-median snapshot inputs are present (anchored mode replaces the
+        # pe path entirely -- a missing pe_5yr_median no longer yields None).
+        vf = sr.valuation_floor(pe_5yr_median=None, eps_ntm=None,
+                                anchors=_anchors(dcf_bear=95.0))
+        self.assertIsNotNone(vf)
+        self.assertEqual(vf["level"], 95.0)
+        self.assertEqual(vf["method"], "dcf_bear")
+
+    def test_snapshot_mode_unchanged_when_no_anchors(self):
+        # anchors=None (or omitted) -> byte-identical to the pre-existing
+        # pe-median floor path.
+        vf_omitted = sr.valuation_floor(pe_5yr_median=12.0, eps_ntm=6.0)
+        vf_none = sr.valuation_floor(pe_5yr_median=12.0, eps_ntm=6.0,
+                                     anchors=None)
+        self.assertEqual(vf_omitted, vf_none)
+        self.assertEqual(vf_none["level"], 72.0)
+        self.assertEqual(vf_none["method"], "pe_5yr_median x eps_ntm")
+
+    def test_anchored_floor_interleaves_nearest_first(self):
+        # dcf_bear 95 sits between the 96 ladder support (nearer) and the 90
+        # ladder support (farther); nearest-first (descending) ordering is
+        # unchanged -- 96 first, then 95, then 90.
+        ladder = _ladder([(90.0, "swing_low"), (96.0, "ma50")])
+        vf = sr.valuation_floor(pe_5yr_median=12.0, eps_ntm=6.0, last=100.0,
+                                pe_fwd=10.0, anchors=_anchors(dcf_bear=95.0))
+        rows = sr.build_downside_map(ladder, last=100.0, val_floor=vf,
+                                     stress_pct=None, top_risk=None)
+        levels = [r["level"] for r in rows]
+        self.assertEqual(levels, sorted(levels, reverse=True))
+        self.assertEqual(levels, [96.0, 95.0, 90.0])
+        vfr = [r for r in rows if r["type"] == "valuation_floor"][0]
+        self.assertEqual(vfr["level"], 95.0)
+        self.assertEqual(vfr["basis"], "dcf_bear (coverage anchors)")
+
+
+# --------------------------------------------------------------------------- #
 # vol_profile table (verbatim passthrough)
 # --------------------------------------------------------------------------- #
 
@@ -612,6 +723,68 @@ class TestCLI(unittest.TestCase):
         proc = self._run(extra=["--out", out])
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertTrue(os.path.exists(out))
+
+    # -- anchored downside floor CLI ---------------------------------------
+
+    def _write_anchors(self, obj):
+        path = os.path.join(self.dir, "valuation_anchors.json")
+        with open(path, "w") as fh:
+            if isinstance(obj, str):
+                fh.write(obj)
+            else:
+                json.dump(obj, fh)
+        return path
+
+    def test_cli_snapshot_mode_records_pe_median_floor_mode(self):
+        # No --anchors -> downside_floor_mode "pe_median" (snapshot mode).
+        self.assertEqual(self._run_tech().returncode, 0)
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        out = os.path.join(self.dir, "module_risk.json")
+        with open(out) as fh:
+            doc = json.load(fh)
+        self.assertEqual(doc["downside_floor_mode"], "pe_median")
+
+    def test_cli_anchors_switch_floor_to_dcf_bear(self):
+        # A valid anchors file switches the downside floor to dcf_bear: the
+        # module records downside_floor_mode "dcf_bear", and the floor row (a
+        # dcf_bear 95 below the ~90-start last MU fixture) carries the label.
+        self.assertEqual(self._run_tech().returncode, 0)
+        path = self._write_anchors({
+            "dcf_base": 120.0, "dcf_bear": 95.0, "dcf_bull": 150.0,
+            "comps_low": 100.0, "comps_high": 140.0,
+            "assumptions": {"wacc": 0.10}, "citations": {"dcf": "C1"},
+            "as_of": "2026-07-15"})
+        proc = self._run(extra=["--anchors", path])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        out = os.path.join(self.dir, "module_risk.json")
+        with open(out) as fh:
+            doc = json.load(fh)
+        self.assertEqual(doc["downside_floor_mode"], "dcf_bear")
+        dm = doc["tables"]["downside_map"]
+        vfs = [r for r in dm if r["type"] == "valuation_floor"]
+        # The floor is present only when dcf_bear < last (MU fixture last ~90);
+        # when present it must be the dcf_bear level with the anchored basis.
+        for r in vfs:
+            self.assertEqual(r["level"], 95.0)
+            self.assertEqual(r["basis"], "dcf_bear (coverage anchors)")
+            self.assertNotIn("suspect", r)
+
+    def test_cli_malformed_anchors_exit2(self):
+        # missing dcf_bear -> validate_anchors fails -> exit 2 naming the issue.
+        self.assertEqual(self._run_tech().returncode, 0)
+        path = self._write_anchors({"dcf_base": 120.0, "dcf_bull": 150.0,
+                                    "comps_low": 100.0, "comps_high": 140.0})
+        proc = self._run(extra=["--anchors", path])
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("dcf_bear", proc.stderr)
+
+    def test_cli_anchors_bad_json_exit2(self):
+        self.assertEqual(self._run_tech().returncode, 0)
+        path = self._write_anchors("{not json")
+        proc = self._run(extra=["--anchors", path])
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("not valid JSON", proc.stderr)
 
     def test_determinism(self):
         self.assertEqual(self._run_tech().returncode, 0)

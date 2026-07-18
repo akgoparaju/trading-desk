@@ -88,6 +88,17 @@ _WINDOW_GROUPS = (
 # market-snapshot skill's 14-day IV-cache freshness rule).
 _IV_HISTORY_WINDOW_DAYS = 14
 
+# Sector-scale config layout (falsifier monitoring). Active scales live under
+# ``trading_desk_config/scales/*.json``; drafted-but-unratified proposals under
+# ``trading_desk_config/scales/proposals/*.json``. A refresh scans them so a scale
+# whose pre-registered falsifier tripped surfaces (scale_review_required) and any
+# unratified proposal is always visible.
+_SCALES_SUBDIR = os.path.join("trading_desk_config", "scales")
+_PROPOSALS_SUBDIR = os.path.join("trading_desk_config", "scales", "proposals")
+
+# Default pre-registered consequence when a scale JSON omits ``on_trip``.
+_DEFAULT_ON_TRIP = "flag+disclose"
+
 
 class PlanError(Exception):
     """Fatal planning error (maps to exit 2 with a clear message)."""
@@ -268,6 +279,141 @@ def _group_decision(group, present, age, window, forced_by_event):
             "age_days": age}
 
 
+# --------------------------------------------------------------------------- #
+# Sector-scale falsifier monitoring
+# --------------------------------------------------------------------------- #
+
+def _scales_dirs(ticker_dir):
+    """Directories to scan for active scale JSONs, in precedence order.
+
+    Primary: ``<cwd>/trading_desk_config/scales`` (the workspace-root convention).
+    Legacy: the ticker-dir PARENT's ``trading_desk_config/scales`` (a ticker
+    workspace nested one level down). Only existing directories are returned;
+    duplicates (same normalized path) are de-duplicated preserving order.
+    """
+    candidates = [
+        os.path.join(os.getcwd(), _SCALES_SUBDIR),
+        os.path.join(os.path.dirname(os.path.normpath(ticker_dir)),
+                     _SCALES_SUBDIR),
+    ]
+    seen = set()
+    out = []
+    for path in candidates:
+        # realpath (not just normpath) so the cwd-primary and ticker-parent-legacy
+        # locations collapse to one when they are the SAME directory reached via a
+        # symlink (e.g. macOS /var -> /private/var) -- a scale must not be scanned
+        # (and its falsifiers double-counted) twice.
+        real = os.path.realpath(path)
+        if real in seen:
+            continue
+        seen.add(real)
+        if os.path.isdir(real):
+            out.append(real)
+    return out
+
+
+def _evaluate_scale_falsifiers(scale, snapshot):
+    """Run scripts.sector_scales.evaluate_falsifiers, degrading gracefully.
+
+    Lazy import (per the module contract, sector_scales is authored concurrently):
+    an ImportError -- or any AttributeError if the symbol is not yet present --
+    yields ``(results=[], note=<why skipped>)`` rather than raising, so the refresh
+    planner never hard-depends on that module's timeline. A normal run returns
+    ``(results, None)``.
+    """
+    try:
+        from scripts import sector_scales  # lazy: authored by a concurrent agent
+    except ImportError:
+        return [], "sector_scales module unavailable (falsifiers not evaluated)"
+    evaluate = getattr(sector_scales, "evaluate_falsifiers", None)
+    if evaluate is None:
+        return [], "sector_scales.evaluate_falsifiers unavailable"
+    try:
+        results = evaluate(scale, snapshot)
+    except Exception as exc:  # a scale-eval error must not sink the whole refresh
+        return [], "falsifier evaluation error: %s" % exc
+    return (results if isinstance(results, list) else []), None
+
+
+def _scale_label(scale, path):
+    """`<name>@<version>` for a scale.
+
+    The scale's identifier is its ``scale`` field (the sector_scales contract);
+    ``name`` is accepted as an alias, and the filename stem is the last-resort
+    default. ``version`` completes the ``@`` label when present.
+    """
+    name = None
+    if isinstance(scale, dict):
+        name = scale.get("scale") or scale.get("name")
+    if not name:
+        name = os.path.splitext(os.path.basename(path))[0]
+    version = scale.get("version") if isinstance(scale, dict) else None
+    return "%s@%s" % (name, version) if version else name
+
+
+def _scan_scales(ticker_dir, snapshot):
+    """Build the ``scales`` block and the ``scale_review_required`` flag.
+
+    For each active scale JSON found, evaluate its pre-registered falsifiers
+    against the PREVIOUS bundle's snapshot (the newest data the refresh has in
+    hand before it fetches). A falsifier whose ``tripped`` is True flips
+    ``any_tripped`` for that scale and ``scale_review_required`` overall; the
+    action string names the pre-registered consequence from the scale's
+    ``on_trip`` field (default ``flag+disclose``). A falsifier whose ``tripped``
+    is None (unresolvable -- the metric was absent from the snapshot) does NOT
+    trip review; it is reported as-is so the gap is visible.
+    """
+    scales = []
+    review_required = False
+    for scales_dir in _scales_dirs(ticker_dir):
+        for path in sorted(glob.glob(os.path.join(scales_dir, "*.json"))):
+            scale = _load_json(path)
+            if not isinstance(scale, dict):
+                continue
+            results, note = _evaluate_scale_falsifiers(scale, snapshot)
+            any_tripped = any(
+                isinstance(r, dict) and r.get("tripped") is True
+                for r in results)
+            on_trip = scale.get("on_trip") or _DEFAULT_ON_TRIP
+            if any_tripped:
+                review_required = True
+                action = ("re-affirm or re-base (pre-registered consequence: %s)"
+                          % on_trip)
+            else:
+                action = "none"
+            entry = {
+                "scale": _scale_label(scale, path),
+                "falsifiers": results,
+                "any_tripped": any_tripped,
+                "action_required": action,
+            }
+            if note:
+                entry["note"] = note
+            scales.append(entry)
+    return scales, review_required
+
+
+def _pending_proposals(ticker_dir):
+    """Filenames of drafted-but-unratified scale proposals (sorted).
+
+    Scans ``trading_desk_config/scales/proposals/`` in the same primary+legacy
+    locations as the active scales; a refresh surfaces these so an unratified
+    proposal is never silently pending.
+    """
+    names = set()
+    candidates = [
+        os.path.join(os.getcwd(), _PROPOSALS_SUBDIR),
+        os.path.join(os.path.dirname(os.path.normpath(ticker_dir)),
+                     _PROPOSALS_SUBDIR),
+    ]
+    for path in candidates:
+        norm = os.path.normpath(path)
+        if os.path.isdir(norm):
+            for f in glob.glob(os.path.join(norm, "*.json")):
+                names.add(os.path.basename(f))
+    return sorted(names)
+
+
 def build_plan(ticker_dir, bundle, as_of):
     """Build the refresh-plan dict from a previous bundle + an as_of date."""
     manifest = _read_manifest(bundle)
@@ -333,6 +479,12 @@ def build_plan(ticker_dir, bundle, as_of):
                        "reason": "newest sample %dd old vs %dd window"
                                  % (iv_age, _IV_HISTORY_WINDOW_DAYS)}
 
+    # -- scale falsifier monitoring (parallel to judgment_review) ----------
+    # Evaluated against the PREVIOUS snapshot (the newest data in hand pre-fetch).
+    # scale_review_required is a PARALLEL signal to judgment_review_required --
+    # neither influences the other (judgment_review logic is UNCHANGED above).
+    scales, scale_review_required = _scan_scales(ticker_dir, snapshot)
+
     return {
         "ticker": ticker,
         "as_of": as_of.isoformat(),
@@ -348,6 +500,9 @@ def build_plan(ticker_dir, bundle, as_of):
         "groups": groups,
         "estimated_refetch_calls": estimated_refetch_calls,
         "iv_history": iv_plan,
+        "scales": scales,
+        "scale_review_required": scale_review_required,
+        "pending_proposals": _pending_proposals(ticker_dir),
     }
 
 

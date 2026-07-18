@@ -69,7 +69,7 @@ The report lands in the **parent** `trading_desk_<TICKER>/` (a sibling of the da
 After the markdown report passes its QC gate, trading-desk can render a **docket** — the institutional PDF render of the same QC'd bundle in a **bank-note aesthetic** (fine hairlines, restrained accent, weight-ticked score bars):
 
 - **exec** — a 2-page trade sheet (grade box, thesis, price/scenario/valuation charts, trade plan, desk read).
-- **detail** — the full ~10-15-page dossier (exec pages + per-dimension evidence, options & vol, downside map, appendix + integrity).
+- **detail** — the full ~10-15-page dossier (exec pages + per-dimension evidence, options & vol, downside map, appendix + integrity), closing with a **METHODOLOGY page**: the rubric versions, weight table (with a standard-vs-custom comparison when a custom weight set is active), valuation formula set, active sector scale (parameters, evidence, falsifiers), and governance rules that produced every number in the report — fully script-generated, so the system's transparency is itself provenance-clean.
 - **delta** — a 1-page What-Changed note produced by a **refresh** vs the prior bundle (score deltas, level moves, invalidation status).
 
 The docket carries **zero LLM arithmetic**: every number on the page is script-minted from the module JSONs, the deterministic chart pack, or the What-Changed diff. The only authored content is the prose in `pdf_slots.json`, which passes the same number-provenance gate as the report before it can be embedded.

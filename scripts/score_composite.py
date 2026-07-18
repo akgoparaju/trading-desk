@@ -90,6 +90,101 @@ WEIGHTS = {
 }
 _PROFILES = tuple(WEIGHTS)
 
+# The five weight dimensions a profile column must (and may only) carry. Used to
+# reject unknown keys in a --weights-config profile (a typo'd or invented key is a
+# config error, not silently ignored) and to validate the per-profile sum.
+_WEIGHT_DIMENSIONS = frozenset(
+    {"technical", "fundamental", "sentiment", "risk", "thesis_conviction"})
+
+# The weight_set label stamped when no config (or no weights key) supplies custom
+# weights -- the standard fixed table is the rubric of record.
+STANDARD_WEIGHT_SET = "standard v1"
+
+# Default config path (relative to the invoker's CWD). Loaded only when it exists;
+# an absent default is not an error (the standard table is used).
+_DEFAULT_CONFIG_PATH = "./trading_desk_config.json"
+
+
+class WeightsConfigError(Exception):
+    """Fatal weights-config error (maps to exit 2 with a clear message)."""
+
+
+def load_weights_config(path):
+    """Load + validate a trading_desk_config.json weights block.
+
+    Returns ``(profiles, label)`` where ``profiles`` maps each configured profile
+    name -> its five-dimension weight dict, and ``label`` is the ``weight_set``
+    stamp string ``"CUSTOM <set_name>@<version>"``. Returns ``(None, None)`` when
+    the file has no ``weights`` key (fall back entirely to the standard table).
+
+    Validation (each raises WeightsConfigError -> exit 2):
+      - each profile's provided weights sum to 1.0 (+/- 1e-6), message names the
+        profile and the observed sum;
+      - every weight key is one of the five known dimensions (an unknown key is a
+        config typo, never silently dropped).
+    A profile ABSENT from the config is NOT an error -- the resolver falls back to
+    the standard table for that profile (handled by resolve_weights).
+    """
+    try:
+        with open(path) as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise WeightsConfigError(
+            "cannot read weights config %s: %s" % (path, exc))
+    if not isinstance(cfg, dict):
+        raise WeightsConfigError(
+            "weights config %s is not a JSON object" % path)
+
+    weights_block = cfg.get("weights")
+    if not isinstance(weights_block, dict):
+        # No weights key (or malformed) -> no custom weights; standard table.
+        return None, None
+
+    profiles = weights_block.get("profiles")
+    if not isinstance(profiles, dict):
+        raise WeightsConfigError(
+            "weights.profiles missing or not an object in %s" % path)
+
+    set_name = weights_block.get("set_name", "unnamed")
+    version = weights_block.get("version", "unversioned")
+    label = "CUSTOM %s@%s" % (set_name, version)
+
+    validated = {}
+    for profile, weights in profiles.items():
+        if not isinstance(weights, dict):
+            raise WeightsConfigError(
+                "weights.profiles.%s is not an object" % profile)
+        unknown = set(weights) - _WEIGHT_DIMENSIONS
+        if unknown:
+            raise WeightsConfigError(
+                "weights.profiles.%s has unknown dimension key(s): %s "
+                "(known: %s)" % (profile, ", ".join(sorted(unknown)),
+                                 ", ".join(sorted(_WEIGHT_DIMENSIONS))))
+        total = sum(weights.values())
+        if abs(total - 1.0) > 1e-6:
+            raise WeightsConfigError(
+                "weights.profiles.%s weights sum to %s, must sum to 1.0 "
+                "(+/- 1e-6)" % (profile, _fmt(_clean(total))))
+        validated[profile] = dict(weights)
+
+    return validated, label
+
+
+def resolve_weights(profile, custom_profiles, custom_label):
+    """Return ``(weights, weight_set_label)`` for one profile.
+
+    Per-profile fallback: a profile PRESENT in ``custom_profiles`` uses its custom
+    weights (stamped with ``custom_label``); a profile ABSENT from the config (or
+    when there is no config at all) falls back to the standard fixed table stamped
+    ``STANDARD_WEIGHT_SET``. This is the "profiles absent from the config fall back
+    to the standard table per-profile" rule -- fallback is decided one profile at a
+    time, so a config that customizes only ``balanced`` leaves ``trader`` /
+    ``long-term`` on the standard table.
+    """
+    if custom_profiles and profile in custom_profiles:
+        return custom_profiles[profile], custom_label
+    return WEIGHTS[profile], STANDARD_WEIGHT_SET
+
 # Horizon convention (in years) per profile -- the EV hurdle is 0.08 * horizon_years,
 # so a longer horizon demands a proportionally larger expected value to clear.
 HORIZON_YEARS = {"trader": 0.5, "balanced": 1.5, "long-term": 4.0}
@@ -214,7 +309,8 @@ def score_thesis_conviction(scenarios, scenario_reasoning, last, profile,
 # Composite weighting (fixed per-profile weights, renormalized over present dims).
 # --------------------------------------------------------------------------- #
 
-def score_composite(module_scores, thesis_conviction_score, profile) -> dict:
+def score_composite(module_scores, thesis_conviction_score, profile,
+                    weights=None) -> dict:
     """Weighted composite over PRESENT dimensions, weights rescaled to sum 1.
 
     ``module_scores`` maps present evidence-dimension names (technical/fundamental/
@@ -223,9 +319,13 @@ def score_composite(module_scores, thesis_conviction_score, profile) -> dict:
     present-dimension weights are rescaled so they sum to 1 (disclosed in
     ``renormalization_note``). thesis_conviction is ALWAYS present (computed here).
 
+    ``weights`` overrides the standard per-profile column (custom --weights-config).
+    Renormalization on missing dimensions works IDENTICALLY under custom weights:
+    the same drop-and-rescale-to-1 runs whatever the weight column is.
+
     Returns {"score", "dimensions": [...rows...], "renormalization_note"}.
     """
-    weights = WEIGHTS[profile]
+    weights = weights if weights is not None else WEIGHTS[profile]
 
     # Assemble (name, raw_score, weight, source) for present dimensions.
     present = []
@@ -335,20 +435,39 @@ def build_ev_block(scenarios, scenario_reasoning, last, profile,
 def build_sensitivity(module_scores, scenarios, last,
                       variant, variant_justification,
                       catalyst_clarity, catalyst_clarity_justification,
-                      invalidation, invalidation_justification) -> dict:
+                      invalidation, invalidation_justification,
+                      custom_profiles=None, custom_label=None) -> dict:
     """Recompute the full composite (INCLUDING thesis conviction with EV re-banded
     per that profile's hurdle) for all three profiles, so a reader sees how the call
-    shifts with the profile lens. Each entry is {"score", "grade"}."""
+    shifts with the profile lens. Each entry is {"score", "grade"}.
+
+    When custom weights apply to a profile, that profile's entry also carries a
+    ``standard_comparison`` {"score","grade"} -- the SAME call recomputed under the
+    standard fixed table -- so the tuning is transparent (a reader sees exactly how
+    much the custom column moved the number). The block also carries a top-level
+    ``weight_set`` label (custom label when ANY profile is custom, else standard).
+    """
     out = {}
+    any_custom = False
     for profile in _PROFILES:
+        weights, label = resolve_weights(profile, custom_profiles, custom_label)
         tc = score_thesis_conviction(
             scenarios, "", last, profile,
             variant, variant_justification,
             catalyst_clarity, catalyst_clarity_justification,
             invalidation, invalidation_justification)
-        comp = score_composite(module_scores, tc["score"], profile)
+        comp = score_composite(module_scores, tc["score"], profile, weights)
         grade, _ = grade_for(comp["score"])
-        out[profile] = {"score": comp["score"], "grade": grade}
+        entry = {"score": comp["score"], "grade": grade}
+        if label != STANDARD_WEIGHT_SET:
+            any_custom = True
+            std_comp = score_composite(
+                module_scores, tc["score"], profile, WEIGHTS[profile])
+            std_grade, _ = grade_for(std_comp["score"])
+            entry["standard_comparison"] = {
+                "score": std_comp["score"], "grade": std_grade}
+        out[profile] = entry
+    out["weight_set"] = custom_label if any_custom else STANDARD_WEIGHT_SET
     return out
 
 
@@ -377,11 +496,19 @@ def build_module(snapshot, module_scores, scenarios, scenario_reasoning, profile
                  variant, variant_justification,
                  catalyst_clarity, catalyst_clarity_justification,
                  invalidation, invalidation_justification,
-                 entry_levels) -> dict:
-    """Build the full module_composite.json document from parsed inputs."""
+                 entry_levels, custom_profiles=None, custom_label=None) -> dict:
+    """Build the full module_composite.json document from parsed inputs.
+
+    ``custom_profiles``/``custom_label`` come from a --weights-config; when the
+    selected profile is customized the composite is weighted with the custom column
+    and the doc's ``weight_set`` records the CUSTOM label. The ``dimensions`` rows
+    carry the weights ACTUALLY used either way.
+    """
     price = snapshot.get("price", {}) if isinstance(snapshot, dict) else {}
     meta = snapshot.get("meta", {}) if isinstance(snapshot, dict) else {}
     last = price.get("last")
+
+    weights, weight_set = resolve_weights(profile, custom_profiles, custom_label)
 
     tc = score_thesis_conviction(
         scenarios, scenario_reasoning, last, profile,
@@ -389,7 +516,7 @@ def build_module(snapshot, module_scores, scenarios, scenario_reasoning, profile
         catalyst_clarity, catalyst_clarity_justification,
         invalidation, invalidation_justification)
 
-    composite = score_composite(module_scores, tc["score"], profile)
+    composite = score_composite(module_scores, tc["score"], profile, weights)
     grade, action = grade_for(composite["score"])
 
     ev = build_ev_block(scenarios, scenario_reasoning, last, profile, entry_levels)
@@ -397,7 +524,8 @@ def build_module(snapshot, module_scores, scenarios, scenario_reasoning, profile
         module_scores, scenarios, last,
         variant, variant_justification,
         catalyst_clarity, catalyst_clarity_justification,
-        invalidation, invalidation_justification)
+        invalidation, invalidation_justification,
+        custom_profiles=custom_profiles, custom_label=custom_label)
 
     return {
         "skill": SKILL_NAME,
@@ -405,6 +533,7 @@ def build_module(snapshot, module_scores, scenarios, scenario_reasoning, profile
         "ticker": meta.get("ticker"),
         "as_of": build_snapshot._as_of_date(meta.get("as_of_utc")),
         "profile": profile,
+        "weight_set": weight_set,
         "score": composite["score"],
         "grade": grade,
         "action": action,
@@ -461,6 +590,12 @@ def main(argv=None):
                         help="one-line justification (REQUIRED)")
     parser.add_argument("--profile", default="balanced", choices=_PROFILES,
                         help="scoring profile (default balanced)")
+    parser.add_argument("--weights-config", default=None,
+                        help="path to trading_desk_config.json carrying a "
+                             "weights.profiles block (default ./trading_desk_config.json "
+                             "if it exists); each configured profile's weights must "
+                             "sum to 1.0. Absent profiles fall back to the standard "
+                             "table per-profile.")
     parser.add_argument("--entry-level", type=float, action="append", default=None,
                         help="repeatable entry price for ev_at_levels (optional)")
     parser.add_argument("--out", default=None,
@@ -497,6 +632,26 @@ def main(argv=None):
     if not os.path.isdir(args.bundle):
         print(f"ERROR: bundle directory not found: {args.bundle}", file=sys.stderr)
         return 2
+
+    # -- weights config (optional, versioned tuning transparency) -------------
+    # Explicit --weights-config always loads (missing file is then an error);
+    # otherwise the default ./trading_desk_config.json loads only WHEN it exists
+    # (an absent default is silent -- the standard table is the rubric of record).
+    custom_profiles = None
+    custom_label = None
+    weights_config_path = args.weights_config
+    if weights_config_path is None and os.path.isfile(_DEFAULT_CONFIG_PATH):
+        weights_config_path = _DEFAULT_CONFIG_PATH
+    if weights_config_path is not None:
+        if args.weights_config is not None and not os.path.isfile(weights_config_path):
+            print(f"ERROR: weights config not found: {weights_config_path}",
+                  file=sys.stderr)
+            return 2
+        try:
+            custom_profiles, custom_label = load_weights_config(weights_config_path)
+        except WeightsConfigError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
 
     # CONTEXT GROUNDING ENFORCEMENT (coverage-first): when a QC-stamped
     # company-context module exists, the variant and catalyst-clarity
@@ -601,7 +756,7 @@ def main(argv=None):
         args.variant, args.variant_justification,
         args.catalyst_clarity, args.catalyst_clarity_justification,
         args.invalidation, args.invalidation_justification,
-        entry_levels)
+        entry_levels, custom_profiles=custom_profiles, custom_label=custom_label)
 
     out = args.out or os.path.join(args.bundle, "module_composite.json")
     with open(out, "w") as fh:

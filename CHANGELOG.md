@@ -1,5 +1,145 @@
 # Changelog
 
+## 0.12.0 — 2026-07-18 · Sector scales, anchored valuation, weights config, methodology
+
+Coverage anchors now SCORE (not just narrate): fundamental valuation v1.2.0 banding
+against the coverage DCF and comps, the downside floor moving to the DCF bear case,
+and a sector-agnostic **scales registry** that lets a ratified, versioned, falsifiable
+regime thesis (e.g. the HBM structural re-rating of memory) legally move the justified
+band — semi-deterministic (byte-identical given scale@version), governed (falsifier
+monitoring each refresh, adversarial proposal review, user ratification, forward-only
+history). Versioned custom composite weight-sets with standard-comparison
+transparency, and a fully script-generated METHODOLOGY appendix in every Detail PDF.
+Validated end-to-end on MU: fundamental 68 → 55.75, composite 61.1 → 58.0 (Hold/Trim),
+the long-term profile de-rating from #2 to last once valuation stopped over-crediting.
+
+- **Provenance gate admits governance stamps (V5 live finding).** Scale/weight-set
+  versions are not X.Y.Z-shaped (`2026.1`), so citing the active scale in gated prose
+  orphaned its digits — yet the full `name@version` stamp is exactly what disciplined
+  prose should cite. Bundle-carried stamps (`sector_scale`, `weight_set`) are now
+  scrubbed exact-match before the token scans; a fabricated stamp or a bare version
+  tail still orphans.
+  - Files: `scripts/report_qc.py`, `tests/test_report_renderer.py`.
+
+- **Sector-scales library + fundamental valuation v1.2.0 (anchored mode, PEG
+  display-only) (Task V1).** New `scripts/sector_scales.py`: a versioned,
+  validated JSON contract per sector that computes a fair-value BAND from
+  first-principles fundamentals — `justified_pb` (Gordon residual income,
+  `mid = (roe_normalized - g)/(r - g)`), `justified_pe`
+  (`mid = (1 - g/roe_normalized)/(r - g)`), or `nav_based` (pass-through appraised
+  NAV multiples) — each enveloped at `±band_spread` (default 0.30), plus falsifier
+  evaluation over dotted snapshot metrics (`consecutive_quarters` is passed through
+  as caller metadata; unresolvable metrics report `tripped: None`). `validate_scale`
+  names every issue (required fields, formula ∈ FORMULAS, formula-specific params,
+  `r > g`, C-ID evidence, falsifier shape); `load_scale` raises on invalid.
+  Band math is unit-pinned (roe .35 / r .12 / g .04 → mid 3.875, low 2.7125,
+  high 5.0375).
+  - `scripts/score_fundamental.py` → rubric **v1.2.0**. Quality/moat UNCHANGED.
+    Valuation 50 gains an ANCHORED MODE (via `--anchors valuation_anchors.json`):
+    DCF-band position (17) + comps-range position (13) + own-history multiple (8,
+    the v1.1 pe_fwd/pe_5yr_median band rescaled, sanity band kept) + FCF yield (7,
+    rescaled) + justified sector-band position (5, via `--scale`) = 50. Maxima
+    (17/13/8/7/5) sized under a 35%-of-50 design cap. DCF disagreement rule: when
+    `|dcf_base - comps_mid| / mid > 0.25` the band widens to
+    `[min(dcf_bear,comps_low), max(dcf_bull,comps_high)]` and the DCF max takes a
+    0.75 confidence haircut (17→12.75), both disclosed in the arithmetic. PEG is
+    REMOVED from anchored scoring and re-emitted top-level as `peg_display`
+    (display-only). The active mode is disclosed on the valuation subscore
+    (`valuation_mode`: `anchored_v1.2` | `snapshot_v1.1`); the sector scale is
+    recorded as `sector_scale` (`name@version`). Absent `--anchors`, snapshot mode
+    (v1.1 floor: pe 20 / peg 15 / fcf 15) is byte-preserved with PEG still scored.
+    Malformed anchors/scale → exit 2 naming the issue.
+  - Files: `scripts/sector_scales.py` (new), `scripts/score_fundamental.py`,
+    `tests/test_sector_scales.py` (new), `tests/test_score_fundamental.py`.
+
+- **Versioned weights config (`score_composite.py`) (Task V2).** New optional
+  `--weights-config <trading_desk_config.json>` (default `./trading_desk_config.json`
+  when it exists) supplies per-profile weight columns under `weights.profiles`. Each
+  provided profile's weights must sum to `1.0 ±1e-6` (exit 2 names the profile + the
+  observed sum) and may carry only the five known dimension keys (unknown key → exit 2);
+  a profile ABSENT from the config falls back to the standard fixed table **per-profile**.
+  The module JSON records `weight_set` (`"standard v1"` | `"CUSTOM <set_name>@<version>"`),
+  the `dimensions[]` rows carry the weights actually used, and the `sensitivity` block
+  gains a `weight_set` label plus — when a profile is custom — a
+  `standard_comparison: {score, grade}` recomputed under the standard weights (visible
+  tuning transparency). Renormalization on a missing dimension works identically under
+  custom weights.
+  - Files: `scripts/score_composite.py`, `tests/test_score_composite.py`.
+
+- **Scale falsifier monitoring (`refresh_plan.py`) (Task V2).** A refresh now scans
+  `trading_desk_config/scales/*.json` (primary: CWD; legacy: the ticker-dir parent) and,
+  against the PREVIOUS bundle's snapshot, runs `sector_scales.evaluate_falsifiers` (lazy
+  import, degrading gracefully to a skip note when the module is unavailable — no hard
+  dependency). The plan gains a `scales[]` block (`scale`, `falsifiers[]`, `any_tripped`,
+  `action_required` naming the pre-registered `on_trip` consequence, default
+  `flag+disclose`), a top-level `scale_review_required` bool (any tripped), and
+  `pending_proposals[]` (filenames under `scales/proposals/`). `judgment_review_required`
+  logic is UNCHANGED — scale review is a parallel signal; a `tripped: None` (unresolvable)
+  falsifier does not trip review.
+  - Files: `scripts/refresh_plan.py`, `tests/test_refresh_plan.py`.
+
+- **`scale-review` skill — adversarial proposal gate (Task V2).** New
+  `skills/scale-review/SKILL.md`: enumerate active scales + their consumers → gather
+  fresh evidence → verdict per scale (`valid | erosion_suspected | rebasing_proposed`)
+  → for a re-base, DRAFT the complete forward-versioned replacement (parameters with
+  derivation, cited evidence, falsifiers with pre-registered `on_trip`, `prior` = current
+  scale) → an ADVERSARIAL GATE dispatches 3 independent refutation passes, surviving only
+  with ≥2 non-refutations (votes recorded) → file to `scales/proposals/<name>_<version>.json`
+  as `pending_ratification`. NEVER applies a scale; ratification is the user's one-word
+  `ratify <name>@<version>`. Auto-apply reserved for pre-registered `on_trip` consequences;
+  refutation survival (not self-reported confidence) is the gate; forward-only versioning;
+  every report footer shows the active scale.
+  - Files: `skills/scale-review/SKILL.md`.
+
+- **dcf_bear downside floor (`score_risk.py`) (Task V3).** New `--anchors
+  valuation_anchors.json`: in anchored mode the downside map's valuation floor becomes
+  the coverage DCF bear case (`basis: "dcf_bear (coverage anchors)"`), replacing the
+  `pe_5yr_median × eps_ntm` floor and its suspect-flag machinery entirely — this kills
+  the pe-median degeneracy that produced a $134 floor on an $853 stock. Snapshot mode
+  (no anchors) is byte-identical. The module records
+  `downside_floor_mode: "dcf_bear" | "pe_median"`; malformed anchors → exit 2 naming
+  the issue (same validation contract as `score_fundamental`).
+  - Files: `scripts/score_risk.py`, `tests/test_score_risk.py`.
+
+- **Skill wiring for anchors / scales / weights / ratification (Task V3).**
+  full-trade-analysis: the coverage phase transcribes valuation anchors into
+  `coverage/valuation_anchors.json` (every number cited to its coverage-artifact
+  section; validated by the scorers' exit-2 backstop); scoring steps pass
+  `--anchors` / `--scale` / `--weights-config` conditionally (a sector scale governs a
+  ticker ONLY via a cited context finding — single-mapping discipline).
+  refresh-analysis: reads the plan's `scales[]` / `scale_review_required` /
+  `pending_proposals[]`, applies ONLY pre-registered `on_trip` consequences, surfaces
+  pending proposals, and documents the ratification flow (`ratify <name>@<version>` →
+  current scale archived to `scales/history/`, proposal promoted with `prior` set —
+  forward-only, history never recalculated). company-context: sector-regime theses are
+  recorded as cited findings that scales must reference as evidence. risk-analytics:
+  documents the anchored `dcf_bear` floor invocation.
+  - Files: `skills/full-trade-analysis/SKILL.md`, `skills/composite-score/SKILL.md`,
+    `skills/refresh-analysis/SKILL.md`, `skills/company-context/SKILL.md`,
+    `skills/risk-analytics/SKILL.md`.
+
+- **METHODOLOGY appendix in every Detail PDF (Task V4).** The detail docket gains a
+  final, 100% script-generated METHODOLOGY section (zero LLM content; every string is
+  a pinned constant or read from module/scale JSONs): rubric-versions table; the
+  composite weight table actually used (dual custom-vs-standard table when a CUSTOM
+  weight set is active); the fundamental valuation formula set (mode, component maxima
+  17/13/8/7/5 anchored or 20/15/15 snapshot, the >25% DCF-vs-comps band-widen + 0.75
+  haircut rule, PEG display-only line); the active sector scale (name@version,
+  effective, basis, formula, parameters, computed band, evidence C-IDs, falsifiers,
+  prior) or "No sector scale active — standard bands"; scoring conventions (EV hurdle,
+  grade bands, horizon years, judgment-flag rule — imported from the scorers'
+  constants, never retyped); and the governance rules (forward-only versioning,
+  pre-registered falsifier consequences, adversarial review + user ratification,
+  append-only history). Height-aware pagination (`METHODOLOGY (continued)`).
+  - Renderer stamps & banners: footer gains `Weights: standard v1 | CUSTOM <set>@<ver>`
+    and `Scale: <name>@<version>`; a CUSTOM tag renders near the grade box; the delta
+    note's What-Changed detects weight-set and sector-scale transitions; Detail p1 and
+    the delta carry an accent banner when `scale_review_required` and a neutral banner
+    for pending proposals; anchored-mode PEG renders as display-only with the
+    exclusion note.
+  - Files: `scripts/render_pdf.py`, `tests/test_render_pdf.py`,
+    `skills/report-renderer/SKILL.md`.
+
 ## 0.11.0 — 2026-07-17 · Coverage-first analysis
 
 Deep coverage becomes the default read: the pipeline always initiates (or refreshes)
