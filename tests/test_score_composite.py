@@ -394,6 +394,32 @@ class TestCLI(unittest.TestCase):
         proc = self._run()
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
+    def test_context_grounding_referential_integrity_unresolved_exit2(self):
+        # A cited C-ID that does NOT resolve to a context findings[] id (the fixture
+        # registry is C1 only) is a broken reference -> exit 2, message names it.
+        self._write_stamped_context()  # findings: [C1]
+        flags = self._base_flags()
+        flags[flags.index("gross-margin path differentiated")] = \
+            "gross-margin path differentiated (C99)"
+        flags[flags.index("HBM ramp dated")] = "HBM ramp dated per C1"
+        cmd = [sys.executable, SCRIPT, "--bundle", self.dir] + flags
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("C99 does not exist", proc.stderr)
+        self.assertIn("module_context.json", proc.stderr)
+        self.assertIn("C1..C1", proc.stderr)
+
+    def test_context_grounding_referential_integrity_resolved_passes(self):
+        # Every cited C-ID resolves to the findings[] registry (C1) -> passes.
+        self._write_stamped_context()  # findings: [C1]
+        flags = self._base_flags()
+        flags[flags.index("gross-margin path differentiated")] = \
+            "gross-margin path differentiated (C1)"
+        flags[flags.index("HBM ramp dated")] = "HBM ramp dated per C1"
+        cmd = [sys.executable, SCRIPT, "--bundle", self.dir] + flags
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
     def test_cli_exit0_writes_module_json(self):
         proc = self._run()
         self.assertEqual(proc.returncode, 0,

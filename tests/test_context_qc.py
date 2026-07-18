@@ -249,6 +249,87 @@ class TestContextProvenance(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# Unit-suffixed financial shorthand: the NUMBER must still trace to the bundle.
+#
+# A figure like "42B" / "9999M" / "30x" / "45pct" / "200bps" / "3nm" carries a
+# trailing magnitude/unit suffix, but the numeric part is a real data claim. The
+# scrub strips ONLY the suffix (mirroring the report gate's handling of "$42B",
+# whose _NUM_RE already yields 42 and checks it), so a fabricated shorthand number
+# ORPHANS and a bundle-backed one PASSES. Product/model names (HBM3E, A100, GB300)
+# and finding refs "(C3)" stay fully scrubbed -- no false orphans.
+#
+# Fixture-bundle numbers used as "bundle-backed": 130, 100, 95, 90, 82, 60, 30, 45,
+# 200 (see build_allowed_set over the _mk_bundle snapshot/modules). Numbers used as
+# "not in the bundle": 42, 9999, 4242, 4545, 4747, 3 (absent from every leaf).
+# --------------------------------------------------------------------------- #
+
+class TestContextUnitSuffixProvenance(unittest.TestCase):
+    # Each: (label, prose with an ORPHAN number, orphan token expected in output)
+    _ORPHAN_CASES = [
+        ("42B", "Revenue reached 42B this year.", "42"),
+        ("9999M", "Costs ran 9999M for the segment.", "9999"),
+        ("30x forward", "Trades at 4242x forward earnings.", "4242"),
+        ("45pct", "Gross margin sits at 4545pct.", "4545"),
+        ("200bps", "Spread widened 4747bps into the print.", "4747"),
+    ]
+    # Each: (label, prose whose shorthand number IS a fixture-bundle leaf)
+    _PASS_CASES = [
+        ("42B->130B", "Revenue reached 130B this year."),
+        ("9999M->100M", "Costs ran 100M for the segment."),
+        ("30x", "Trades at 30x forward earnings."),
+        ("45pct", "Gross margin sits at 45pct."),
+        ("200bps", "Spread widened 200bps into the print."),
+    ]
+
+    def test_fabricated_unit_suffix_numbers_orphan(self):
+        for label, prose, tok in self._ORPHAN_CASES:
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as d:
+                    _mk_bundle(d)
+                    m = _valid_context()
+                    m["business"]["what_they_sell"] = prose
+                    path = _write_context(d, m)
+                    rc, out, err = _qc_context(d, path)
+                    self.assertEqual(rc, 1, out + err)
+                    self.assertIn("number_provenance", out)
+                    self.assertIn(tok, out)
+
+    def test_bundle_backed_unit_suffix_numbers_pass(self):
+        for label, prose in self._PASS_CASES:
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as d:
+                    _mk_bundle(d)
+                    m = _valid_context()
+                    m["business"]["what_they_sell"] = prose
+                    path = _write_context(d, m)
+                    rc, out, err = _qc_context(d, path)
+                    self.assertEqual(rc, 0, out + err)
+
+    def test_product_names_and_refs_stay_scrubbed_no_false_orphan(self):
+        # HBM3E / A100 / GB300 are identifiers (letter glued to digit) and "(C3)"
+        # is a finding ref -- none should orphan even though none are bundle leaves.
+        with tempfile.TemporaryDirectory() as d:
+            _mk_bundle(d)
+            m = _valid_context()
+            m["business"]["what_they_sell"] = (
+                "Ships HBM3E stacks and A100/GB300 accelerators (C3).")
+            path = _write_context(d, m)
+            rc, out, err = _qc_context(d, path)
+            self.assertEqual(rc, 0, out + err)
+
+    def test_scrub_helper_unwraps_suffix_keeps_number(self):
+        # Pure-unit unit-check on the scrub helper: suffix stripped, number kept;
+        # product names fully removed; finding ref removed.
+        m = {"live_tape": []}
+        keep = rq._scrub_context_prose(
+            "revenue 42B, 9999M, 30x, 45pct, 200bps, 3nm", m)
+        self.assertEqual(rq.extract_numbers(keep),
+                         ["42", "9999", "30", "45", "200", "3"])
+        gone = rq._scrub_context_prose("HBM3E A100 GB300 (C3)", m)
+        self.assertEqual(rq.extract_numbers(gone), [])
+
+
+# --------------------------------------------------------------------------- #
 # Structural failures.
 # --------------------------------------------------------------------------- #
 

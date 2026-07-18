@@ -103,6 +103,45 @@ _MOAT_POINTS = {"wide": 10, "narrow": 6, "none": 2}
 import re as _re
 _CITATION_RE = _re.compile(r"C\d+")
 
+
+def _context_finding_ids(bundle):
+    """The set of findings[] ids in <bundle>/module_context.json, or None.
+
+    Returns None when the context module is absent or unparseable (the
+    compressed / FSI-absent floor: no context registry to check against, so the
+    moat gate stays presence-only). Returns a (possibly empty) set of id strings
+    when it exists and parses -- the referential-integrity check then verifies
+    every cited C-ID resolves to one of these.
+    """
+    path = os.path.join(bundle, "module_context.json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as fh:
+            module = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    findings = module.get("findings") if isinstance(module, dict) else None
+    if not isinstance(findings, list):
+        return set()
+    ids = set()
+    for f in findings:
+        if isinstance(f, dict) and isinstance(f.get("id"), str):
+            ids.add(f["id"])
+    return ids
+
+
+def _unresolved_citations(justification, finding_ids):
+    """Cited C-IDs (in order, de-duped) that are NOT in ``finding_ids``."""
+    out = []
+    seen = set()
+    for cid in _CITATION_RE.findall(justification or ""):
+        if cid not in finding_ids and cid not in seen:
+            seen.add(cid)
+            out.append(cid)
+    return out
+
+
 # The snapshot fields this rubric SCORES on. Solvency (net_cash_defined.net) is
 # owned by risk-analytics; revisions_90d is owned by sentiment-positioning; both
 # are intentionally NOT listed (see module docstring / single-mapping test).
@@ -582,6 +621,19 @@ def main(argv=None):
             print("ERROR: moat justification must cite context finding IDs "
                   "(e.g. C3)", file=sys.stderr)
             return 2
+        # Referential integrity: when a context module exists, every cited C-ID
+        # must resolve to a real findings[] id (a present-but-fabricated citation
+        # is worse than an absent one). No context module (compressed / FSI-absent
+        # floor) -> presence-only, unchanged.
+        finding_ids = _context_finding_ids(args.bundle)
+        if finding_ids is not None:
+            unresolved = _unresolved_citations(args.moat_justification, finding_ids)
+            if unresolved:
+                n = len(finding_ids)
+                print(f"ERROR: cited finding {unresolved[0]} does not exist in "
+                      f"module_context.json (findings run C1..C{n})",
+                      file=sys.stderr)
+                return 2
 
     if not os.path.isdir(args.bundle):
         print(f"ERROR: bundle directory not found: {args.bundle}", file=sys.stderr)

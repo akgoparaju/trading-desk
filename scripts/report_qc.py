@@ -937,12 +937,24 @@ _FINDING_REF_RE = re.compile(r"C\d+")
 # are CITATION CHROME (they point into findings[]), not numeric claims -- scrubbed
 # from the prose before number_provenance so the reference digit never orphans.
 _CONTEXT_REF_SCRUB_RE = re.compile(r"\(?\bC\d+\)?")
-# A product/model name with a digit glued inside letters (HBM3E, RTX4090, A100,
-# Gen5, 3nm). The digit is part of an identifier, not a standalone data figure, so
-# it is scrubbed before the numeric scan. Requires a LETTER adjacent to the digit
-# run (so "$95.00" / "8.5%" / "130" -- real figures -- are untouched). Matches a
-# maximal alphanumeric run that contains at least one letter AND one digit.
-_CONTEXT_ALNUM_TOKEN_RE = re.compile(
+# Financial shorthand: a numeric run carrying ONLY a TRAILING unit suffix
+# (42B, 9999M, 30x, 45pct, 200bps, 3nm). The suffix is a magnitude/unit label, NOT
+# an identifier -- the numeric part IS a data figure and MUST trace to the bundle,
+# exactly as the report gate treats "$42B" (its _NUM_RE already yields 42 and checks
+# it). We strip ONLY the suffix here, leaving the numeric part for the number scan.
+# Anchored: digits (optional thousands/decimal) + one suffix + word boundary, with
+# NO leading letter (that would be a product name -- handled below). The suffix
+# alternation is ordered longest-first so "bps"/"pct" win over "b"/... boundaries.
+_CONTEXT_UNIT_SUFFIX_RE = re.compile(
+    r"\b(\d[\d,]*\.?\d*)(?:bps|pct|nm|mm|[BMKTxX])\b")
+# A product/model name: an alphanumeric run still carrying a letter AND a digit
+# AFTER unit-suffix stripping (A100, H200, GB300, HBM3E, RTX4090). The letter is
+# part of an identifier, not a data figure, so the whole token is scrubbed before
+# the numeric scan. This runs AFTER _CONTEXT_UNIT_SUFFIX_RE, so a pure unit-suffixed
+# numeric (42B) has already had its suffix stripped to a letter-free "42" and no
+# longer matches here -- its number flows to provenance. Real figures ("$95.00" /
+# "8.5%" / "130") have no letter and are untouched.
+_CONTEXT_PRODUCT_NAME_RE = re.compile(
     r"\b(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*\d)[A-Za-z0-9]+\b")
 
 
@@ -1102,20 +1114,30 @@ def check_context_structure(module, as_of=None):
 def _scrub_context_prose(text, module):
     """Remove context-specific CHROME before number_provenance scans the prose.
 
-    Three non-data token classes are stripped so they never orphan:
+    Non-data token classes are stripped so they never orphan; financial shorthand
+    is UNwrapped so its number DOES trace:
       * inline finding references ("(C3)" / "C3") -- citation markers into
         findings[], not figures;
-      * product/model names with a digit glued inside letters (HBM3E, A100, 3nm) --
-        the digit is part of an identifier, verified by the structure of the name,
-        not a data claim (real figures like $95.00 / 8.5% / 130 keep a
-        letter-free numeric run and are untouched);
+      * financial shorthand with a TRAILING unit suffix (42B, 9999M, 30x, 45pct,
+        200bps, 3nm) -- the suffix is a magnitude/unit label, but the NUMBER is a
+        real data figure that MUST trace to the bundle. Only the suffix is stripped,
+        exactly mirroring the report gate's handling of "$42B" (its _NUM_RE already
+        yields 42 and checks it); the surviving number flows into the numeric scan;
+      * product/model names with a letter glued to a digit (HBM3E, A100, GB300) --
+        AFTER the suffix strip above, a token still carrying BOTH a letter and a
+        digit is an identifier, not a data claim (real figures like $95.00 / 8.5% /
+        130 keep a letter-free numeric run and are untouched);
       * the module's OWN live_tape dates -- these are LLM-authored event dates,
         validated separately by context_structure (parse + <= as_of), so they are
         not checked against the bundle's date set (a live-tape event legitimately
         post-dates the snapshot's fetch dates within the as_of ceiling).
     """
     scrubbed = _CONTEXT_REF_SCRUB_RE.sub(" ", text)
-    scrubbed = _CONTEXT_ALNUM_TOKEN_RE.sub(" ", scrubbed)
+    # Unwrap unit-suffixed figures FIRST (keep the number), then scrub the residual
+    # product-name identifiers. Order matters: after "42B" -> "42", the product-name
+    # scrub sees a letter-free "42" and leaves it for provenance.
+    scrubbed = _CONTEXT_UNIT_SUFFIX_RE.sub(r"\1 ", scrubbed)
+    scrubbed = _CONTEXT_PRODUCT_NAME_RE.sub(" ", scrubbed)
     live = module.get("live_tape")
     if isinstance(live, list):
         for ev in live:

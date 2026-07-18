@@ -811,6 +811,41 @@ class TestCLI(unittest.TestCase):
         qual = next(s for s in doc["subscores"] if s["name"] == "quality")
         self.assertEqual(qual["inputs"]["moat_points"], 2)
 
+    def _write_context(self, ids=("C1", "C2", "C3")):
+        # Minimal context module carrying a findings[] registry for the
+        # referential-integrity check (only findings[].id is read here).
+        ctx = {"findings": [{"id": i, "claim": "c", "source": "s"} for i in ids]}
+        path = os.path.join(self.dir, "module_context.json")
+        with open(path, "w") as fh:
+            json.dump(ctx, fh)
+        return path
+
+    def test_cli_moat_cited_id_resolves_passes(self):
+        # A cited C-ID that exists in the context findings[] passes.
+        self._write_context(ids=("C1", "C2", "C3"))
+        proc = self._run(extra=["--moat", "wide",
+                                "--moat-justification", "durable moat (C3)"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_cli_moat_cited_id_unresolved_exit2(self):
+        # C99 is not in the C1..C3 registry -> exit 2, message names it.
+        self._write_context(ids=("C1", "C2", "C3"))
+        proc = self._run(extra=["--moat", "wide",
+                                "--moat-justification", "moat per C99"])
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("C99 does not exist", proc.stderr)
+        self.assertIn("module_context.json", proc.stderr)
+        self.assertIn("C1..C3", proc.stderr)
+
+    def test_cli_moat_no_context_module_presence_only_unchanged(self):
+        # No module_context.json in the bundle: presence-only behavior, a cited but
+        # unverifiable C99 is accepted (the compressed / FSI-absent floor).
+        self.assertFalse(os.path.exists(
+            os.path.join(self.dir, "module_context.json")))
+        proc = self._run(extra=["--moat", "narrow",
+                                "--moat-justification", "some moat per C99"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
     def test_cli_method_label_in_valuation_arithmetic(self):
         # the fabricated bundle carries pe_median_method="approx_current_eps"
         # and a computable pe_fwd/pe_5yr_median, so the label must be disclosed.

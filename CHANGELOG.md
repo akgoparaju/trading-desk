@@ -1,6 +1,26 @@
 # Changelog
 
-## Unreleased
+## 0.11.0 — 2026-07-17 · Coverage-first analysis
+
+Deep coverage becomes the default read: the pipeline always initiates (or refreshes)
+company coverage, distills it into a cited `company-context` module whose findings[]
+registry grounds fundamental moat scoring and composite conviction, argues that case
+through the detail docket, and demotes the old web-compressed pass to an FSI-absent
+floor. Consolidates Tasks **C1** (fundamental rubric v1.1.0 — moat/positioning enters
+scoring), **C2** (`company-context` skill + `report_qc.py --context` provenance +
+structure gate), **C3** (coverage-first pipeline wiring across the SKILLs), and **C4**
+(detail report argues the case).
+
+- **Review fix-round (post-C4): unit-suffix provenance, C-ID referential integrity.**
+  Context number-provenance no longer swallows financial shorthand — `42B` / `9999M`
+  / `30x` / `45pct` / `200bps` / `3nm` now have their number scanned against the
+  bundle (only the unit suffix is stripped, mirroring the report gate's `$42B`), while
+  product names (HBM3E, A100, GB300) and finding refs stay scrubbed. `score_fundamental`
+  (moat) and `score_composite` (conviction) now verify each cited `C\d+` resolves to a
+  real `module_context.json` findings[] id (unresolved → exit 2), not just that a C-ID
+  is present. SKILL prose softened off unresolvable `spec §` references.
+  - Files: `scripts/report_qc.py`, `scripts/score_fundamental.py`,
+    `scripts/score_composite.py`, `skills/*/SKILL.md`, `tests/`.
 
 - **Detail report argues the case (Task C4): why-this-call, context narrative,
   evidence notes, full options render.** The detail docket's pages 3-6 no longer

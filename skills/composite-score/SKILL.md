@@ -12,7 +12,7 @@ This is the **L3 decision layer**. It consumes the four evidence module JSONs' f
 **Non-negotiables:**
 - **Never do arithmetic in prose.** Every number you cite must already appear in `module_composite.json` (its `dimensions`, `thesis_conviction.subscores`, `ev`, `sensitivity`) or an evidence module JSON. A composite, a contribution, a grade, an EV, a break-even entry you would have to compute is a script change, not a prose change.
 - **Conviction is asserted, never assumed.** The four conviction flags have **no defaults** — you set all four with honest justifications read off the evidence briefs, and you construct the scenario set with stated probability reasoning. A missing flag, missing justification, or missing scenario set is a hard error (exit 2).
-- **Weights are FIXED per profile.** You never hand-tune a weight. Comparability across names beats per-name personalization (spec §9.3). The `--profile` flag selects a fixed weight column; that is the only lever.
+- **Weights are FIXED per profile.** You never hand-tune a weight. Comparability across names beats per-name personalization. The `--profile` flag selects a fixed weight column; that is the only lever.
 
 Trigger phrases: "score it", "composite for MU", "composite score AAPL", "what's the overall call on NVDA".
 
@@ -162,7 +162,7 @@ Report to the user (and to any calling skill):
 
 ## Important Notes
 
-- **Weights are FIXED per profile (spec §9.3).** Comparability across names beats per-name personalization. You never hand-tune a weight; `--profile` is the only lever, and it selects a whole fixed column. The table: balanced (tech .25, fund .25, sent .20, risk .15, conviction .15); trader (.35/.10/.25/.15/.15); long-term (.10/.40/.15/.15/.20).
+- **Weights are FIXED per profile.** Comparability across names beats per-name personalization. You never hand-tune a weight; `--profile` is the only lever, and it selects a whole fixed column. The table: balanced (tech .25, fund .25, sent .20, risk .15, conviction .15); trader (.35/.10/.25/.15/.15); long-term (.10/.40/.15/.15/.20).
 - **Grade bands are fixed.** A ≥80 → Buy/Add; B 60–79 → Hold/Accumulate-on-weakness; C 45–59 → Hold/Trim; D <45 → Reduce/Avoid. Never re-band.
 - **Scenario probabilities MUST carry reasoning.** `--scenario-reasoning` is mandatory. `25/50/25` is a disclosed fallback for "no differentiated view", never a lazy default you leave silent.
 - **The EV hurdle is profile-scoped, but sensitivity re-bands it.** The chosen profile's thesis-conviction EV asymmetry uses that profile's hurdle (`0.08 × horizon_years`). The `sensitivity` block recomputes the FULL composite — including the EV asymmetry re-banded per each profile's own hurdle — for all three profiles, which is why the same name can grade B under one lens and C under another.

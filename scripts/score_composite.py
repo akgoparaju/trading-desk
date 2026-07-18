@@ -512,13 +512,28 @@ def main(argv=None):
             _ctx = {}
         if (_ctx.get("qc") or {}).get("qc_passed"):
             import re as _re
+            # Referential integrity: build the findings[] id registry once, then
+            # require every cited C-ID to resolve to it (presence alone is not
+            # enough — a fabricated "C99" is a broken reference, not grounding).
+            _findings = _ctx.get("findings")
+            _finding_ids = {
+                f["id"] for f in (_findings if isinstance(_findings, list) else [])
+                if isinstance(f, dict) and isinstance(f.get("id"), str)}
             for flag, just in (("--variant", args.variant_justification),
                                ("--catalyst-clarity",
                                 args.catalyst_clarity_justification)):
-                if not _re.search(r"C\d+", just or ""):
+                cited = _re.findall(r"C\d+", just or "")
+                if not cited:
                     print(f"ERROR: {flag}-justification must cite context "
                           f"finding IDs (e.g. C3) — a QC-stamped "
                           f"module_context.json exists for this bundle.",
+                          file=sys.stderr)
+                    return 2
+                _unresolved = [c for c in cited if c not in _finding_ids]
+                if _unresolved:
+                    _n = len(_finding_ids)
+                    print(f"ERROR: cited finding {_unresolved[0]} does not exist "
+                          f"in module_context.json (findings run C1..C{_n})",
                           file=sys.stderr)
                     return 2
 
