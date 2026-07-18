@@ -16,6 +16,8 @@ double as a contract test against that table.
 stdlib-only; unittest; each test fabricates an isolated tempdir ticker workspace.
 """
 
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -34,6 +36,17 @@ from scripts import refresh_plan  # noqa: E402  (path set above)
 from scripts import qc  # noqa: E402  (window contract)
 
 AS_OF = "2026-07-16"
+
+
+def _run_main(argv):
+    """Run refresh_plan.main in-process, swallowing its CLI stdout/stderr.
+
+    main() prints the output path to stdout on success and error strings to
+    stderr; captured here so the unittest console stays clean (the plan is read
+    back from the written file, so the printed path is not needed by tests)."""
+    with contextlib.redirect_stdout(io.StringIO()), \
+            contextlib.redirect_stderr(io.StringIO()):
+        return refresh_plan.main(argv)
 
 
 # --------------------------------------------------------------------------- #
@@ -141,8 +154,8 @@ def _make_workspace(tmp, prev_as_of, ages=None, next_earnings=None, ex_date=None
 def _plan(ticker_dir, as_of=AS_OF):
     """Run the planner in-process and return the plan dict."""
     out = os.path.join(ticker_dir, "refresh_plan.json")
-    rc = refresh_plan.main(["--ticker-dir", ticker_dir, "--as-of", as_of,
-                            "--out", out])
+    rc = _run_main(["--ticker-dir", ticker_dir, "--as-of", as_of,
+                    "--out", out])
     with open(out) as fh:
         return rc, json.load(fh)
 
@@ -431,8 +444,8 @@ class LayoutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             td, bundle = _make_workspace(tmp, "2026-07-10", legacy=True)
             out = os.path.join(td, "refresh_plan.json")
-            rc = refresh_plan.main(["--ticker-dir", td, "--as-of", AS_OF,
-                                    "--out", out])
+            rc = _run_main(["--ticker-dir", td, "--as-of", AS_OF,
+                            "--out", out])
             self.assertEqual(rc, 0)
             with open(out) as fh:
                 plan = json.load(fh)
@@ -455,12 +468,12 @@ class LayoutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             empty = os.path.join(tmp, "trading_desk_MU")
             os.makedirs(empty)
-            rc = refresh_plan.main(["--ticker-dir", empty, "--as-of", AS_OF])
+            rc = _run_main(["--ticker-dir", empty, "--as-of", AS_OF])
             self.assertEqual(rc, 2)
 
     def test_missing_ticker_dir_exits_2(self):
         with tempfile.TemporaryDirectory() as tmp:
-            rc = refresh_plan.main(
+            rc = _run_main(
                 ["--ticker-dir", os.path.join(tmp, "nope"), "--as-of", AS_OF])
             self.assertEqual(rc, 2)
 
@@ -520,7 +533,7 @@ class DeterminismTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             td, _ = _make_workspace(tmp, _days_before(date.today().isoformat(), 5))
             out = os.path.join(td, "refresh_plan.json")
-            rc = refresh_plan.main(["--ticker-dir", td, "--out", out])
+            rc = _run_main(["--ticker-dir", td, "--out", out])
             self.assertEqual(rc, 0)
             with open(out) as fh:
                 plan = json.load(fh)
@@ -541,8 +554,8 @@ class DeterminismTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             td, _ = _make_workspace(tmp, "2026-07-01")
             custom = os.path.join(tmp, "custom_plan.json")
-            rc = refresh_plan.main(["--ticker-dir", td, "--as-of", AS_OF,
-                                    "--out", custom])
+            rc = _run_main(["--ticker-dir", td, "--as-of", AS_OF,
+                            "--out", custom])
             self.assertEqual(rc, 0)
             self.assertTrue(os.path.isfile(custom))
 
