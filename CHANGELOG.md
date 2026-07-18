@@ -72,6 +72,55 @@
   every report footer shows the active scale.
   - Files: `skills/scale-review/SKILL.md`.
 
+- **dcf_bear downside floor (`score_risk.py`) (Task V3).** New `--anchors
+  valuation_anchors.json`: in anchored mode the downside map's valuation floor becomes
+  the coverage DCF bear case (`basis: "dcf_bear (coverage anchors)"`), replacing the
+  `pe_5yr_median × eps_ntm` floor and its suspect-flag machinery entirely — this kills
+  the pe-median degeneracy that produced a $134 floor on an $853 stock. Snapshot mode
+  (no anchors) is byte-identical. The module records
+  `downside_floor_mode: "dcf_bear" | "pe_median"`; malformed anchors → exit 2 naming
+  the issue (same validation contract as `score_fundamental`).
+  - Files: `scripts/score_risk.py`, `tests/test_score_risk.py`.
+
+- **Skill wiring for anchors / scales / weights / ratification (Task V3).**
+  full-trade-analysis: the coverage phase transcribes valuation anchors into
+  `coverage/valuation_anchors.json` (every number cited to its coverage-artifact
+  section; validated by the scorers' exit-2 backstop); scoring steps pass
+  `--anchors` / `--scale` / `--weights-config` conditionally (a sector scale governs a
+  ticker ONLY via a cited context finding — single-mapping discipline).
+  refresh-analysis: reads the plan's `scales[]` / `scale_review_required` /
+  `pending_proposals[]`, applies ONLY pre-registered `on_trip` consequences, surfaces
+  pending proposals, and documents the ratification flow (`ratify <name>@<version>` →
+  current scale archived to `scales/history/`, proposal promoted with `prior` set —
+  forward-only, history never recalculated). company-context: sector-regime theses are
+  recorded as cited findings that scales must reference as evidence. risk-analytics:
+  documents the anchored `dcf_bear` floor invocation.
+  - Files: `skills/full-trade-analysis/SKILL.md`, `skills/composite-score/SKILL.md`,
+    `skills/refresh-analysis/SKILL.md`, `skills/company-context/SKILL.md`,
+    `skills/risk-analytics/SKILL.md`.
+
+- **METHODOLOGY appendix in every Detail PDF (Task V4).** The detail docket gains a
+  final, 100% script-generated METHODOLOGY section (zero LLM content; every string is
+  a pinned constant or read from module/scale JSONs): rubric-versions table; the
+  composite weight table actually used (dual custom-vs-standard table when a CUSTOM
+  weight set is active); the fundamental valuation formula set (mode, component maxima
+  17/13/8/7/5 anchored or 20/15/15 snapshot, the >25% DCF-vs-comps band-widen + 0.75
+  haircut rule, PEG display-only line); the active sector scale (name@version,
+  effective, basis, formula, parameters, computed band, evidence C-IDs, falsifiers,
+  prior) or "No sector scale active — standard bands"; scoring conventions (EV hurdle,
+  grade bands, horizon years, judgment-flag rule — imported from the scorers'
+  constants, never retyped); and the governance rules (forward-only versioning,
+  pre-registered falsifier consequences, adversarial review + user ratification,
+  append-only history). Height-aware pagination (`METHODOLOGY (continued)`).
+  - Renderer stamps & banners: footer gains `Weights: standard v1 | CUSTOM <set>@<ver>`
+    and `Scale: <name>@<version>`; a CUSTOM tag renders near the grade box; the delta
+    note's What-Changed detects weight-set and sector-scale transitions; Detail p1 and
+    the delta carry an accent banner when `scale_review_required` and a neutral banner
+    for pending proposals; anchored-mode PEG renders as display-only with the
+    exclusion note.
+  - Files: `scripts/render_pdf.py`, `tests/test_render_pdf.py`,
+    `skills/report-renderer/SKILL.md`.
+
 ## 0.11.0 — 2026-07-17 · Coverage-first analysis
 
 Deep coverage becomes the default read: the pipeline always initiates (or refreshes)
