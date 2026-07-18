@@ -3,17 +3,29 @@
 WHY: this is the ALWAYS-AVAILABLE fundamental path (design spec §8.1 "FSI absent"
 branch). When the deep FSI initiation / model reuse is not applied, the composite
 still needs a disclosed, snapshot-only fundamental score. Like the other scorers,
-this module's arithmetic IS the rubric of record (fundamental rubric v1.0.0,
+this module's arithmetic IS the rubric of record (fundamental rubric v1.1.0,
 "compressed_snapshot_pass"): every branch is pinned to a hand-computed value so a
 report can never silently drift, and the mode is disclosed at the module top level
 so a reader always knows this was the snapshot-only pass, not the deep model.
 
+RUBRIC v1.0.0 -> v1.1.0 (coverage-first spec, Task C1): the Quality dimension is
+rebalanced from a five-component 50 to a SIX-component 50 to make room for a
+moat/positioning judgment flag scored from cited context findings. The mechanical
+component maxima shrink (rev growth 15->12, gm 8->7, om 7->5, roe 10->8, fcf 10->8)
+and a new Moat component (max 10) is added. Every quality band test below is
+RE-PINNED to the new maxima; each carries an ``old -> new`` comment marking the
+deliberate rubric change. Valuation (50) is unchanged. The moat flag mirrors the
+score_sentiment judgment-flag convention (flag + REQUIRED justification recorded in
+module flags), and when the flag is given the justification MUST cite at least one
+context finding ID (regex ``C\\d+``, e.g. "C3").
+
 Tests exercise the pure scoring functions directly (exact value per band), the
 roe percent-vs-fraction normalization, the pe_fwd/pe_5yr_median ratio bands with
 the pe_median_method label carried into the arithmetic string, per-component null
-handling, whole-dimension renormalization, the mode disclosure fields,
-determinism, and one end-to-end CLI run against a real snapshot bundle fabricated
-exactly the way test_score_sentiment.py does. The scoring functions take
+handling, whole-dimension renormalization, the mode disclosure fields, the moat
+judgment flag (wide/narrow/none/omitted + evaluability + justification/citation
+validation), determinism, and one end-to-end CLI run against a real snapshot bundle
+fabricated exactly the way test_score_sentiment.py does. The scoring functions take
 already-parsed sub-blocks so branches pin without a full snapshot.
 
 stdlib-only; unittest.
@@ -61,32 +73,32 @@ def _val(**over):
 
 
 # --------------------------------------------------------------------------- #
-# Quality dim 1: revenue growth (max 15)
+# Quality dim 1: revenue growth (v1.0.0 max 15 -> v1.1.0 max 12)
 # --------------------------------------------------------------------------- #
 
 class TestRevGrowth(unittest.TestCase):
-    def test_hyper_growth_is_15(self):
-        # 0.25 > 0.20 -> 15
+    def test_hyper_growth_is_12(self):
+        # 0.25 > 0.20 -> v1.0.0: 15 -> v1.1.0: 12
         sub = sf.score_quality(_fund(rev_growth_latest_q=0.25))
-        self.assertEqual(sub["inputs"]["rev_growth_points"], 15)
+        self.assertEqual(sub["inputs"]["rev_growth_points"], 12)
 
-    def test_strong_growth_is_11(self):
-        # 0.15 in (0.10,0.20] -> 11
+    def test_strong_growth_is_9(self):
+        # 0.15 in (0.10,0.20] -> v1.0.0: 11 -> v1.1.0: 9
         sub = sf.score_quality(_fund(rev_growth_latest_q=0.15))
-        self.assertEqual(sub["inputs"]["rev_growth_points"], 11)
+        self.assertEqual(sub["inputs"]["rev_growth_points"], 9)
 
-    def test_moderate_growth_is_8(self):
-        # 0.05 in (0.03,0.10] -> 8
+    def test_moderate_growth_is_6(self):
+        # 0.05 in (0.03,0.10] -> v1.0.0: 8 -> v1.1.0: 6
         sub = sf.score_quality(_fund(rev_growth_latest_q=0.05))
-        self.assertEqual(sub["inputs"]["rev_growth_points"], 8)
+        self.assertEqual(sub["inputs"]["rev_growth_points"], 6)
 
-    def test_slow_growth_is_5(self):
-        # 0.02 in [0,0.03] -> 5
+    def test_slow_growth_is_4(self):
+        # 0.02 in [0,0.03] -> v1.0.0: 5 -> v1.1.0: 4
         sub = sf.score_quality(_fund(rev_growth_latest_q=0.02))
-        self.assertEqual(sub["inputs"]["rev_growth_points"], 5)
+        self.assertEqual(sub["inputs"]["rev_growth_points"], 4)
 
     def test_contraction_is_2(self):
-        # -0.05 < 0 -> 2
+        # -0.05 < 0 -> 2 (unchanged)
         sub = sf.score_quality(_fund(rev_growth_latest_q=-0.05))
         self.assertEqual(sub["inputs"]["rev_growth_points"], 2)
 
@@ -95,60 +107,64 @@ class TestRevGrowth(unittest.TestCase):
         self.assertEqual(sub["inputs"]["rev_growth_points"], 0)
         self.assertIn("n/a", sub["arithmetic"])
 
-    def test_boundary_020_is_11(self):
-        # exactly 0.20 is NOT > 0.20 -> (0.10,0.20] band -> 11
+    def test_boundary_020_is_9(self):
+        # exactly 0.20 is NOT > 0.20 -> (0.10,0.20] band -> v1.0.0: 11 -> v1.1.0: 9
         sub = sf.score_quality(_fund(rev_growth_latest_q=0.20))
-        self.assertEqual(sub["inputs"]["rev_growth_points"], 11)
+        self.assertEqual(sub["inputs"]["rev_growth_points"], 9)
 
 
 # --------------------------------------------------------------------------- #
-# Quality dim 2: margins (gm max 8 + om max 7)
+# Quality dim 2: margins (gm v1.0.0 max 8 -> v1.1.0 max 7;
+#                         om v1.0.0 max 7 -> v1.1.0 max 5)
 # --------------------------------------------------------------------------- #
 
 class TestMargins(unittest.TestCase):
-    def test_gm_high_is_8(self):
+    def test_gm_high_is_7(self):
+        # >=0.50 -> v1.0.0: 8 -> v1.1.0: 7
         sub = sf.score_quality(_fund(gm_ttm=0.55))
-        self.assertEqual(sub["inputs"]["gm_points"], 8)
+        self.assertEqual(sub["inputs"]["gm_points"], 7)
 
-    def test_gm_mid_is_6(self):
-        # 0.40 in [0.35,0.50) -> 6
+    def test_gm_mid_is_5(self):
+        # 0.40 in [0.35,0.50) -> v1.0.0: 6 -> v1.1.0: 5
         sub = sf.score_quality(_fund(gm_ttm=0.40))
-        self.assertEqual(sub["inputs"]["gm_points"], 6)
+        self.assertEqual(sub["inputs"]["gm_points"], 5)
 
-    def test_gm_low_is_4(self):
-        # 0.25 in [0.20,0.35) -> 4
+    def test_gm_low_is_3(self):
+        # 0.25 in [0.20,0.35) -> v1.0.0: 4 -> v1.1.0: 3
         sub = sf.score_quality(_fund(gm_ttm=0.25))
-        self.assertEqual(sub["inputs"]["gm_points"], 4)
+        self.assertEqual(sub["inputs"]["gm_points"], 3)
 
-    def test_gm_thin_is_2(self):
-        # 0.10 < 0.20 -> 2
+    def test_gm_thin_is_1(self):
+        # 0.10 < 0.20 -> v1.0.0: 2 -> v1.1.0: 1
         sub = sf.score_quality(_fund(gm_ttm=0.10))
-        self.assertEqual(sub["inputs"]["gm_points"], 2)
+        self.assertEqual(sub["inputs"]["gm_points"], 1)
 
     def test_gm_null_is_0(self):
         sub = sf.score_quality(_fund(gm_ttm=None))
         self.assertEqual(sub["inputs"]["gm_points"], 0)
 
-    def test_gm_boundary_050_is_8(self):
+    def test_gm_boundary_050_is_7(self):
+        # >=0.50 -> v1.0.0: 8 -> v1.1.0: 7
         sub = sf.score_quality(_fund(gm_ttm=0.50))
-        self.assertEqual(sub["inputs"]["gm_points"], 8)
+        self.assertEqual(sub["inputs"]["gm_points"], 7)
 
-    def test_om_high_is_7(self):
+    def test_om_high_is_5(self):
+        # >=0.25 -> v1.0.0: 7 -> v1.1.0: 5
         sub = sf.score_quality(_fund(om_ttm=0.30))
-        self.assertEqual(sub["inputs"]["om_points"], 7)
-
-    def test_om_mid_is_5(self):
-        # 0.20 in [0.15,0.25) -> 5
-        sub = sf.score_quality(_fund(om_ttm=0.20))
         self.assertEqual(sub["inputs"]["om_points"], 5)
 
-    def test_om_low_is_3(self):
-        # 0.10 in [0.05,0.15) -> 3
+    def test_om_mid_is_4(self):
+        # 0.20 in [0.15,0.25) -> v1.0.0: 5 -> v1.1.0: 4
+        sub = sf.score_quality(_fund(om_ttm=0.20))
+        self.assertEqual(sub["inputs"]["om_points"], 4)
+
+    def test_om_low_is_2(self):
+        # 0.10 in [0.05,0.15) -> v1.0.0: 3 -> v1.1.0: 2
         sub = sf.score_quality(_fund(om_ttm=0.10))
-        self.assertEqual(sub["inputs"]["om_points"], 3)
+        self.assertEqual(sub["inputs"]["om_points"], 2)
 
     def test_om_thin_is_1(self):
-        # 0.02 < 0.05 -> 1
+        # 0.02 < 0.05 -> 1 (unchanged)
         sub = sf.score_quality(_fund(om_ttm=0.02))
         self.assertEqual(sub["inputs"]["om_points"], 1)
 
@@ -156,25 +172,28 @@ class TestMargins(unittest.TestCase):
         sub = sf.score_quality(_fund(om_ttm=None))
         self.assertEqual(sub["inputs"]["om_points"], 0)
 
-    def test_om_boundary_025_is_7(self):
+    def test_om_boundary_025_is_5(self):
+        # >=0.25 -> v1.0.0: 7 -> v1.1.0: 5
         sub = sf.score_quality(_fund(om_ttm=0.25))
-        self.assertEqual(sub["inputs"]["om_points"], 7)
+        self.assertEqual(sub["inputs"]["om_points"], 5)
 
 
 # --------------------------------------------------------------------------- #
-# Quality dim 3: returns on capital / roe (max 10), percent-vs-fraction norm
+# Quality dim 3: returns on capital / roe (v1.0.0 max 10 -> v1.1.0 max 8),
+#                percent-vs-fraction norm (unchanged)
 # --------------------------------------------------------------------------- #
 
 class TestRoe(unittest.TestCase):
-    def test_roe_high_fraction_is_10(self):
-        # 0.36 >= 0.30 -> 10
+    def test_roe_high_fraction_is_8(self):
+        # 0.36 >= 0.30 -> v1.0.0: 10 -> v1.1.0: 8
         sub = sf.score_quality(_fund(roe=0.36))
-        self.assertEqual(sub["inputs"]["roe_points"], 10)
+        self.assertEqual(sub["inputs"]["roe_points"], 8)
 
-    def test_roe_high_percent_normalized_is_10(self):
-        # 36.0 > 3 -> treated as percent -> 0.36 -> 10, and labeled in arithmetic
+    def test_roe_high_percent_normalized_is_8(self):
+        # 36.0 > 3 -> treated as percent -> 0.36 -> v1.0.0: 10 -> v1.1.0: 8,
+        # and labeled in arithmetic
         sub = sf.score_quality(_fund(roe=36.0))
-        self.assertEqual(sub["inputs"]["roe_points"], 10)
+        self.assertEqual(sub["inputs"]["roe_points"], 8)
         self.assertEqual(sub["inputs"]["roe_normalized"], 0.36)
         self.assertIn("percent", sub["arithmetic"])
 
@@ -184,18 +203,18 @@ class TestRoe(unittest.TestCase):
         b = sf.score_quality(_fund(roe=0.36))
         self.assertEqual(a["inputs"]["roe_points"], b["inputs"]["roe_points"])
 
-    def test_roe_mid_is_7(self):
-        # 0.20 in [0.15,0.30) -> 7
+    def test_roe_mid_is_6(self):
+        # 0.20 in [0.15,0.30) -> v1.0.0: 7 -> v1.1.0: 6
         sub = sf.score_quality(_fund(roe=0.20))
-        self.assertEqual(sub["inputs"]["roe_points"], 7)
+        self.assertEqual(sub["inputs"]["roe_points"], 6)
 
-    def test_roe_low_is_4(self):
-        # 0.08 in [0.05,0.15) -> 4
+    def test_roe_low_is_3(self):
+        # 0.08 in [0.05,0.15) -> v1.0.0: 4 -> v1.1.0: 3
         sub = sf.score_quality(_fund(roe=0.08))
-        self.assertEqual(sub["inputs"]["roe_points"], 4)
+        self.assertEqual(sub["inputs"]["roe_points"], 3)
 
     def test_roe_weak_is_1(self):
-        # 0.02 < 0.05 -> 1
+        # 0.02 < 0.05 -> 1 (unchanged)
         sub = sf.score_quality(_fund(roe=0.02))
         self.assertEqual(sub["inputs"]["roe_points"], 1)
 
@@ -205,34 +224,35 @@ class TestRoe(unittest.TestCase):
 
     def test_roe_boundary_3_not_normalized(self):
         # exactly 3 is NOT > 3, so 3.0 stays a fraction (an implausible 300% roe),
-        # >= 0.30 -> 10. Guards the normalization threshold direction.
+        # >= 0.30 -> v1.0.0: 10 -> v1.1.0: 8. Guards the normalization threshold
+        # direction.
         sub = sf.score_quality(_fund(roe=3.0))
         self.assertEqual(sub["inputs"]["roe_normalized"], 3.0)
-        self.assertEqual(sub["inputs"]["roe_points"], 10)
+        self.assertEqual(sub["inputs"]["roe_points"], 8)
 
 
 # --------------------------------------------------------------------------- #
-# Quality dim 4: FCF margin = fcf_ttm / rev_ttm (max 10)
+# Quality dim 4: FCF margin = fcf_ttm / rev_ttm (v1.0.0 max 10 -> v1.1.0 max 8)
 # --------------------------------------------------------------------------- #
 
 class TestFcfMargin(unittest.TestCase):
-    def test_high_is_10(self):
-        # 5000/20000 = 0.25 >= 0.20 -> 10
+    def test_high_is_8(self):
+        # 5000/20000 = 0.25 >= 0.20 -> v1.0.0: 10 -> v1.1.0: 8
         sub = sf.score_quality(_fund(fcf_ttm=5000.0, rev_ttm=20000.0))
-        self.assertEqual(sub["inputs"]["fcf_margin_points"], 10)
+        self.assertEqual(sub["inputs"]["fcf_margin_points"], 8)
 
-    def test_mid_is_7(self):
-        # 3000/20000 = 0.15 in [0.10,0.20) -> 7
+    def test_mid_is_6(self):
+        # 3000/20000 = 0.15 in [0.10,0.20) -> v1.0.0: 7 -> v1.1.0: 6
         sub = sf.score_quality(_fund(fcf_ttm=3000.0, rev_ttm=20000.0))
-        self.assertEqual(sub["inputs"]["fcf_margin_points"], 7)
+        self.assertEqual(sub["inputs"]["fcf_margin_points"], 6)
 
-    def test_low_is_4(self):
-        # 1000/20000 = 0.05 in [0,0.10) -> 4
+    def test_low_is_3(self):
+        # 1000/20000 = 0.05 in [0,0.10) -> v1.0.0: 4 -> v1.1.0: 3
         sub = sf.score_quality(_fund(fcf_ttm=1000.0, rev_ttm=20000.0))
-        self.assertEqual(sub["inputs"]["fcf_margin_points"], 4)
+        self.assertEqual(sub["inputs"]["fcf_margin_points"], 3)
 
     def test_negative_is_1(self):
-        # -2000/20000 = -0.10 < 0 -> 1
+        # -2000/20000 = -0.10 < 0 -> 1 (unchanged)
         sub = sf.score_quality(_fund(fcf_ttm=-2000.0, rev_ttm=20000.0))
         self.assertEqual(sub["inputs"]["fcf_margin_points"], 1)
 
@@ -248,22 +268,100 @@ class TestFcfMargin(unittest.TestCase):
         sub = sf.score_quality(_fund(fcf_ttm=5000.0, rev_ttm=0.0))
         self.assertEqual(sub["inputs"]["fcf_margin_points"], 0)
 
-    def test_boundary_020_is_10(self):
+    def test_boundary_020_is_8(self):
+        # >=0.20 -> v1.0.0: 10 -> v1.1.0: 8
         sub = sf.score_quality(_fund(fcf_ttm=4000.0, rev_ttm=20000.0))
-        self.assertEqual(sub["inputs"]["fcf_margin_points"], 10)
+        self.assertEqual(sub["inputs"]["fcf_margin_points"], 8)
+
+
+# --------------------------------------------------------------------------- #
+# Quality dim 6: moat/positioning judgment flag (NEW in v1.1.0, max 10)
+#   wide -> 10 / narrow -> 6 / none -> 2 / OMITTED (None) -> 0 "n/a", not evaluable.
+#   Scored from cited context findings; mirrors score_sentiment flag conventions.
+# --------------------------------------------------------------------------- #
+
+class TestMoat(unittest.TestCase):
+    def test_wide_is_10(self):
+        sub = sf.score_quality(_fund(), moat="wide",
+                               moat_justification="durable pricing power (C3)")
+        self.assertEqual(sub["inputs"]["moat_points"], 10)
+        self.assertIn("moat wide", sub["arithmetic"])
+
+    def test_narrow_is_6(self):
+        sub = sf.score_quality(_fund(), moat="narrow",
+                               moat_justification="some switching costs (C1)")
+        self.assertEqual(sub["inputs"]["moat_points"], 6)
+
+    def test_none_is_2(self):
+        sub = sf.score_quality(_fund(), moat="none",
+                               moat_justification="commoditized, no pricing power (C5)")
+        self.assertEqual(sub["inputs"]["moat_points"], 2)
+
+    def test_omitted_is_0_na(self):
+        # Flag omitted entirely -> 0 with the "n/a (no context assessment)" string.
+        sub = sf.score_quality(_fund(), moat=None, moat_justification=None)
+        self.assertEqual(sub["inputs"]["moat_points"], 0)
+        self.assertIn("moat: n/a (no context assessment)", sub["arithmetic"])
+
+    def test_omitted_does_not_add_to_evaluable(self):
+        # Omitted moat mirrors sentiment inst_flow "unknown": contributes 0 and does
+        # NOT count toward evaluable. Here the OTHER quality inputs keep the
+        # dimension evaluable, so we verify the moat component itself is n/a-shaped
+        # AND that an otherwise-empty quality block with only a present moat flag
+        # IS evaluable (present flag always evaluable).
+        only_moat = sf.score_quality(
+            {"rev_growth_latest_q": None, "gm_ttm": None, "om_ttm": None,
+             "roe": None, "fcf_ttm": None, "rev_ttm": None},
+            moat="wide", moat_justification="brand + scale (C2)")
+        self.assertTrue(only_moat["evaluable"])
+        self.assertEqual(only_moat["points"], 10)
+
+    def test_omitted_only_quality_not_evaluable(self):
+        # All mechanical inputs null AND moat omitted -> the whole dimension has no
+        # evaluable inputs (omitted moat does not count), mirroring sentiment's
+        # inst_flow-unknown + null-insider "not evaluable" case.
+        sub = sf.score_quality(
+            {"rev_growth_latest_q": None, "gm_ttm": None, "om_ttm": None,
+             "roe": None, "fcf_ttm": None, "rev_ttm": None},
+            moat=None, moat_justification=None)
+        self.assertFalse(sub["evaluable"])
+        self.assertEqual(sub["points"], 0)
+
+    def test_flag_and_justification_recorded_in_inputs(self):
+        sub = sf.score_quality(_fund(), moat="wide",
+                               moat_justification="network effects (C4)")
+        self.assertEqual(sub["inputs"]["moat"], "wide")
+        self.assertEqual(sub["inputs"]["moat_justification"],
+                         "network effects (C4)")
+
+    def test_default_call_omits_moat(self):
+        # score_quality(_fund()) with no moat kwargs behaves as "omitted".
+        sub = sf.score_quality(_fund())
+        self.assertEqual(sub["inputs"]["moat_points"], 0)
+        self.assertIsNone(sub["inputs"]["moat"])
 
 
 class TestQualityComposite(unittest.TestCase):
-    def test_full_quality_max_50(self):
-        # 15 + 8 + 7 + 10 + 10 = 50
+    def test_full_quality_max_50_with_moat(self):
+        # v1.1.0: 12 + 7 + 5 + 8 + 8 (mechanical = 40) + 10 (moat wide) = 50
         sub = sf.score_quality(_fund(rev_growth_latest_q=0.25, gm_ttm=0.55,
                                      om_ttm=0.30, roe=0.36,
-                                     fcf_ttm=5000.0, rev_ttm=20000.0))
+                                     fcf_ttm=5000.0, rev_ttm=20000.0),
+                               moat="wide",
+                               moat_justification="durable moat (C1)")
         self.assertEqual(sub["points"], 50)
         self.assertEqual(sub["max"], 50)
         self.assertTrue(sub["evaluable"])
 
-    def test_all_null_not_evaluable(self):
+    def test_mechanical_max_without_moat_is_40(self):
+        # All mechanical bands maxed but moat OMITTED: 12+7+5+8+8 = 40 (moat +0).
+        sub = sf.score_quality(_fund(rev_growth_latest_q=0.25, gm_ttm=0.55,
+                                     om_ttm=0.30, roe=0.36,
+                                     fcf_ttm=5000.0, rev_ttm=20000.0))
+        self.assertEqual(sub["points"], 40)
+        self.assertEqual(sub["max"], 50)
+
+    def test_all_null_and_moat_omitted_not_evaluable(self):
         sub = sf.score_quality({"rev_growth_latest_q": None, "gm_ttm": None,
                                 "om_ttm": None, "roe": None,
                                 "fcf_ttm": None, "rev_ttm": None})
@@ -518,11 +616,26 @@ class TestScore(unittest.TestCase):
         self.assertEqual(result["score"], 0)
 
     def test_full_score_is_100(self):
+        # v1.1.0: a perfect 100 now REQUIRES a wide-moat flag (mechanical quality
+        # caps at 40/50 without it), so the moat flag is threaded through score().
+        result = sf.score(
+            _fund(rev_growth_latest_q=0.25, gm_ttm=0.55, om_ttm=0.30,
+                  roe=0.36, fcf_ttm=5000.0, rev_ttm=20000.0),
+            _val(pe_fwd=15.0, pe_5yr_median=20.0, peg=0.8, fcf_yield=0.06),
+            moat="wide", moat_justification="durable moat (C1)")
+        self.assertEqual(result["score"], 100)
+
+    def test_full_mechanical_without_moat_is_90(self):
+        # Same maxed inputs but moat OMITTED: quality 40/50 + valuation 50/50 = 90
+        # over the full max 100 (moat omitted still counts toward the quality
+        # dimension max because the OTHER quality inputs make the dimension
+        # evaluable -- the dimension max stays 50, moat just contributes 0).
         result = sf.score(
             _fund(rev_growth_latest_q=0.25, gm_ttm=0.55, om_ttm=0.30,
                   roe=0.36, fcf_ttm=5000.0, rev_ttm=20000.0),
             _val(pe_fwd=15.0, pe_5yr_median=20.0, peg=0.8, fcf_yield=0.06))
-        self.assertEqual(result["score"], 100)
+        self.assertFalse(result["renormalized"])
+        self.assertEqual(result["score"], 90)
 
 
 # --------------------------------------------------------------------------- #
@@ -560,7 +673,32 @@ class TestModeDisclosure(unittest.TestCase):
         self.assertIn("snapshot-only", doc["mode_note"])
         self.assertIn("deep FSI", doc["mode_note"])
         self.assertEqual(doc["skill"], "fundamental")
-        self.assertEqual(doc["rubric_version"], "1.0.0")
+        self.assertEqual(doc["rubric_version"], "1.1.0")
+
+
+# --------------------------------------------------------------------------- #
+# Moat flag recorded in module flags (mirrors score_sentiment conventions)
+# --------------------------------------------------------------------------- #
+
+class TestModuleMoatFlags(unittest.TestCase):
+    def test_moat_omitted_flags_none(self):
+        snap = {"fundamentals": _fund(), "valuation": _val(),
+                "meta": {"ticker": "MU", "as_of_utc": "2026-07-15T00:00:00Z"}}
+        doc = sf.build_module(snap)
+        self.assertIn("moat", doc["flags"])
+        self.assertIsNone(doc["flags"]["moat"])
+        self.assertIsNone(doc["flags"]["moat_justification"])
+
+    def test_moat_present_flags_recorded(self):
+        snap = {"fundamentals": _fund(), "valuation": _val(),
+                "meta": {"ticker": "MU", "as_of_utc": "2026-07-15T00:00:00Z"}}
+        doc = sf.build_module(snap, moat="wide",
+                              moat_justification="brand + scale (C3)")
+        self.assertEqual(doc["flags"]["moat"], "wide")
+        self.assertEqual(doc["flags"]["moat_justification"], "brand + scale (C3)")
+        # And it flows into the quality subscore.
+        qual = next(s for s in doc["subscores"] if s["name"] == "quality")
+        self.assertEqual(qual["inputs"]["moat_points"], 10)
 
 
 # --------------------------------------------------------------------------- #
@@ -598,7 +736,7 @@ class TestCLI(unittest.TestCase):
         with open(out) as fh:
             doc = json.load(fh)
         self.assertEqual(doc["skill"], "fundamental")
-        self.assertEqual(doc["rubric_version"], "1.0.0")
+        self.assertEqual(doc["rubric_version"], "1.1.0")
         self.assertEqual(doc["fundamental_mode"], "compressed_snapshot_pass")
         self.assertIn("snapshot-only", doc["mode_note"])
         self.assertEqual(doc["ticker"], "MU")
@@ -610,12 +748,68 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(len(doc["subscores"]), 2)
         self.assertIn("quality", doc["tables"])
         self.assertIn("valuation", doc["tables"])
-        self.assertEqual(doc["flags"], {})
+        # v1.1.0: flags now always carry the moat keys (omitted -> null), mirroring
+        # score_sentiment which always records its judgment flags.
+        self.assertEqual(doc["flags"],
+                         {"moat": None, "moat_justification": None})
         self.assertIsNone(doc["signal"])
         for s in doc["subscores"]:
             self.assertIn("arithmetic", s)
             self.assertIn("inputs", s)
             self.assertIn("name", s)
+
+    def test_cli_omitted_moat_arithmetic_and_evaluable(self):
+        # No --moat flag: quality still scores (mechanical inputs present) and the
+        # moat component reads "n/a (no context assessment)".
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        out = os.path.join(self.dir, "module_fundamental.json")
+        with open(out) as fh:
+            doc = json.load(fh)
+        qual = next(s for s in doc["subscores"] if s["name"] == "quality")
+        self.assertIn("moat: n/a (no context assessment)", qual["arithmetic"])
+        self.assertEqual(qual["inputs"]["moat_points"], 0)
+
+    def test_cli_moat_wide_scores_and_records_flag(self):
+        proc = self._run(extra=["--moat", "wide",
+                                "--moat-justification",
+                                "durable pricing power per C3"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        out = os.path.join(self.dir, "module_fundamental.json")
+        with open(out) as fh:
+            doc = json.load(fh)
+        self.assertEqual(doc["flags"]["moat"], "wide")
+        self.assertEqual(doc["flags"]["moat_justification"],
+                         "durable pricing power per C3")
+        qual = next(s for s in doc["subscores"] if s["name"] == "quality")
+        self.assertEqual(qual["inputs"]["moat_points"], 10)
+
+    def test_cli_moat_without_justification_exit2(self):
+        proc = self._run(extra=["--moat", "narrow"])
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("justification", proc.stderr.lower())
+
+    def test_cli_moat_justification_without_citation_exit2(self):
+        # A justification that cites no context finding ID (no C\d+) is rejected.
+        proc = self._run(extra=["--moat", "wide",
+                                "--moat-justification",
+                                "strong brand and scale advantages"])
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("cite context finding IDs", proc.stderr)
+        self.assertIn("C3", proc.stderr)
+
+    def test_cli_moat_justification_with_citation_ok(self):
+        # A single C\d+ token anywhere in the justification satisfies the citation
+        # requirement.
+        proc = self._run(extra=["--moat", "none",
+                                "--moat-justification",
+                                "commoditized DRAM, see C7 and C9"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        out = os.path.join(self.dir, "module_fundamental.json")
+        with open(out) as fh:
+            doc = json.load(fh)
+        qual = next(s for s in doc["subscores"] if s["name"] == "quality")
+        self.assertEqual(qual["inputs"]["moat_points"], 2)
 
     def test_cli_method_label_in_valuation_arithmetic(self):
         # the fabricated bundle carries pe_median_method="approx_current_eps"

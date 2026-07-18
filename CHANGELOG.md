@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- **Fundamental rubric v1.0.0 -> v1.1.0 (coverage-first, Task C1): moat/positioning
+  enters scoring via cited context.** The Quality dimension (still max 50) is
+  rebalanced from five mechanical components to six: the mechanical bands shrink
+  (rev growth 15->12, gm 8->7, om 7->5, roe 10->8, fcf margin 10->8; sum 40) to make
+  room for a new **moat/positioning judgment flag (max 10)**. `score_fundamental.py`
+  gains `--moat wide|narrow|none` (wide->10, narrow->6, none->2) with a REQUIRED
+  `--moat-justification`; per coverage-first the justification must cite at least one
+  context finding ID (`C\d+`, e.g. C3) or the CLI exits 2 ("moat justification must
+  cite context finding IDs (e.g. C3)"). Omitting `--moat` entirely scores 0
+  ("moat: n/a (no context assessment)") and, mirroring sentiment's inst_flow
+  "unknown", does NOT count toward the dimension's evaluable inputs; a present flag
+  is always evaluable. Flag + justification are recorded in the module `flags`
+  (previously `{}`) mirroring `score_sentiment` conventions. Valuation (50) and the
+  renormalization semantics are unchanged. Every quality band test is re-pinned to
+  the new maxima (each carrying an `old -> new` comment); +42 tests.
+- **Files:** `scripts/score_fundamental.py`, `tests/test_score_fundamental.py`.
+  Suite: 818 tests green (12 skips).
+
 ## 0.10.2 — 2026-07-17 · Display precision, grade-box labels, valuation-floor breakdown suppression
 
 Final display-integrity round on the PDF docket, verified visually against a full
