@@ -290,6 +290,53 @@ def _mk_bundle(dir_, *, with_options_chain=True, with_daily=True):
 
 
 # --------------------------------------------------------------------------- #
+# Pure geometry helpers (no matplotlib) -- exact positions.
+# --------------------------------------------------------------------------- #
+
+class TestStaggerPositions(unittest.TestCase):
+    def test_two_close_values_pushed_apart_symmetrically(self):
+        # span 14 < gap 40 -> spread to exactly 40, recentred on mean 857.
+        self.assertEqual(rc.stagger_positions([850, 864], 40), [837.0, 877.0])
+
+    def test_already_spaced_values_unchanged(self):
+        self.assertEqual(rc.stagger_positions([100, 200], 40), [100.0, 200.0])
+        # exactly at the gap is also "spaced" -> untouched.
+        self.assertEqual(rc.stagger_positions([100, 140], 40), [100.0, 140.0])
+
+    def test_three_cluster_spreads_around_mean(self):
+        # all three within the gap -> even 40-spacing, recentred on mean 860.
+        self.assertEqual(rc.stagger_positions([850, 860, 870], 40),
+                         [820.0, 860.0, 900.0])
+
+    def test_order_preserved_for_unsorted_input(self):
+        # output is aligned to input order: reversed in -> reversed out.
+        self.assertEqual(rc.stagger_positions([864, 850], 40), [877.0, 837.0])
+
+    def test_edge_cases(self):
+        self.assertEqual(rc.stagger_positions([], 40), [])
+        self.assertEqual(rc.stagger_positions([500], 40), [500.0])
+
+
+class TestClampCalloutY(unittest.TestCase):
+    def test_inside_band_unchanged(self):
+        self.assertEqual(rc.clamp_callout_y(50, (0, 100)), 50.0)
+
+    def test_above_clamped_to_padded_top(self):
+        # pad_frac 0.04 of span 100 = 4 -> top edge is 96.
+        self.assertEqual(rc.clamp_callout_y(99, (0, 100)), 96.0)
+
+    def test_below_clamped_to_padded_bottom(self):
+        self.assertEqual(rc.clamp_callout_y(-5, (0, 100)), 4.0)
+
+    def test_reversed_ylim_is_normalised(self):
+        self.assertEqual(rc.clamp_callout_y(99, (100, 0)), 96.0)
+
+    def test_custom_pad_frac(self):
+        # pad_frac 0.1 of span 100 = 10 -> top edge 90.
+        self.assertEqual(rc.clamp_callout_y(99, (0, 100), pad_frac=0.1), 90.0)
+
+
+# --------------------------------------------------------------------------- #
 # Extract functions: exact arrays vs the fixture.
 # --------------------------------------------------------------------------- #
 
@@ -327,6 +374,42 @@ class TestExtractFootballField(unittest.TestCase):
             # Bull target endpoint is the bull scenario price 130.
             bull = next(r for r in data["rows"] if r["label"] == "Bull target")
             self.assertEqual(bull["hi"], 130.0)
+
+    def test_football_field_ladder_support_two_nearest(self):
+        # CONTRACT CHANGE (review finding #5): the "Ladder support" anchor used to
+        # span min..max of ALL supports below the price -- on the real MU bundle
+        # that was 370..850, a meaningless ~480-wide bar. NEW contract: the band
+        # between the TWO nearest proven supports BELOW last (the floor directly
+        # beneath the price). This fixture injects a dense ladder below last=100:
+        # supports below = [70, 80, 90, 95]; two nearest = [90, 95].
+        #   OLD expectation: lo=70,  hi=95  (min..max of all four)
+        #   NEW expectation: lo=90,  hi=95  (two nearest below the price)
+        with tempfile.TemporaryDirectory() as d:
+            docs = _mk_bundle(d)
+            docs["module_technical"]["ladder"] = [
+                {"level": float(x), "type": "swing_low"}
+                for x in (70, 80, 90, 95, 112, 130)]
+            data = rc.extract_football_field(docs)
+            support = next(r for r in data["rows"]
+                           if r["label"] == "Ladder support")
+            self.assertEqual(support["kind"], "band")
+            self.assertEqual(support["lo"], 90.0)
+            self.assertEqual(support["hi"], 95.0)
+
+    def test_football_field_ladder_support_single_is_dot(self):
+        # With only ONE support below the price the anchor degrades to a dot at
+        # that level (NEW contract; the OLD code made a zero-width band).
+        with tempfile.TemporaryDirectory() as d:
+            docs = _mk_bundle(d)
+            docs["module_technical"]["ladder"] = [
+                {"level": 85.0, "type": "swing_low"},
+                {"level": 130.0, "type": "round_number"}]
+            data = rc.extract_football_field(docs)
+            support = next(r for r in data["rows"]
+                           if r["label"] == "Ladder support")
+            self.assertEqual(support["kind"], "dot")
+            self.assertEqual(support["lo"], 85.0)
+            self.assertEqual(support["hi"], 85.0)
 
 
 class TestExtractScoreBars(unittest.TestCase):
@@ -417,7 +500,9 @@ class TestExtractPriceVolume(unittest.TestCase):
     def test_price_volume_shelves_capped_to_nearest(self):
         # A dense ladder (many rungs) must be pruned to the few shelves nearest
         # the current price so labels do not overlap into an unreadable stack
-        # (the price_volume mockup-nit / real-bundle bug). Cap = 4.
+        # (the price_volume mockup-nit / real-bundle bug). Cap reduced 4 -> 3
+        # (review finding #1): four right-edge labels within ~$96 overprinted
+        # each other and the price dot.
         with tempfile.TemporaryDirectory() as d:
             docs = _mk_bundle(d)
             # Inject a 12-rung ladder like the real MU bundle.
@@ -425,8 +510,8 @@ class TestExtractPriceVolume(unittest.TestCase):
                 {"level": float(x), "type": "swing_low"}
                 for x in (40, 55, 68, 82, 90, 95, 105, 112, 120, 130, 140, 149)]
             data = rc.extract_price_volume(docs)
-            self.assertLessEqual(len(data["shelves"]), 4)
-            # The kept shelves are the ones closest to last (100): 95, 105, 90/112.
+            self.assertLessEqual(len(data["shelves"]), 3)
+            # The kept shelves are the ones closest to last (100): 95, 105, 90.
             kept = sorted(s["level"] for s in data["shelves"])
             self.assertIn(95.0, kept)
             self.assertIn(105.0, kept)

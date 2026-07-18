@@ -59,8 +59,73 @@ DETAIL_CHARTS = [
 
 # ~1 trading year window for the price/pe series.
 _YEAR_SESSIONS = 252
-# Cap price-chart ladder shelves to the few nearest the price (label legibility).
-_MAX_SHELVES = 4
+# Cap price-chart ladder shelves to the few nearest the last price (label
+# legibility). Reduced from 4 -> 3: with tightly-clustered real ladders four
+# right-edge labels overprint each other and the price dot (review finding #1).
+_MAX_SHELVES = 3
+
+
+# --------------------------------------------------------------------------- #
+# Pure geometry helpers (NO matplotlib) -- unit-tested for exact positions.
+# --------------------------------------------------------------------------- #
+
+def stagger_positions(values, min_gap):
+    """Push a set of label y-values apart so adjacent labels clear ``min_gap``.
+
+    PURE. Given label positions (any order) and a minimum vertical gap, return a
+    list -- ALIGNED to the input order -- of adjusted positions that (a) preserve
+    the original ordering of the values, (b) guarantee every adjacent pair is at
+    least ``min_gap`` apart, and (c) push symmetrically so the adjusted cluster
+    keeps the same mean as the input (labels spread up AND down, never all one
+    way). Values already spaced >= ``min_gap`` are returned unchanged.
+
+    Examples (exact, pinned by unit test):
+      stagger_positions([850, 864], 40) -> [837.0, 877.0]   # span 14 -> 40, recentred
+      stagger_positions([100, 200], 40) -> [100.0, 200.0]   # already spaced: unchanged
+    """
+    n = len(values)
+    if n == 0:
+        return []
+    if n == 1:
+        return [float(values[0])]
+
+    # Work in value-sorted order, remembering the original slot of each item.
+    order = sorted(range(n), key=lambda i: values[i])
+    sorted_vals = [float(values[i]) for i in order]
+
+    # Forward pass: shove each label up to at least prev + min_gap.
+    adjusted = [sorted_vals[0]]
+    for v in sorted_vals[1:]:
+        adjusted.append(max(v, adjusted[-1] + min_gap))
+
+    # Re-centre the whole adjusted stack onto the original mean so the spread is
+    # symmetric (up and down) rather than only-upward.
+    shift = (sum(sorted_vals) - sum(adjusted)) / n
+    adjusted = [a + shift for a in adjusted]
+
+    # Scatter back to the caller's original ordering.
+    out = [0.0] * n
+    for slot, val in zip(order, adjusted):
+        out[slot] = val
+    return out
+
+
+def clamp_callout_y(y, ylim, pad_frac=0.04):
+    """Clamp a callout's y so its text stays inside the axes with a small pad.
+
+    PURE. ``ylim`` is ``(low, high)``; ``pad_frac`` is a fraction of the span
+    reserved at each edge. Returns ``y`` unchanged when already inside the padded
+    band, else the nearest padded edge -- so an event tag lifted toward the top of
+    the figure no longer clips the upper margin (review finding #2).
+    """
+    lo, hi = float(ylim[0]), float(ylim[1])
+    if hi < lo:
+        lo, hi = hi, lo
+    pad = (hi - lo) * pad_frac
+    lo_p, hi_p = lo + pad, hi - pad
+    if lo_p > hi_p:  # degenerate span: pin to the midpoint.
+        return (lo + hi) / 2.0
+    return min(max(float(y), lo_p), hi_p)
 
 
 # --------------------------------------------------------------------------- #
@@ -175,8 +240,10 @@ def extract_price_volume(docs):
     for cat in (_snap(docs).get("events", {}).get("catalysts") or []):
         d = cat.get("date")
         if d in date_set:
+            # Tag truncated at 24 chars w/ ellipsis (review finding #2): short
+            # enough to sit over the series without running off the top margin.
             events.append({"date": d, "label": _short_event(cat.get("event", ""),
-                                                            limit=18)})
+                                                            limit=24)})
     ne = _snap(docs).get("events", {}).get("next_earnings") or {}
     if ne.get("date") in date_set:
         events.append({"date": ne["date"], "label": "Earnings"})
@@ -222,14 +289,24 @@ def extract_football_field(docs):
         return None
     rows = []
 
-    # Ladder supports below the current price (from technical ladder).
+    # Ladder-support anchor (review finding #5): the OLD contract spanned the
+    # band from the LOWEST to the HIGHEST support below the price -- on a real
+    # ladder that is min..max of a dozen rungs (MU: 370..850), a ~480-wide bar
+    # that says nothing about where support actually sits. The anchor that
+    # matters is the floor DIRECTLY beneath the price, so the NEW contract is the
+    # band between the TWO nearest proven supports below last (MU: 803.5..850);
+    # with only one support below, it is a single dot at that level.
     tech = docs.get("module_technical") or {}
     supports = sorted(
         [float(l["level"]) for l in (tech.get("ladder") or [])
          if l.get("level") is not None and float(l["level"]) < last])
-    if supports:
-        rows.append({"label": "Ladder support", "lo": supports[0],
-                     "hi": supports[-1], "kind": "band", "color": "accent"})
+    nearest = supports[-2:]  # up to the two closest below the price
+    if len(nearest) >= 2:
+        rows.append({"label": "Ladder support", "lo": nearest[0],
+                     "hi": nearest[1], "kind": "band", "color": "accent"})
+    elif len(nearest) == 1:
+        rows.append({"label": "Ladder support", "lo": nearest[0],
+                     "hi": nearest[0], "kind": "dot", "color": "accent"})
 
     # Valuation floor from the risk downside_map.
     risk = docs.get("module_risk") or {}
@@ -533,18 +610,33 @@ def draw_price_volume(data, path):
     # Reserve right-margin room so shelf labels sit clear of the series.
     axp.set_xlim(-2, n + n * 0.16)
 
-    # LABELED ladder shelves (nit fix: no bare markers), staggered vertically so
-    # closely-spaced shelves' labels do not collide.
+    # LABELED ladder shelves (no bare markers). The dashed lines stay at their
+    # TRUE levels, but the right-edge LABELS are pushed apart with the pure
+    # stagger helper so a tight cluster (real MU bundle: shelves within ~$96) no
+    # longer overprints itself or the price dot (review finding #1). A leader
+    # line links each label back to its true level when the two differ.
     ordered = sorted(data["shelves"], key=lambda s: s["level"])
-    for i, sh in enumerate(ordered):
-        axp.axhline(sh["level"], color=tdstyle.GRAY_MID, linewidth=0.7,
+    levels = [sh["level"] for sh in ordered]
+    price_span = (max(data["closes"]) - min(data["closes"])) or 1.0
+    label_gap = price_span * 0.06  # min vertical gap between adjacent labels
+    label_ys = stagger_positions(levels, label_gap)
+    for sh, lvl, ly in zip(ordered, levels, label_ys):
+        axp.axhline(lvl, color=tdstyle.GRAY_MID, linewidth=0.7,
                     linestyle=(0, (4, 3)), zorder=2)
-        axp.text(n + 1, sh["level"], sh["label"], va="center", ha="left",
+        if abs(ly - lvl) > 1e-6:
+            axp.plot([n - 0.5, n + 0.8], [lvl, ly], color=tdstyle.GRAY_MID,
+                     linewidth=0.5, alpha=0.6, zorder=2)
+        axp.text(n + 1, ly, sh["label"], va="center", ha="left",
                  fontsize=6.0, color=tdstyle.GRAY_TXT)
 
-    # LABELED event callouts (nit fix: no bare "E"); lifted above the local high
-    # so the tag clears the price line.
-    ymax = max(data["closes"])
+    # LABELED event callouts (no bare "E"); lifted above the local high so the
+    # tag clears the price line, but CLAMPED inside the axes so the rotated text
+    # no longer clips the top figure margin (review finding #2).
+    ymin, ymax = min(data["closes"]), max(data["closes"])
+    ylim_lo = ymin - price_span * 0.05
+    ylim_hi = ymax + price_span * 0.16
+    axp.set_ylim(ylim_lo, ylim_hi)
+    callout_y = clamp_callout_y(ymax + price_span * 0.14, (ylim_lo, ylim_hi))
     for ev in data["events"]:
         xi = date_to_x.get(ev["date"])
         if xi is None:
@@ -553,8 +645,8 @@ def draw_price_volume(data, path):
         axp.scatter([xi], [yv], s=16, marker="^", facecolor="white",
                     edgecolor=tdstyle.ACCENT, linewidth=0.8, zorder=6)
         axp.annotate(ev["label"], xy=(xi, yv),
-                     xytext=(xi, ymax * 1.04), fontsize=6.0,
-                     color=tdstyle.ACCENT, ha="center", va="bottom",
+                     xytext=(xi, callout_y), fontsize=6.0,
+                     color=tdstyle.ACCENT, ha="center", va="top",
                      rotation=90,
                      arrowprops=dict(arrowstyle="-", color=tdstyle.ACCENT,
                                      lw=0.5, alpha=0.6))
@@ -663,26 +755,38 @@ def draw_football_field(data, path):
     color_map = {"accent": tdstyle.ACCENT, "gray": tdstyle.GRAY_MID,
                  "red": tdstyle.RED, "green": tdstyle.GREEN}
     rows = data["rows"]
+    last = data["last"]
+    # Anchor endpoint labels that fall within 2% of the now-line x are dropped
+    # so they do not collide with the "$<last> now" label (review finding #3).
+    all_vals = [v for r in rows for v in (r["lo"], r["hi"])]
+    span = (max(all_vals + [last]) - min(all_vals + [last])) or 1.0
+    near_now = span * 0.02
+
+    def _endpoint_label(xval, yi, ha, text):
+        if abs(xval - last) <= near_now:
+            return  # too close to the now-line -> skip to avoid overprint
+        ax.text(xval, yi, text, va="center", ha=ha, fontsize=6.0,
+                color=tdstyle.GRAY_TXT)
+
     y = list(range(len(rows)))[::-1]
     for yi, r in zip(y, rows):
         col = color_map.get(r["color"], tdstyle.ACCENT)
         if r["kind"] == "band" and r["hi"] > r["lo"]:
             ax.plot([r["lo"], r["hi"]], [yi, yi], color=col, linewidth=7.0,
                     solid_capstyle="butt", alpha=0.85, zorder=3)
-            ax.text(r["lo"], yi, "%.0f  " % r["lo"], va="center", ha="right",
-                    fontsize=6.0, color=tdstyle.GRAY_TXT)
-            ax.text(r["hi"], yi, "  %.0f" % r["hi"], va="center", ha="left",
-                    fontsize=6.0, color=tdstyle.GRAY_TXT)
+            _endpoint_label(r["lo"], yi, "right", "%.0f  " % r["lo"])
+            _endpoint_label(r["hi"], yi, "left", "  %.0f" % r["hi"])
         else:
             ax.scatter([r["lo"]], [yi], s=42, color=col, zorder=5)
-            ax.text(r["lo"], yi, "  %.0f" % r["lo"], va="center", ha="left",
-                    fontsize=6.0, color=tdstyle.GRAY_TXT)
+            _endpoint_label(r["lo"], yi, "left", "  %.0f" % r["lo"])
     ax.set_yticks(y)
     ax.set_yticklabels([r["label"] for r in rows], fontsize=7.0,
                        color=tdstyle.INK)
-    ax.axvline(data["last"], color=tdstyle.INK, linewidth=0.9,
+    ax.axvline(last, color=tdstyle.INK, linewidth=0.9,
                linestyle=(0, (3, 2)), zorder=4)
-    ax.text(data["last"], len(rows) - 0.4, " $%.0f now" % data["last"],
+    # "now" label offset to the RIGHT of the dashed line at the TOP so it never
+    # sits on top of a bar-endpoint label (review finding #3).
+    ax.text(last + span * 0.015, len(rows) - 0.4, "$%.0f now" % last,
             rotation=90, fontsize=6.2, color=tdstyle.INK, va="top", ha="left",
             fontweight="bold")
     for side in ("top", "right", "left"):
@@ -692,7 +796,8 @@ def draw_football_field(data, path):
     ax.set_axisbelow(True)
     tdstyle.kicker(ax, "Valuation Anchors")
     tdstyle.why(fig, "Where the price sits relative to every anchor.")
-    fig.subplots_adjust(left=0.24, right=0.97, top=0.90, bottom=0.08)
+    # bottom >= 0.16 so the why() caption clears the x-tick labels (finding #4).
+    fig.subplots_adjust(left=0.24, right=0.97, top=0.90, bottom=0.16)
     _save(plt, fig, path)
 
 
