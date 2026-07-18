@@ -7,3 +7,4 @@ snapshot_*.json
 .DS_Store
 trading_desk_config.json
 trading_desk_config/
+trading_desk_*/
