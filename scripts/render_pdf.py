@@ -1752,6 +1752,64 @@ def _draw_context_disclosure(doc, y_top):
     return y - 12
 
 
+# The FINDINGS footnote type sizes (shared by the draw path and the pure
+# height helper so a measured height can never drift from the render).
+_FINDINGS_SIZE = 6.6
+_FINDINGS_LEADING = 8.4
+
+
+def _finding_lines(doc, finding, max_w):
+    """Word-wrapped lines for a single finding footnote (pure; no drawing).
+
+    Composes the ``id  claim  [source]`` line and greedy-wraps it to ``max_w``.
+    Isolated from the draw loop so the wrapped height (``len * leading``) can be
+    unit-tested and reused by the pagination measurement without duplicating the
+    line composition.
+    """
+    fid = (finding or {}).get("id", "")
+    claim = (finding or {}).get("claim", "")
+    source = (finding or {}).get("source", "")
+    line = "%s  %s  [%s]" % (fid, claim, source)
+    return doc.wrap(line, doc.FONT, _FINDINGS_SIZE, max_w)
+
+
+def _draw_findings_block(doc, findings, y, page_bottom):
+    """Draw the FINDINGS footnote block, spilling to new pages when exhausted.
+
+    Each finding is measured (wrapped height) before it is drawn; when the next
+    finding would cross ``page_bottom`` (the footer band), the current page is
+    closed and a fresh page opens under a ``FINDINGS (continued)`` kicker. This
+    mirrors the measured two-up packing used for the evidence dimensions: the
+    footer is never overlapped and no finding is truncated mid-sentence. Returns
+    the y reached on the final page.
+    """
+    if not findings:
+        return y
+    M = doc.MARGIN
+    W = doc.CONTENT_W
+
+    def _kicker(yk, label):
+        doc.text(M, yk, label, font=doc.FONT_B, size=7.4, rgb=doc.GRAY_MD)
+        doc.hairline(M, yk - 3, M + W, rgb=doc.GRAY_LT)
+        return yk - 11
+
+    y = _kicker(y, "FINDINGS")
+    for f in findings:
+        lines = _finding_lines(doc, f, W - 4)
+        block_h = len(lines) * _FINDINGS_LEADING + 1
+        # Would this finding cross the footer band? Continue on a fresh page.
+        if y - block_h < page_bottom:
+            doc.end_page()
+            top = doc.begin_page()
+            y = _kicker(top - 12, "FINDINGS (continued)")
+        for ln in lines:
+            doc.text(M + 4, y, ln, font=doc.FONT, size=_FINDINGS_SIZE,
+                     rgb=doc.GRAY_MD)
+            y -= _FINDINGS_LEADING
+        y -= 1
+    return y
+
+
 def _draw_context_narrative(doc, docs, context, y_top):
     """Render the CONTEXT NARRATIVE sections from a STAMPED module_context.
 
@@ -1759,10 +1817,15 @@ def _draw_context_narrative(doc, docs, context, y_top):
     STOCK (live_tape dated entries), THE CASES (bull/base/bear narratives +
     conditions, values tied to the scenario fan by the composite's scenario
     reasoning above), RISKS (ARGUED) (risk/why/anchor table), and a FINDINGS
-    footnote block (id -> claim -> source, small gray). Returns y reached.
+    footnote block (id -> claim -> source, small gray). The findings block is
+    height-aware: it spills to a ``FINDINGS (continued)`` page rather than
+    overrunning the footer. Returns y reached on the final page.
     """
     M = doc.MARGIN
     W = doc.CONTENT_W
+    # Footer band: keep findings clear of the p N/M hairline (matches the packing
+    # geometry in render_detail: page_bottom == MARGIN + 24).
+    page_bottom = doc.MARGIN + 24
     doc.section_head(M, y_top, "COMPANY CONTEXT", w=W)
     y = y_top - 16
 
@@ -1801,9 +1864,12 @@ def _draw_context_narrative(doc, docs, context, y_top):
             event = ev.get("event", "")
             why = ev.get("why_it_matters", "")
             head = "%s — %s" % (date, event)
-            doc.text(M + 6, y, doc.truncate(head, doc.FONT_B, 7.4, W - 6),
-                     font=doc.FONT_B, size=7.4, rgb=doc.INK)
-            y -= 9.6
+            # Wrap the title on word boundaries (max 2 lines) instead of hard
+            # mid-word truncation, so long tape headlines stay legible.
+            head_lines = doc.wrap(head, doc.FONT_B, 7.4, W - 6)[:2]
+            for hl in head_lines:
+                doc.text(M + 6, y, hl, font=doc.FONT_B, size=7.4, rgb=doc.INK)
+                y -= 9.6
             if why:
                 for ln in doc.wrap(str(why), doc.FONT, 7.2, W - 12):
                     doc.text(M + 12, y, ln, font=doc.FONT, size=7.2,
@@ -1883,21 +1949,10 @@ def _draw_context_narrative(doc, docs, context, y_top):
             y -= 2
         y -= 4
 
-    # -- FINDINGS footnote block (id -> claim -> source). --
+    # -- FINDINGS footnote block (id -> claim -> source). Height-aware: spills to
+    # a FINDINGS (continued) page rather than overrunning the footer. --
     findings = context.get("findings") or []
-    if findings:
-        doc.text(M, y, "FINDINGS", font=doc.FONT_B, size=7.4, rgb=doc.GRAY_MD)
-        doc.hairline(M, y - 3, M + W, rgb=doc.GRAY_LT)
-        y -= 11
-        for f in findings:
-            fid = f.get("id", "")
-            claim = f.get("claim", "")
-            source = f.get("source", "")
-            line = "%s  %s  [%s]" % (fid, claim, source)
-            for ln in doc.wrap(line, doc.FONT, 6.6, W - 4):
-                doc.text(M + 4, y, ln, font=doc.FONT, size=6.6, rgb=doc.GRAY_MD)
-                y -= 8.4
-            y -= 1
+    y = _draw_findings_block(doc, findings, y, page_bottom)
     return y
 
 
@@ -1981,6 +2036,24 @@ def _measure_dimension_height(docs_ticker_asof, footer_bits, bundle, docs, dim,
     return y_top - y_end
 
 
+def _measure_context_pages(docs_ticker_asof, footer_bits, docs, context, y_top):
+    """How many pages the CONTEXT NARRATIVE consumes, WITHOUT drawing to the doc.
+
+    The findings block is height-aware and may spill onto FINDINGS (continued)
+    pages, so the context page count is derived from a measurement pass on a
+    throwaway canvas (same layout code) -- this keeps the p N/M footer count exact
+    even when a long findings registry overflows a single page.
+    """
+    scratch = Doc(os.devnull, docs_ticker_asof[0], "Detail",
+                  docs_ticker_asof[1], footer_bits)
+    scratch.total_pages = 1
+    scratch.begin_page()
+    _draw_context_narrative(scratch, docs, context, y_top)
+    # Do NOT save -- scratch canvas discarded. _page_no counts begin_page() calls,
+    # which equals the number of context pages actually rendered.
+    return scratch._page_no
+
+
 # The chart-to-section mapping (fix 4a). subscore_breakdown is a grid; here we
 # keep only the two per-dimension detail charts that belong under each EVIDENCE
 # dimension. Charts that describe RISK (drawdown_history / vol_regime) go under
@@ -2039,11 +2112,19 @@ def render_detail(bundle, docs, slots, diff, prev_date, out_path):
     if cur:
         pages.append(cur)
 
+    # Context page count: 0 without a stamped module (the one-line disclosure
+    # rides on the why-this-call page); otherwise >=1, derived from a measurement
+    # pass because a long FINDINGS registry spills onto FINDINGS (continued) pages.
+    context_top = page_top
+    context_pages = (
+        _measure_context_pages(ticker_asof, df, docs, context, context_top)
+        if context_ok else 0)
+
     # 2 exec + 1 why-this-call (carries the context DISCLOSURE inline when no
-    # stamped module) + a dedicated context page ONLY when the narrative exists
-    # (fix 4e: a one-line disclosure never burns a near-empty page) + packed dim
-    # pages + 1 options + 1 downside/monitoring + 1 appendix.
-    doc.total_pages = 2 + 1 + (1 if context_ok else 0) + len(pages) + 3
+    # stamped module) + the measured context page(s) ONLY when the narrative
+    # exists (fix 4e: a one-line disclosure never burns a near-empty page) +
+    # packed dim pages + 1 options + 1 downside/monitoring + 1 appendix.
+    doc.total_pages = 2 + 1 + context_pages + len(pages) + 3
 
     # Exec pages first (repeated).
     _draw_exec_page1(doc, bundle, docs, slots, diff, prev_date)

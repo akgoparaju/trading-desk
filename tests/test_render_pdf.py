@@ -152,6 +152,37 @@ def _context_doc(stamped=True):
     return mod
 
 
+def _context_doc_many_findings(n=20):
+    """A stamped context module whose FINDINGS registry is long enough to spill.
+
+    Each finding carries a long, multi-line claim so that ``n`` of them cannot fit
+    in the footnote band of a single page -- the height-aware block must continue
+    on a FINDINGS (continued) page. Also gives the first live_tape entry a very
+    long title to exercise word-boundary wrapping (no mid-word 'ami…' truncation).
+    """
+    mod = _context_doc(stamped=True)
+    long_claim = (
+        "This is a deliberately long finding claim engineered so that each "
+        "individual finding wraps across roughly three measured lines, "
+        "guaranteeing that a registry of twenty such findings comfortably "
+        "exceeds the footnote band of any single page and must therefore "
+        "continue on a dedicated FINDINGS continuation page without ever "
+        "colliding with or overrunning the contract-pinned page footer band")
+    mod["findings"] = [
+        {"id": "C%d" % i, "claim": "%s (item %d)." % (long_claim, i),
+         "source": "coverage/research.md §Section-%d / snapshot leaf %d" % (i, i)}
+        for i in range(1, n + 1)
+    ]
+    mod["live_tape"] = [
+        {"date": "2026-07-15",
+         "event": ("Second consecutive down day: MU fell another -5.65% "
+                   "(904.28 to 853.20), extending the prior drop to roughly "
+                   "-13% over two sessions amid a semis-wide selloff (C1)"),
+         "why_it_matters": "momentum break confirms the risk-off tape (C1)"},
+    ]
+    return mod
+
+
 def _write_context(bundle, module):
     path = os.path.join(bundle, "module_context.json")
     with open(path, "w") as fh:
@@ -896,6 +927,51 @@ class TestRenderSmoke(unittest.TestCase):
             # the stamped module adds a dedicated page (>= the no-context floor).
             self.assertGreaterEqual(
                 _pdf_page_count(os.path.join(d, "MU_Detail_2026-07-16.pdf")), 8)
+
+    def test_findings_block_spills_to_continuation_page(self):
+        # A long FINDINGS registry (20 multi-line findings) can't fit the footnote
+        # band of one context page, so the height-aware block must spill onto a
+        # FINDINGS (continued) page -- growing the total page count vs the small
+        # (2-finding) fixture -- without raising and without truncating findings.
+        with tempfile.TemporaryDirectory() as small, \
+                tempfile.TemporaryDirectory() as big:
+            self._prep_stamped(small, context=_context_doc(stamped=True))
+            self._prep_stamped(big, context=_context_doc_many_findings(20))
+            rc_s, out_s, err_s = _render(small, "detail")
+            rc_b, out_b, err_b = _render(big, "detail")
+            self.assertEqual(rc_s, 0, out_s + err_s)
+            self.assertEqual(rc_b, 0, out_b + err_b)
+            small_pdf = os.path.join(small, "MU_Detail_2026-07-16.pdf")
+            big_pdf = os.path.join(big, "MU_Detail_2026-07-16.pdf")
+            # The findings overflow adds at least one page.
+            self.assertGreater(_pdf_page_count(big_pdf), _pdf_page_count(small_pdf))
+            # The continuation kicker rendered; every finding id is present (none
+            # dropped or truncated away by the spill).
+            text = _pdf_text(big_pdf)
+            self.assertIn(b"FINDINGS (continued)", text)
+            self.assertIn(b"C1", text)
+            self.assertIn(b"C20", text)
+
+    def test_finding_lines_wraps_to_multiple_lines(self):
+        # The pure per-finding wrap helper: a long claim wraps to >1 line, each
+        # within the max width, so the block's measured height is len*leading.
+        doc = rp.Doc(os.devnull, "MU", "Detail", "2026-07-16", {})
+        max_w = doc.CONTENT_W - 4
+        finding = {"id": "C1",
+                   "claim": ("A deliberately long finding claim that must wrap "
+                             "across several measured lines because it clearly "
+                             "exceeds the available footnote width by a wide "
+                             "margin and keeps going well past a single line"),
+                   "source": "coverage/research.md §Overview / snapshot leaf"}
+        lines = rp._finding_lines(doc, finding, max_w)
+        self.assertGreater(len(lines), 1)
+        for ln in lines:
+            self.assertLessEqual(
+                doc.string_width(ln, doc.FONT, rp._FINDINGS_SIZE), max_w)
+        # composition: the id leads and the source is bracketed at the tail.
+        joined = " ".join(lines)
+        self.assertTrue(joined.startswith("C1"))
+        self.assertIn("[coverage/research.md", joined)
 
     def test_options_section_renders_full_module(self):
         # The options section renders the FULL module (fix 4b), not 2 rows:

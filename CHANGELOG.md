@@ -11,6 +11,18 @@ scoring), **C2** (`company-context` skill + `report_qc.py --context` provenance 
 structure gate), **C3** (coverage-first pipeline wiring across the SKILLs), and **C4**
 (detail report argues the case).
 
+- **Layout fix: findings-block pagination + live_tape title wrapping (context page
+  overflow).** The COMPANY CONTEXT page's FINDINGS footnote block is now height-aware:
+  each finding's wrapped height is measured before it is drawn, and when the footnote
+  band is exhausted the block continues on a `FINDINGS (continued)` page (mirroring the
+  measured two-up dimension packing) instead of overrunning the page footer and
+  truncating findings mid-sentence. `live_tape` entry titles wrap to 2 lines on word
+  boundaries rather than hard mid-word truncation (`…ami` → full title). A measurement
+  pass (`_measure_context_pages`) keeps the `p N/M` footer exact when findings spill.
+  Regression: 20 long-finding fixture renders extra page with no exception; pure
+  `_finding_lines` wrapped-height unit test.
+  - Files: `scripts/render_pdf.py`, `tests/test_render_pdf.py`.
+
 - **Review fix-round (post-C4): unit-suffix provenance, C-ID referential integrity.**
   Context number-provenance no longer swallows financial shorthand — `42B` / `9999M`
   / `30x` / `45pct` / `200bps` / `3nm` now have their number scanned against the
