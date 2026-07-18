@@ -577,7 +577,7 @@ _CUSTOM_BALANCED = {"technical": .30, "fundamental": .30, "sentiment": .15,
                     "risk": .15, "thesis_conviction": .10}
 
 
-def _write_config(dir_, profiles, set_name="anil-v1", version="2026-07-18",
+def _write_config(dir_, profiles, set_name="custom-v1", version="2026-07-18",
                   name="trading_desk_config.json"):
     """Write a trading_desk_config.json with a weights block; return its path."""
     cfg = {"weights": {"set_name": set_name, "version": version,
@@ -627,15 +627,15 @@ class TestWeightsConfigValidation(unittest.TestCase):
     def test_label_is_custom_setname_at_version(self):
         with tempfile.TemporaryDirectory() as d:
             path = _write_config(d, {"balanced": _CUSTOM_BALANCED},
-                                 set_name="anil-v1", version="2026-07-18")
+                                 set_name="custom-v1", version="2026-07-18")
             _, label = sc.load_weights_config(path)
-            self.assertEqual(label, "CUSTOM anil-v1@2026-07-18")
+            self.assertEqual(label, "CUSTOM custom-v1@2026-07-18")
 
 
 class TestResolveWeightsFallback(unittest.TestCase):
     def test_customized_profile_uses_custom(self):
         profiles = {"balanced": _CUSTOM_BALANCED}
-        label = "CUSTOM anil-v1@2026-07-18"
+        label = "CUSTOM custom-v1@2026-07-18"
         w, lab = sc.resolve_weights("balanced", profiles, label)
         self.assertEqual(w, _CUSTOM_BALANCED)
         self.assertEqual(lab, label)
@@ -644,7 +644,7 @@ class TestResolveWeightsFallback(unittest.TestCase):
         # Only balanced customized -> trader / long-term keep the standard table
         # AND the standard label (per-profile fallback).
         profiles = {"balanced": _CUSTOM_BALANCED}
-        label = "CUSTOM anil-v1@2026-07-18"
+        label = "CUSTOM custom-v1@2026-07-18"
         w, lab = sc.resolve_weights("trader", profiles, label)
         self.assertEqual(w, sc.WEIGHTS["trader"])
         self.assertEqual(lab, sc.STANDARD_WEIGHT_SET)
@@ -684,7 +684,7 @@ class TestCompositeUnderCustomWeights(unittest.TestCase):
 class TestSensitivityStandardComparison(unittest.TestCase):
     def test_custom_sensitivity_carries_standard_comparison(self):
         profiles = {"balanced": _CUSTOM_BALANCED}
-        label = "CUSTOM anil-v1@2026-07-18"
+        label = "CUSTOM custom-v1@2026-07-18"
         sens = sc.build_sensitivity(
             _modules(), _SCENARIOS, _LAST, **_FLAGS,
             custom_profiles=profiles, custom_label=label)
@@ -723,8 +723,8 @@ class TestWeightSetStamping(unittest.TestCase):
              "price": {"last": 100.0}},
             _modules(), _SCENARIOS, "r", "balanced", **_FLAGS, entry_levels=[],
             custom_profiles={"balanced": _CUSTOM_BALANCED},
-            custom_label="CUSTOM anil-v1@2026-07-18")
-        self.assertEqual(doc["weight_set"], "CUSTOM anil-v1@2026-07-18")
+            custom_label="CUSTOM custom-v1@2026-07-18")
+        self.assertEqual(doc["weight_set"], "CUSTOM custom-v1@2026-07-18")
         self.assertAlmostEqual(doc["score"], 60.1, places=4)
 
 
@@ -763,7 +763,7 @@ class TestWeightsConfigCLI(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         with open(os.path.join(self.dir, "module_composite.json")) as fh:
             doc = json.load(fh)
-        self.assertEqual(doc["weight_set"], "CUSTOM anil-v1@2026-07-18")
+        self.assertEqual(doc["weight_set"], "CUSTOM custom-v1@2026-07-18")
         self.assertAlmostEqual(doc["score"], 60.1, places=4)
         # standard_comparison visible on the balanced sensitivity row.
         self.assertAlmostEqual(
@@ -811,7 +811,7 @@ class TestWeightsConfigCLI(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         with open(os.path.join(self.dir, "module_composite.json")) as fh:
             doc = json.load(fh)
-        self.assertEqual(doc["weight_set"], "CUSTOM anil-v1@2026-07-18")
+        self.assertEqual(doc["weight_set"], "CUSTOM custom-v1@2026-07-18")
 
     def test_renormalization_under_custom_cli(self):
         os.remove(os.path.join(self.dir, "module_risk.json"))
@@ -823,7 +823,7 @@ class TestWeightsConfigCLI(unittest.TestCase):
             doc = json.load(fh)
         self.assertAlmostEqual(doc["score"], 63.6471, places=4)
         self.assertIsNotNone(doc["renormalization_note"])
-        self.assertEqual(doc["weight_set"], "CUSTOM anil-v1@2026-07-18")
+        self.assertEqual(doc["weight_set"], "CUSTOM custom-v1@2026-07-18")
 
 
 if __name__ == "__main__":

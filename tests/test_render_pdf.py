@@ -850,6 +850,33 @@ class TestAssembleMethodology(unittest.TestCase):
         self.assertEqual(std, _sc.WEIGHTS["long-term"])
         self.assertEqual(used["fundamental"], 0.50)  # the custom tilt
 
+    def test_custom_comparison_scores_surfaced_from_sensitivity(self):
+        # When custom, sensitivity.standard_comparison lands on the page as
+        # (profile, custom score/grade, standard score/grade) tuples.
+        comp = _composite_custom()
+        comp["sensitivity"] = {
+            "trader": {"score": 58.2, "grade": "C",
+                       "standard_comparison": {"score": 57.0, "grade": "C"}},
+            "balanced": {"score": 60.1, "grade": "C",
+                         "standard_comparison": {"score": 59.9, "grade": "C"}},
+            "long-term": {"score": 63.6, "grade": "B",
+                          "standard_comparison": {"score": 61.0, "grade": "C"}},
+            "weight_set": "CUSTOM deep-value@1.0",
+        }
+        blocks = rp.assemble_methodology(
+            self._docs(_fundamental_doc(), comp), None)
+        cw = self._block(blocks, "composite_weights")
+        self.assertEqual(cw["comparison"],
+                         [("trader", 58.2, "C", 57.0, "C"),
+                          ("balanced", 60.1, "C", 59.9, "C"),
+                          ("long-term", 63.6, "B", 61.0, "C")])
+
+    def test_standard_weights_carry_no_comparison(self):
+        blocks = rp.assemble_methodology(
+            self._docs(_fundamental_doc(), _composite_doc()), None)
+        cw = self._block(blocks, "composite_weights")
+        self.assertEqual(cw["comparison"], [])
+
     def test_scale_block_present_carries_scale_fields(self):
         scale = _memory_semis_scale()
         blocks = rp.assemble_methodology(

@@ -57,6 +57,10 @@ _DEFAULT_BAND_SPREAD = 0.30
 # registry the fundamental moat flag cites).
 _CITATION_RE = re.compile(r"^C\d+$")
 
+# The effective date is part of the forward-only versioning contract; a scale
+# whose effective date can't be ordered can't be governed.
+_EFFECTIVE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 
 # --------------------------------------------------------------------------- #
 # Validation
@@ -107,6 +111,8 @@ def validate_scale(scale) -> list:
             issues.append(f"missing required field: {field}")
         elif not isinstance(v, str) or not v.strip():
             issues.append(f"field {field} must be a non-empty string")
+        elif field == "effective" and not _EFFECTIVE_RE.match(v.strip()):
+            issues.append("field effective must be a YYYY-MM-DD date")
 
     # -- optional name -----------------------------------------------------
     if "name" in scale and not isinstance(scale["name"], str):

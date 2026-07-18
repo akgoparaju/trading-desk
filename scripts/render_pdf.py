@@ -1821,10 +1821,22 @@ def assemble_methodology(bundle_modules, scale_json):
         # for comparison, pinned from the WEIGHTS table.
         std = score_composite.WEIGHTS.get(profile)
         weight_rows.append((profile, used_weights, std if is_custom else None))
+    # When custom, the sensitivity block carries the SAME call recomputed under
+    # standard weights per profile — surface those scores so the tuning's effect
+    # on the number (not just the weight columns) is visible on the page.
+    comparison = []
+    if is_custom:
+        sens = comp.get("sensitivity") or {}
+        for prof in ("trader", "balanced", "long-term"):
+            entry = sens.get(prof) or {}
+            std_cmp = entry.get("standard_comparison")
+            if std_cmp is not None:
+                comparison.append((prof, entry.get("score"), entry.get("grade"),
+                                   std_cmp.get("score"), std_cmp.get("grade")))
     blocks.append({
         "kind": "composite_weights", "title": "Composite weights",
         "weight_set": weight_set, "custom": is_custom, "profile": profile,
-        "dims": dim_order, "rows": weight_rows,
+        "dims": dim_order, "rows": weight_rows, "comparison": comparison,
     })
 
     # -- 3. Fundamental valuation formula set ------------------------------
@@ -2034,6 +2046,18 @@ def _draw_methodology(doc, bundle, docs, y_top):
                                  _fmt_num(std.get(d)), font=doc.FONT_I, size=6.8,
                                  rgb=doc.GRAY_MD, align="center")
                     y -= 10.5
+            # Score comparison lines: the same call recomputed under standard v1
+            # (from sensitivity.standard_comparison) so the tuning's effect on the
+            # NUMBER is on the page, not just the weight columns.
+            for prof, c_score, c_grade, s_score, s_grade in block.get(
+                    "comparison", []):
+                _ensure(11)
+                doc.text(M + 6, y,
+                         "%s: %s (%s) under this weight set · %s (%s) under "
+                         "standard v1" % (prof, _fmt_num(c_score), c_grade,
+                                          _fmt_num(s_score), s_grade),
+                         font=doc.FONT_I, size=7.0, rgb=doc.GRAY_DK)
+                y -= 9.8
             y -= 6
 
         elif kind == "valuation_formula":

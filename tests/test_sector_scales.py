@@ -128,6 +128,13 @@ class TestValidateMissingFields(unittest.TestCase):
         issues = self._missing("effective")
         self.assertTrue(any("effective" in i for i in issues))
 
+    def test_effective_must_be_iso_date(self):
+        # forward-only governance needs orderable dates, not prose.
+        scale = _pb_scale()
+        scale["effective"] = "July 2026"
+        issues = ss.validate_scale(scale)
+        self.assertTrue(any("YYYY-MM-DD" in i for i in issues))
+
     def test_missing_basis(self):
         issues = self._missing("basis")
         self.assertTrue(any("basis" in i for i in issues))
