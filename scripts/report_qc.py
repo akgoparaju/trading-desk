@@ -398,6 +398,34 @@ def build_allowed_versions(*docs_list):
     return versions
 
 
+def build_allowed_stamps(*docs_list):
+    """Governance stamps prose may cite VERBATIM: the fundamental module's
+    ``sector_scale`` ("<name>@<version>") and the composite ``weight_set``'s
+    "<set>@<version>" (with or without its "CUSTOM " prefix).
+
+    Exact-match only. Scale/weight-set versions are not X.Y.Z-shaped (e.g.
+    "2026.1"), so without this their digits orphan in the numeric scan — yet
+    citing the active scale is exactly what disciplined prose should do. The
+    full ``name@version`` IS the identity, so only the full stamp is admitted;
+    a bare version tail ("2026.1" alone) still orphans, and a stamp that is
+    not in the bundle keeps its digits and orphans in the numeric scan.
+    """
+    stamps = set()
+    for docs in docs_list:
+        if docs is None:
+            continue
+        fund = docs.get("module_fundamental") or {}
+        ss = fund.get("sector_scale")
+        if isinstance(ss, str) and "@" in ss:
+            stamps.add(ss)
+        comp = docs.get("module_composite") or {}
+        ws = comp.get("weight_set")
+        if isinstance(ws, str) and "@" in ws:
+            stamps.add(ws)                       # "CUSTOM deep-value@1.0"
+            stamps.add(ws.split(None, 1)[-1])    # "deep-value@1.0"
+    return stamps
+
+
 # --------------------------------------------------------------------------- #
 # Checks.
 # --------------------------------------------------------------------------- #
@@ -442,6 +470,10 @@ def check_number_provenance(report_text, docs, extra_values=None,
         pass by being shape-scrubbed).
       * VERSIONS -- every rubric/expression/schema/plugin version (raw + 'v'-form).
         A version-shaped token not in the set ORPHANS (e.g. v9.99.99).
+      * STAMPS -- governance stamps (sector_scale "name@version", weight_set
+        "CUSTOM set@version") scrubbed as exact strings BEFORE the token scans,
+        so prose may cite the active scale/weight set verbatim; a stamp not in
+        the bundle keeps its digits and orphans numerically.
 
     Page headers: only the three EXACT headers render_report emits are chrome;
     their digits are stripped before scanning. Any other "## Page N" line keeps
@@ -468,6 +500,7 @@ def check_number_provenance(report_text, docs, extra_values=None,
 
     allowed_dates = build_allowed_dates(*docs_for_dv)
     allowed_versions = build_allowed_versions(*docs_for_dv)
+    allowed_stamps = build_allowed_stamps(*docs_for_dv)
 
     orphans = []
 
@@ -476,6 +509,12 @@ def check_number_provenance(report_text, docs, extra_values=None,
     scanned = report_text
     for header in _ALLOWED_PAGE_HEADERS:
         scanned = scanned.replace(header, " ")
+
+    # 1b) Governance stamps: scrub exact bundle-carried stamps (longest first so
+    #     "CUSTOM x@1.0" goes before its "x@1.0" suffix). A fabricated stamp is
+    #     NOT scrubbed — its digits fall through and orphan numerically.
+    for stamp in sorted(allowed_stamps, key=len, reverse=True):
+        scanned = scanned.replace(stamp, " ")
 
     # 2) Version tokens: exact-match, then remove so their digit fragments do not
     #    re-enter the numeric scan.

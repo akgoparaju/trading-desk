@@ -1169,6 +1169,49 @@ class TestNumberExtraction(unittest.TestCase):
         self.assertIn("v0.2.1", vers)
         self.assertNotIn("9.99.99", vers)
 
+    def test_allowed_stamps_collects_scale_and_weight_set(self):
+        docs = {
+            "module_fundamental": {"sector_scale": "memory_semis@2026.1"},
+            "module_composite": {"weight_set": "CUSTOM deep-value@1.0"},
+        }
+        stamps = rq.build_allowed_stamps(docs)
+        self.assertIn("memory_semis@2026.1", stamps)
+        self.assertIn("CUSTOM deep-value@1.0", stamps)
+        self.assertIn("deep-value@1.0", stamps)  # the CUSTOM-prefix-free form
+
+    def test_stamp_cited_verbatim_passes_provenance(self):
+        # V5 live finding: "2026.1" is not X.Y.Z-shaped, so citing the active
+        # scale orphaned its digits. The FULL bundle-carried stamp must pass.
+        docs = {
+            "snapshot": {"meta": {}},
+            "module_fundamental": {"sector_scale": "memory_semis@2026.1"},
+            "module_composite": {"weight_set": "CUSTOM deep-value@1.0"},
+        }
+        res = rq.check_number_provenance(
+            "Scored under the memory_semis@2026.1 scale, "
+            "weights deep-value@1.0.", docs)
+        self.assertTrue(res["passed"], res["detail"])
+
+    def test_fabricated_stamp_orphans(self):
+        docs = {
+            "snapshot": {"meta": {}},
+            "module_fundamental": {"sector_scale": "memory_semis@2026.1"},
+        }
+        res = rq.check_number_provenance(
+            "Scored under memory_semis@2027.9.", docs)
+        self.assertFalse(res["passed"])
+        self.assertIn("2027.9", res["detail"])
+
+    def test_bare_stamp_version_tail_still_orphans(self):
+        # The name@version IS the identity — a bare tail is not admitted.
+        docs = {
+            "snapshot": {"meta": {}},
+            "module_fundamental": {"sector_scale": "memory_semis@2026.1"},
+        }
+        res = rq.check_number_provenance("Scale version 2026.1 applies.", docs)
+        self.assertFalse(res["passed"])
+        self.assertIn("2026.1", res["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()
