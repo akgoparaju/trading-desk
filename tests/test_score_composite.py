@@ -566,5 +566,265 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(a, b)
 
 
+# --------------------------------------------------------------------------- #
+# Weights config (versioned tuning transparency) -- v0.12.0.
+# --------------------------------------------------------------------------- #
+
+# A custom balanced column that sums to 1.0 but weights fundamental/technical
+# heavier and thesis_conviction lighter than the standard table. Pinned:
+#   .30*70 + .30*60 + .15*50 + .15*40 + .10*76 = 60.1   (standard balanced = 59.9)
+_CUSTOM_BALANCED = {"technical": .30, "fundamental": .30, "sentiment": .15,
+                    "risk": .15, "thesis_conviction": .10}
+
+
+def _write_config(dir_, profiles, set_name="anil-v1", version="2026-07-18",
+                  name="trading_desk_config.json"):
+    """Write a trading_desk_config.json with a weights block; return its path."""
+    cfg = {"weights": {"set_name": set_name, "version": version,
+                       "profiles": profiles}}
+    path = os.path.join(dir_, name)
+    with open(path, "w") as fh:
+        json.dump(cfg, fh)
+    return path
+
+
+class TestWeightsConfigValidation(unittest.TestCase):
+    def test_sum_not_one_raises_named(self):
+        with tempfile.TemporaryDirectory() as d:
+            bad = dict(_CUSTOM_BALANCED, thesis_conviction=.20)  # sums 1.10
+            path = _write_config(d, {"balanced": bad})
+            with self.assertRaises(sc.WeightsConfigError) as ctx:
+                sc.load_weights_config(path)
+            msg = str(ctx.exception)
+            self.assertIn("balanced", msg)
+            self.assertIn("1.1", msg)  # the observed sum surfaces
+
+    def test_sum_within_tolerance_ok(self):
+        # 1e-7 drift is inside +/- 1e-6.
+        with tempfile.TemporaryDirectory() as d:
+            near = {"technical": .30, "fundamental": .30, "sentiment": .15,
+                    "risk": .15, "thesis_conviction": .1000001}
+            path = _write_config(d, {"balanced": near})
+            profiles, label = sc.load_weights_config(path)
+            self.assertIn("balanced", profiles)
+
+    def test_unknown_dimension_key_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = _write_config(d, {"balanced": {"technical": .5, "momentum": .5}})
+            with self.assertRaises(sc.WeightsConfigError) as ctx:
+                sc.load_weights_config(path)
+            self.assertIn("momentum", str(ctx.exception))
+
+    def test_no_weights_key_returns_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "trading_desk_config.json")
+            with open(path, "w") as fh:
+                json.dump({"fsi_offer": {"asked": True}}, fh)  # no weights key
+            profiles, label = sc.load_weights_config(path)
+            self.assertIsNone(profiles)
+            self.assertIsNone(label)
+
+    def test_label_is_custom_setname_at_version(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = _write_config(d, {"balanced": _CUSTOM_BALANCED},
+                                 set_name="anil-v1", version="2026-07-18")
+            _, label = sc.load_weights_config(path)
+            self.assertEqual(label, "CUSTOM anil-v1@2026-07-18")
+
+
+class TestResolveWeightsFallback(unittest.TestCase):
+    def test_customized_profile_uses_custom(self):
+        profiles = {"balanced": _CUSTOM_BALANCED}
+        label = "CUSTOM anil-v1@2026-07-18"
+        w, lab = sc.resolve_weights("balanced", profiles, label)
+        self.assertEqual(w, _CUSTOM_BALANCED)
+        self.assertEqual(lab, label)
+
+    def test_absent_profile_falls_back_per_profile(self):
+        # Only balanced customized -> trader / long-term keep the standard table
+        # AND the standard label (per-profile fallback).
+        profiles = {"balanced": _CUSTOM_BALANCED}
+        label = "CUSTOM anil-v1@2026-07-18"
+        w, lab = sc.resolve_weights("trader", profiles, label)
+        self.assertEqual(w, sc.WEIGHTS["trader"])
+        self.assertEqual(lab, sc.STANDARD_WEIGHT_SET)
+
+    def test_no_config_uses_standard(self):
+        w, lab = sc.resolve_weights("balanced", None, None)
+        self.assertEqual(w, sc.WEIGHTS["balanced"])
+        self.assertEqual(lab, "standard v1")
+
+
+class TestCompositeUnderCustomWeights(unittest.TestCase):
+    def test_custom_balanced_pinned(self):
+        # .30*70 + .30*60 + .15*50 + .15*40 + .10*76 = 60.1
+        result = sc.score_composite(_modules(), 76.0, "balanced",
+                                    _CUSTOM_BALANCED)
+        self.assertAlmostEqual(result["score"], 60.1, places=4)
+        # dimensions carry the CUSTOM weights actually used.
+        by = {d["name"]: d for d in result["dimensions"]}
+        self.assertAlmostEqual(by["technical"]["weight"], 0.30, places=6)
+        self.assertAlmostEqual(by["thesis_conviction"]["weight"], 0.10, places=6)
+
+    def test_renormalization_identical_under_custom(self):
+        # risk absent under custom: present .30/.30/.15/.10 sum .85 rescaled to 1.
+        #   composite over present = 63.6471 (hand-recompute).
+        mods = _modules()
+        del mods["risk"]
+        result = sc.score_composite(mods, 76.0, "balanced", _CUSTOM_BALANCED)
+        self.assertAlmostEqual(result["score"], 63.6471, places=4)
+        # weight_renormalized rows are _clean-rounded to 4 dp (stable-JSON), so the
+        # displayed weights sum to ~1.0 within that rounding (not 1e-6 exact).
+        s = sum(d["weight_renormalized"] for d in result["dimensions"])
+        self.assertAlmostEqual(s, 1.0, places=3)
+        self.assertIsNotNone(result["renormalization_note"])
+        self.assertIn("risk", result["renormalization_note"])
+
+
+class TestSensitivityStandardComparison(unittest.TestCase):
+    def test_custom_sensitivity_carries_standard_comparison(self):
+        profiles = {"balanced": _CUSTOM_BALANCED}
+        label = "CUSTOM anil-v1@2026-07-18"
+        sens = sc.build_sensitivity(
+            _modules(), _SCENARIOS, _LAST, **_FLAGS,
+            custom_profiles=profiles, custom_label=label)
+        # top-level weight_set label present + custom.
+        self.assertEqual(sens["weight_set"], label)
+        # balanced customized: custom score 60.1, standard_comparison recomputes 59.9
+        self.assertAlmostEqual(sens["balanced"]["score"], 60.1, places=4)
+        self.assertEqual(sens["balanced"]["grade"], "B")  # >= 60
+        self.assertIn("standard_comparison", sens["balanced"])
+        self.assertAlmostEqual(
+            sens["balanced"]["standard_comparison"]["score"], 59.9, places=4)
+        self.assertEqual(sens["balanced"]["standard_comparison"]["grade"], "C")
+        # trader falls back to standard -> NO standard_comparison (it IS standard).
+        self.assertNotIn("standard_comparison", sens["trader"])
+        self.assertAlmostEqual(sens["trader"]["score"], 62.8, places=4)
+
+    def test_standard_sensitivity_has_standard_label_no_comparison(self):
+        sens = sc.build_sensitivity(_modules(), _SCENARIOS, _LAST, **_FLAGS)
+        self.assertEqual(sens["weight_set"], "standard v1")
+        for profile in ("balanced", "trader", "long-term"):
+            self.assertNotIn("standard_comparison", sens[profile])
+
+
+class TestWeightSetStamping(unittest.TestCase):
+    def test_standard_stamp_no_config(self):
+        doc = sc.build_module(
+            {"meta": {"ticker": "MU", "as_of_utc": "2026-07-16T00:00:00Z"},
+             "price": {"last": 100.0}},
+            _modules(), _SCENARIOS, "r", "balanced", **_FLAGS, entry_levels=[])
+        self.assertEqual(doc["weight_set"], "standard v1")
+        self.assertEqual(doc["sensitivity"]["weight_set"], "standard v1")
+
+    def test_custom_stamp_with_config(self):
+        doc = sc.build_module(
+            {"meta": {"ticker": "MU", "as_of_utc": "2026-07-16T00:00:00Z"},
+             "price": {"last": 100.0}},
+            _modules(), _SCENARIOS, "r", "balanced", **_FLAGS, entry_levels=[],
+            custom_profiles={"balanced": _CUSTOM_BALANCED},
+            custom_label="CUSTOM anil-v1@2026-07-18")
+        self.assertEqual(doc["weight_set"], "CUSTOM anil-v1@2026-07-18")
+        self.assertAlmostEqual(doc["score"], 60.1, places=4)
+
+
+class TestWeightsConfigCLI(unittest.TestCase):
+    def setUp(self):
+        import shutil
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        for name, s in _MOD_SCORES.items():
+            _write_module(self.dir, name, s)
+        _write_snapshot(self.dir)
+        self.scen = _write_scenarios(self.dir)
+
+    def _base_flags(self):
+        return [
+            "--scenarios", self.scen,
+            "--scenario-reasoning", "asymmetric HBM demand",
+            "--variant", "some",
+            "--variant-justification", "gross-margin path differentiated",
+            "--catalyst-clarity", "clear",
+            "--catalyst-clarity-justification", "HBM ramp dated",
+            "--invalidation", "both-legs",
+            "--invalidation-justification", "thesis + trade stops named",
+        ]
+
+    def _run(self, extra=None):
+        cmd = [sys.executable, SCRIPT, "--bundle", self.dir] + self._base_flags()
+        if extra:
+            cmd += extra
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    def test_custom_weights_stamps_and_scores(self):
+        cfg = _write_config(self.dir, {"balanced": _CUSTOM_BALANCED},
+                            name="weights.json")
+        proc = self._run(extra=["--weights-config", cfg])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(self.dir, "module_composite.json")) as fh:
+            doc = json.load(fh)
+        self.assertEqual(doc["weight_set"], "CUSTOM anil-v1@2026-07-18")
+        self.assertAlmostEqual(doc["score"], 60.1, places=4)
+        # standard_comparison visible on the balanced sensitivity row.
+        self.assertAlmostEqual(
+            doc["sensitivity"]["balanced"]["standard_comparison"]["score"],
+            59.9, places=4)
+
+    def test_bad_sum_config_exit2_names_profile(self):
+        bad = dict(_CUSTOM_BALANCED, thesis_conviction=.20)  # sums 1.10
+        cfg = _write_config(self.dir, {"balanced": bad}, name="weights.json")
+        proc = self._run(extra=["--weights-config", cfg])
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("balanced", proc.stderr)
+        self.assertIn("1.1", proc.stderr)
+
+    def test_unknown_key_config_exit2(self):
+        cfg = _write_config(self.dir,
+                            {"balanced": {"technical": .5, "momentum": .5}},
+                            name="weights.json")
+        proc = self._run(extra=["--weights-config", cfg])
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("momentum", proc.stderr)
+
+    def test_missing_config_file_exit2(self):
+        proc = self._run(extra=["--weights-config",
+                                os.path.join(self.dir, "nope.json")])
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("not found", proc.stderr)
+
+    def test_no_config_stamps_standard(self):
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(self.dir, "module_composite.json")) as fh:
+            doc = json.load(fh)
+        self.assertEqual(doc["weight_set"], "standard v1")
+        self.assertEqual(doc["sensitivity"]["weight_set"], "standard v1")
+
+    def test_default_config_picked_up_from_cwd(self):
+        # A ./trading_desk_config.json in the CWD is loaded by default (no flag).
+        import shutil
+        cwd = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, cwd, True)
+        _write_config(cwd, {"balanced": _CUSTOM_BALANCED})  # default name
+        cmd = [sys.executable, SCRIPT, "--bundle", self.dir] + self._base_flags()
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(self.dir, "module_composite.json")) as fh:
+            doc = json.load(fh)
+        self.assertEqual(doc["weight_set"], "CUSTOM anil-v1@2026-07-18")
+
+    def test_renormalization_under_custom_cli(self):
+        os.remove(os.path.join(self.dir, "module_risk.json"))
+        cfg = _write_config(self.dir, {"balanced": _CUSTOM_BALANCED},
+                            name="weights.json")
+        proc = self._run(extra=["--weights-config", cfg])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(self.dir, "module_composite.json")) as fh:
+            doc = json.load(fh)
+        self.assertAlmostEqual(doc["score"], 63.6471, places=4)
+        self.assertIsNotNone(doc["renormalization_note"])
+        self.assertEqual(doc["weight_set"], "CUSTOM anil-v1@2026-07-18")
+
+
 if __name__ == "__main__":
     unittest.main()

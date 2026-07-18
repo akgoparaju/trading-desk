@@ -33,6 +33,45 @@
   - Files: `scripts/sector_scales.py` (new), `scripts/score_fundamental.py`,
     `tests/test_sector_scales.py` (new), `tests/test_score_fundamental.py`.
 
+- **Versioned weights config (`score_composite.py`) (Task V2).** New optional
+  `--weights-config <trading_desk_config.json>` (default `./trading_desk_config.json`
+  when it exists) supplies per-profile weight columns under `weights.profiles`. Each
+  provided profile's weights must sum to `1.0 ±1e-6` (exit 2 names the profile + the
+  observed sum) and may carry only the five known dimension keys (unknown key → exit 2);
+  a profile ABSENT from the config falls back to the standard fixed table **per-profile**.
+  The module JSON records `weight_set` (`"standard v1"` | `"CUSTOM <set_name>@<version>"`),
+  the `dimensions[]` rows carry the weights actually used, and the `sensitivity` block
+  gains a `weight_set` label plus — when a profile is custom — a
+  `standard_comparison: {score, grade}` recomputed under the standard weights (visible
+  tuning transparency). Renormalization on a missing dimension works identically under
+  custom weights.
+  - Files: `scripts/score_composite.py`, `tests/test_score_composite.py`.
+
+- **Scale falsifier monitoring (`refresh_plan.py`) (Task V2).** A refresh now scans
+  `trading_desk_config/scales/*.json` (primary: CWD; legacy: the ticker-dir parent) and,
+  against the PREVIOUS bundle's snapshot, runs `sector_scales.evaluate_falsifiers` (lazy
+  import, degrading gracefully to a skip note when the module is unavailable — no hard
+  dependency). The plan gains a `scales[]` block (`scale`, `falsifiers[]`, `any_tripped`,
+  `action_required` naming the pre-registered `on_trip` consequence, default
+  `flag+disclose`), a top-level `scale_review_required` bool (any tripped), and
+  `pending_proposals[]` (filenames under `scales/proposals/`). `judgment_review_required`
+  logic is UNCHANGED — scale review is a parallel signal; a `tripped: None` (unresolvable)
+  falsifier does not trip review.
+  - Files: `scripts/refresh_plan.py`, `tests/test_refresh_plan.py`.
+
+- **`scale-review` skill — adversarial proposal gate (Task V2).** New
+  `skills/scale-review/SKILL.md`: enumerate active scales + their consumers → gather
+  fresh evidence → verdict per scale (`valid | erosion_suspected | rebasing_proposed`)
+  → for a re-base, DRAFT the complete forward-versioned replacement (parameters with
+  derivation, cited evidence, falsifiers with pre-registered `on_trip`, `prior` = current
+  scale) → an ADVERSARIAL GATE dispatches 3 independent refutation passes, surviving only
+  with ≥2 non-refutations (votes recorded) → file to `scales/proposals/<name>_<version>.json`
+  as `pending_ratification`. NEVER applies a scale; ratification is the user's one-word
+  `ratify <name>@<version>`. Auto-apply reserved for pre-registered `on_trip` consequences;
+  refutation survival (not self-reported confidence) is the gate; forward-only versioning;
+  every report footer shows the active scale.
+  - Files: `skills/scale-review/SKILL.md`.
+
 ## 0.11.0 — 2026-07-17 · Coverage-first analysis
 
 Deep coverage becomes the default read: the pipeline always initiates (or refreshes)

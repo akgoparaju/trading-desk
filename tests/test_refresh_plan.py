@@ -561,5 +561,250 @@ class ProvenanceTests(unittest.TestCase):
                              os.path.normpath(bundle))
 
 
+# --------------------------------------------------------------------------- #
+# Sector-scale falsifier monitoring (v0.12.0)
+# --------------------------------------------------------------------------- #
+
+import types  # noqa: E402
+
+
+import scripts as _scripts_pkg  # noqa: E402  (to patch the submodule attribute)
+_SENTINEL = object()
+
+
+def _install_fake_sector_scales(test, results):
+    """Inject a fake ``scripts.sector_scales`` whose evaluate_falsifiers returns
+    ``results`` (a fixed list). Registered for cleanup so it never leaks between
+    tests. ``results`` may be a callable(scale, snapshot) for per-scale control.
+
+    NOTE: once ``scripts.sector_scales`` has been imported ANYWHERE (the real
+    module now exists on disk), the ``scripts`` package holds a bound attribute and
+    ``from scripts import sector_scales`` returns THAT, bypassing a sys.modules
+    patch alone. So we patch BOTH sys.modules and the package attribute, and
+    restore both.
+    """
+    fake = types.ModuleType("scripts.sector_scales")
+
+    def evaluate_falsifiers(scale, snapshot):
+        return results(scale, snapshot) if callable(results) else list(results)
+
+    fake.evaluate_falsifiers = evaluate_falsifiers
+    old_mod = sys.modules.get("scripts.sector_scales", _SENTINEL)
+    old_attr = getattr(_scripts_pkg, "sector_scales", _SENTINEL)
+    sys.modules["scripts.sector_scales"] = fake
+    _scripts_pkg.sector_scales = fake
+
+    def _restore():
+        if old_mod is _SENTINEL:
+            sys.modules.pop("scripts.sector_scales", None)
+        else:
+            sys.modules["scripts.sector_scales"] = old_mod
+        if old_attr is _SENTINEL:
+            if hasattr(_scripts_pkg, "sector_scales"):
+                delattr(_scripts_pkg, "sector_scales")
+        else:
+            _scripts_pkg.sector_scales = old_attr
+    test.addCleanup(_restore)
+
+
+def _write_scale(scales_dir, name, version="2026-07-01", on_trip=None,
+                 falsifiers=None):
+    # ``scale`` is the identifier field in the sector_scales contract (not
+    # ``name``); the fixture mirrors that so _scale_label reads the real key.
+    os.makedirs(scales_dir, exist_ok=True)
+    scale = {"scale": name, "version": version, "falsifiers": falsifiers or []}
+    if on_trip is not None:
+        scale["on_trip"] = on_trip
+    with open(os.path.join(scales_dir, "%s.json" % name), "w") as fh:
+        json.dump(scale, fh)
+
+
+# A falsifier result set exercising all three tripped states.
+_MIXED_FALSIFIERS = [
+    {"metric": "iv_rank", "op": ">", "value": 80, "observed": 92,
+     "tripped": True, "meaning": "positioning crowded"},
+    {"metric": "breadth", "op": "<", "value": 0.3, "observed": 0.55,
+     "tripped": False, "meaning": "breadth intact"},
+    {"metric": "absent_metric", "op": ">", "value": 1, "observed": None,
+     "tripped": None, "meaning": "metric absent from snapshot"},
+]
+
+_UNTRIPPED_ONLY = [
+    {"metric": "breadth", "op": "<", "value": 0.3, "observed": 0.55,
+     "tripped": False, "meaning": "breadth intact"},
+    {"metric": "spread", "op": ">", "value": 5, "observed": 2,
+     "tripped": False, "meaning": "tight"},
+]
+
+
+class ScaleFalsifierTests(unittest.TestCase):
+    def _legacy_scales_dir(self, tmp):
+        # ticker-dir-parent legacy location (deterministic without chdir).
+        return os.path.join(tmp, "trading_desk_config", "scales")
+
+    def test_tripped_scale_flips_review_and_names_consequence(self):
+        _install_fake_sector_scales(self, _MIXED_FALSIFIERS)
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_scale(self._legacy_scales_dir(tmp), "semis", on_trip="re-base")
+            td, _ = _make_workspace(tmp, AS_OF)
+            _, plan = _plan(td)
+            self.assertTrue(plan["scale_review_required"])
+            scale = plan["scales"][0]
+            self.assertEqual(scale["scale"], "semis@2026-07-01")
+            self.assertTrue(scale["any_tripped"])
+            self.assertEqual(len(scale["falsifiers"]), 3)
+            self.assertIn("re-affirm or re-base", scale["action_required"])
+            self.assertIn("re-base", scale["action_required"])
+
+    def test_untripped_scale_action_none(self):
+        _install_fake_sector_scales(self, _UNTRIPPED_ONLY)
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_scale(self._legacy_scales_dir(tmp), "semis")
+            td, _ = _make_workspace(tmp, AS_OF)
+            _, plan = _plan(td)
+            self.assertFalse(plan["scale_review_required"])
+            scale = plan["scales"][0]
+            self.assertFalse(scale["any_tripped"])
+            self.assertEqual(scale["action_required"], "none")
+
+    def test_default_on_trip_consequence(self):
+        # scale JSON omits on_trip -> default flag+disclose in the action string.
+        _install_fake_sector_scales(self, _MIXED_FALSIFIERS)
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_scale(self._legacy_scales_dir(tmp), "semis")  # no on_trip
+            td, _ = _make_workspace(tmp, AS_OF)
+            _, plan = _plan(td)
+            self.assertIn("flag+disclose", plan["scales"][0]["action_required"])
+
+    def test_unresolvable_falsifier_does_not_trip(self):
+        # A scale whose ONLY falsifier is unresolvable (tripped None) is not a trip.
+        _install_fake_sector_scales(
+            self, [{"metric": "x", "op": ">", "value": 1, "observed": None,
+                    "tripped": None, "meaning": "absent"}])
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_scale(self._legacy_scales_dir(tmp), "semis")
+            td, _ = _make_workspace(tmp, AS_OF)
+            _, plan = _plan(td)
+            self.assertFalse(plan["scales"][0]["any_tripped"])
+            self.assertFalse(plan["scale_review_required"])
+            self.assertEqual(plan["scales"][0]["action_required"], "none")
+
+    def test_multiple_scales_any_tripped_flips_top_level(self):
+        # One tripped, one clean -> scale_review_required True; per-scale honest.
+        def by_name(scale, snapshot):
+            if scale.get("scale") == "semis":
+                return _MIXED_FALSIFIERS  # tripped
+            return _UNTRIPPED_ONLY
+        _install_fake_sector_scales(self, by_name)
+        with tempfile.TemporaryDirectory() as tmp:
+            sd = self._legacy_scales_dir(tmp)
+            _write_scale(sd, "semis", on_trip="re-base")
+            _write_scale(sd, "software")
+            td, _ = _make_workspace(tmp, AS_OF)
+            _, plan = _plan(td)
+            self.assertTrue(plan["scale_review_required"])
+            by = {s["scale"].split("@")[0]: s for s in plan["scales"]}
+            self.assertTrue(by["semis"]["any_tripped"])
+            self.assertFalse(by["software"]["any_tripped"])
+
+    def test_absent_scales_dir_empty_block(self):
+        # No trading_desk_config/scales at all -> empty scales, review False.
+        _install_fake_sector_scales(self, _MIXED_FALSIFIERS)  # module present
+        with tempfile.TemporaryDirectory() as tmp:
+            td, _ = _make_workspace(tmp, AS_OF)  # no scales dir written
+            _, plan = _plan(td)
+            self.assertEqual(plan["scales"], [])
+            self.assertFalse(plan["scale_review_required"])
+            self.assertEqual(plan["pending_proposals"], [])
+
+    def test_lazy_import_degradation_module_absent(self):
+        # Hide scripts.sector_scales entirely -> falsifiers not evaluated, no crash;
+        # the scale still appears with an empty falsifier list + a skip note.
+        # Force an ImportError by mapping the module name to None in sys.modules AND
+        # removing the package attribute (which `from scripts import ...` prefers
+        # once the real module has been imported anywhere).
+        old_mod = sys.modules.get("scripts.sector_scales", _SENTINEL)
+        old_attr = getattr(_scripts_pkg, "sector_scales", _SENTINEL)
+        sys.modules["scripts.sector_scales"] = None  # import -> ImportError
+        if hasattr(_scripts_pkg, "sector_scales"):
+            delattr(_scripts_pkg, "sector_scales")
+
+        def _restore():
+            if old_mod is _SENTINEL:
+                sys.modules.pop("scripts.sector_scales", None)
+            else:
+                sys.modules["scripts.sector_scales"] = old_mod
+            if old_attr is not _SENTINEL:
+                _scripts_pkg.sector_scales = old_attr
+        self.addCleanup(_restore)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_scale(self._legacy_scales_dir(tmp), "semis", on_trip="re-base")
+            td, _ = _make_workspace(tmp, AS_OF)
+            _, plan = _plan(td)
+            self.assertEqual(len(plan["scales"]), 1)
+            scale = plan["scales"][0]
+            self.assertEqual(scale["falsifiers"], [])
+            self.assertFalse(scale["any_tripped"])
+            self.assertEqual(scale["action_required"], "none")
+            self.assertIn("unavailable", scale.get("note", ""))
+            self.assertFalse(plan["scale_review_required"])
+
+    def test_pending_proposals_listed(self):
+        _install_fake_sector_scales(self, _UNTRIPPED_ONLY)
+        with tempfile.TemporaryDirectory() as tmp:
+            sd = self._legacy_scales_dir(tmp)
+            _write_scale(sd, "semis")
+            proposals = os.path.join(sd, "proposals")
+            os.makedirs(proposals)
+            for fn in ("semis_2026-08-01.json", "software_2026-08-02.json"):
+                with open(os.path.join(proposals, fn), "w") as fh:
+                    json.dump({"status": "pending_ratification"}, fh)
+            td, _ = _make_workspace(tmp, AS_OF)
+            _, plan = _plan(td)
+            self.assertEqual(
+                plan["pending_proposals"],
+                ["semis_2026-08-01.json", "software_2026-08-02.json"])
+
+    def test_scale_review_parallel_to_judgment_review(self):
+        # A tripped scale must NOT alter judgment_review_required (unchanged logic):
+        # no earnings/dividend between runs -> judgment_review stays False even as
+        # scale_review flips True.
+        _install_fake_sector_scales(self, _MIXED_FALSIFIERS)
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_scale(self._legacy_scales_dir(tmp), "semis", on_trip="re-base")
+            td, _ = _make_workspace(tmp, AS_OF)  # no events
+            _, plan = _plan(td)
+            self.assertTrue(plan["scale_review_required"])
+            self.assertFalse(plan["events"]["judgment_review_required"])
+
+
+class ScaleCwdTests(unittest.TestCase):
+    """Exercise the CWD-primary scales location by actually running from cwd."""
+
+    def test_cwd_scales_found_via_subprocess(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # Lay a scales dir + a stub sector_scales on the ticker-parent legacy
+            # path so a real subprocess (fresh interpreter, no injected module)
+            # degrades gracefully -- the scale still appears with a skip note.
+            _write_scale(os.path.join(tmp, "trading_desk_config", "scales"),
+                         "semis", on_trip="re-base")
+            td, _ = _make_workspace(tmp, AS_OF)
+            proc = subprocess.run(
+                [sys.executable, PLAN, "--ticker-dir", td, "--as-of", AS_OF],
+                capture_output=True, text=True, cwd=tmp)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            with open(os.path.join(td, "refresh_plan.json")) as fh:
+                plan = json.load(fh)
+            # The scale is discovered (cwd == tmp, so cwd/trading_desk_config/scales
+            # exists). Whether sector_scales exists in the repo determines the
+            # falsifier list; either way the scale entry is present + review is a
+            # bool, and the block never crashes.
+            self.assertEqual(len(plan["scales"]), 1)
+            self.assertEqual(plan["scales"][0]["scale"], "semis@2026-07-01")
+            self.assertIn("scale_review_required", plan)
+            self.assertIsInstance(plan["scale_review_required"], bool)
+
+
 if __name__ == "__main__":
     unittest.main()
