@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.10.1 — 2026-07-17 · Docket polish + R5 live validation
+
+Review-round polish on the PDF docket, verified against a real MU refresh bundle (R5).
+
+- **Money-delta sign placement.** A new pure `fmt_money_delta(v, plus=)` puts the minus
+  OUTSIDE the dollar sign (`-$182.44`, not `$-182.44`); both What-Changed formatters
+  (exec box + delta-note table) route money through it. Unit-tested directly.
+- **Score-delta bars no longer overprint row labels.** `_draw_score_delta_bars` reserves a
+  measured label column and clamps the bar+value zone to the right of it, so a full-magnitude
+  down bar stops clear of the dimension names.
+- **Downside ladder labels.** `draw_downside_ladder` flips value labels to the left of the dot
+  for rungs hugging the current-price line (no more crossing the dashed line), lifts labels off
+  the connector, and widens the bottom margin so x-ticks clear the caption (reuses the
+  bottom-margin pattern from the earlier chart-fix round).
+- **Detail-page density.** Per-dimension charts are placed two-up (side by side) instead of
+  stacked full-width, ~halving section height; dimension sections now pack two/three per page
+  (measurement pass keeps the p N/M footer exact). MU detail: 9pp → 7pp.
+- **`slots_gate_ok` comment.** Documented that the `qc_passed` stamp is trust-on-write (an
+  accidental-bypass guard, not forgery-resistant).
+- **R5 validation.** Real MU bundle: charts re-rendered, honest `pdf_slots.json` authored,
+  slots gate PASS (first pass, no prose weakening), exec/detail/delta rendered and every page
+  visually verified — no collisions/clipping, money format and delta bars confirmed clean.
+
 ## 0.10.0 — 2026-07-17 · The PDF docket
 
 The report layer gains an institutional **PDF docket** — the bank-note-styled render of

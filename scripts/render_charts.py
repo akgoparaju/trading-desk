@@ -900,6 +900,22 @@ def draw_downside_ladder(data, path):
     plt, (fig, ax) = _new_fig(tdstyle.FIG_W * 0.5, 2.6)
     rungs = data["rungs"]
     y = list(range(len(rungs)))[::-1]
+
+    # X-range with padding on BOTH ends: right room so value labels near the
+    # current-price line don't run off / overprint the dashed line (review
+    # finding: top callouts crowded the price line), left room for the deepest
+    # rung's left-anchored label. The dashed price line stays at its TRUE level.
+    lvls = [r["level"] for r in rungs]
+    lo, hi = min(lvls + [data["last"]]), max(lvls + [data["last"]])
+    span = (hi - lo) or 1.0
+    x_lo, x_hi = lo - span * 0.10, hi + span * 0.16
+    ax.set_xlim(x_lo, x_hi)
+    # Anchor value labels AWAY from the current-price line: rungs sitting in the
+    # right ~22% of the range (i.e. hugging `last`) get their label flipped to
+    # the LEFT of the dot so it never crosses the dashed line; deeper rungs keep
+    # the label to the right of the dot, out over open space.
+    near_thresh = hi - span * 0.22
+
     for yi, r in zip(y, rungs):
         below = r["level"] < data["last"]
         col = tdstyle.RED if below else tdstyle.GRAY_MID
@@ -908,8 +924,17 @@ def draw_downside_ladder(data, path):
         ax.scatter([r["level"]], [yi], s=30, color=col, zorder=4)
         pct = r.get("pct_from_last")
         pct_s = ("  %+.0f%%" % (pct * 100)) if pct is not None else ""
-        ax.text(r["level"], yi, "  $%.0f%s" % (r["level"], pct_s), va="center",
-                ha="left", fontsize=6.4, color=tdstyle.GRAY_TXT)
+        if r["level"] >= near_thresh:
+            # Right-anchored (label left of dot), lifted just above the row so
+            # the red connector line doesn't strike through the text.
+            ax.text(r["level"], yi + 0.14, "$%.0f%s  " % (r["level"], pct_s),
+                    va="bottom", ha="right", fontsize=6.4,
+                    color=tdstyle.GRAY_TXT)
+        else:
+            # Left-anchored (label right of dot), same lift off the connector.
+            ax.text(r["level"], yi + 0.14, "  $%.0f%s" % (r["level"], pct_s),
+                    va="bottom", ha="left", fontsize=6.4,
+                    color=tdstyle.GRAY_TXT)
     ax.axvline(data["last"], color=tdstyle.INK, linewidth=0.9,
                linestyle=(0, (3, 2)), zorder=3)
     ax.set_yticks(y)
@@ -921,8 +946,11 @@ def draw_downside_ladder(data, path):
     ax.grid(axis="x", color=tdstyle.HAIRLINE, linewidth=0.5, alpha=0.8)
     ax.set_axisbelow(True)
     tdstyle.kicker(ax, "Downside Map")
-    tdstyle.why(fig, "Support ladder below the current price.")
-    fig.subplots_adjust(left=0.24, right=0.95, top=0.88, bottom=0.10)
+    # Wider bottom margin so the x-tick labels clear the italic 'why' caption
+    # (review finding: left-axis category labels / x-ticks overprinted); nudge
+    # the caption fully below the tick row.
+    tdstyle.why(fig, "Support ladder below the current price.", y=0.008)
+    fig.subplots_adjust(left=0.24, right=0.97, top=0.88, bottom=0.18)
     _save(plt, fig, path)
 
 

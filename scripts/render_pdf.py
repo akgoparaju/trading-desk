@@ -107,6 +107,11 @@ def slots_gate_ok(bundle):
 
     This is the enforcement hook: render_pdf refuses exec/detail unless this is
     True. A missing file, a parse error, or an absent/false stamp all return False.
+
+    NOTE: the stamp is trust-on-write -- an accidental-bypass guard (you can't
+    render a slots file that never passed report_qc), NOT forgery-resistant: a
+    hand-edited ``{"qc_passed": true}`` would pass. It defends against mistakes,
+    not a determined author editing their own bundle.
     """
     return load_slots(bundle).get("qc_passed") is True
 
@@ -128,6 +133,21 @@ def _chart_png(bundle, name):
 def _fmt(x):
     """Delegate to render_report._fmt for run-stable number formatting."""
     return render_report._fmt(x)
+
+
+def fmt_money_delta(v, plus=False):
+    """Money string with the sign OUTSIDE the dollar sign.
+
+    -182.44 -> '-$182.44' (not '$-182.44'); 5.0 -> '$5'; with plus=True a
+    positive value gains a leading '+' ('+$5') for signed delta columns. Zero
+    is never signed. PURE (formatting only) so it is unit-tested directly.
+    """
+    if v is None or not isinstance(v, (int, float)) or isinstance(v, bool):
+        return "n/a"
+    if v < 0:
+        return "-$%s" % _fmt(-v)
+    sign = "+" if (plus and v > 0) else ""
+    return "%s$%s" % (sign, _fmt(v))
 
 
 def _delta(o, n):
@@ -224,7 +244,7 @@ def _what_changed_rows(diff):
             if pct and isinstance(v, (int, float)):
                 return "%s%.1f%%" % (lead, v * 100)
             if money and isinstance(v, (int, float)):
-                return "%s$%s" % (lead, _fmt(v))
+                return fmt_money_delta(v, plus=(lead == "+"))
             return "%s%s" % (lead, _fmt(v))
         dlead = "+" if (isinstance(d, (int, float)) and d > 0) else ""
         is_down = isinstance(d, (int, float)) and d < 0
@@ -1025,13 +1045,24 @@ def _draw_dimension_section(doc, bundle, docs, dim, module_key, chart_names, y_t
     st_w = doc.CONTENT_W - text_w - 16
     _subscore_table(doc, st_x, y_top - 16, st_w, module, "SUBSCORES")
 
-    # Charts for this dimension (below the text/table block).
+    # Charts for this dimension, placed SIDE BY SIDE (two per row) below the
+    # text/table block. Halving the vertical chart cost (was stacked full-width)
+    # roughly halves the section height, letting two dimension sections pack onto
+    # one page instead of each burning ~55% of a page (review: excess
+    # whitespace). Odd trailing charts fall to their own row.
     y = min(y, y_top - 16 - 14 * (len(module.get("subscores") or []) + 1)) - 10
-    for cname in chart_names:
-        p = _chart_png(bundle, cname)
-        if p:
-            _, dh = doc.place_image(p, M, y, doc.CONTENT_W * 0.62, 150)
-            y -= dh + 8
+    present = [p for p in (_chart_png(bundle, c) for c in chart_names) if p]
+    chart_w = (doc.CONTENT_W - 12) / 2
+    col_x = [M, M + chart_w + 12]
+    i = 0
+    while i < len(present):
+        row = present[i:i + 2]
+        row_h = 0.0
+        for j, p in enumerate(row):
+            _, dh = doc.place_image(p, col_x[j], y, chart_w, 132)
+            row_h = max(row_h, dh)
+        y -= row_h + 8
+        i += 2
     return y
 
 
@@ -1240,13 +1271,33 @@ def _draw_integrity_footer_page(doc, docs, y_top):
     return y
 
 
+def _measure_dimension_height(docs_ticker_asof, footer_bits, bundle, docs, dim,
+                              key, chart_names, y_top):
+    """Consumed height of a dimension section, WITHOUT drawing to the real doc.
+
+    Draws the section onto a throwaway canvas (deterministic, same layout code)
+    and returns ``y_top - y_reached``. Used to pack two small sections per page
+    while keeping the p N/M footer count exact -- no layout logic is duplicated,
+    so the measured height can never drift from the real render.
+    """
+    scratch = Doc(os.devnull, docs_ticker_asof[0], "Detail",
+                  docs_ticker_asof[1], footer_bits)
+    scratch.total_pages = 1
+    scratch.begin_page()
+    y_end = _draw_dimension_section(scratch, bundle, docs, dim, key,
+                                    chart_names, y_top)
+    # Do NOT save -- the scratch canvas is discarded (os.devnull sink).
+    return y_top - y_end
+
+
 def render_detail(bundle, docs, slots, diff, prev_date, out_path):
     ticker, as_of = _ticker_as_of(docs)
     doc = Doc(out_path, ticker, "Detail", as_of, _footer_bits(docs))
 
-    # Page count is known ahead: 2 exec + 4 dimension pages + options + downside +
-    # appendix/integrity = at least 8 pages. We fix a generous layout: one section
-    # (or two small) per page for legibility and a stable page count.
+    # Page count is known ahead: 2 exec + dimension pages + options + downside +
+    # appendix/integrity. Dimension sections are PACKED two-per-page when both
+    # fit (they are typically ~40-50% of a page -- review: excess whitespace),
+    # so the dimension-page count is derived from a measurement pass, not fixed.
     #
     # Dimension sections -> their detail charts.
     dim_charts = {
@@ -1261,18 +1312,47 @@ def render_detail(bundle, docs, slots, diff, prev_date, out_path):
         ("sentiment", "module_sentiment"),
         ("risk", "module_risk"),
     ]
-    # 2 exec + 4 dim + 1 options + 1 downside/monitoring + 1 appendix/integrity.
-    doc.total_pages = 2 + len(dim_pages) + 3
+
+    # Page geometry for packing: a section starts at ``top - 12`` (top ==
+    # H - MARGIN - 15 from begin_page) and must stay above the footer band.
+    page_top = doc.H - doc.MARGIN - 15 - 12
+    page_bottom = doc.MARGIN + 24          # keep clear of the footer hairline
+    SECTION_GAP = 20                       # separator between stacked sections
+
+    # Measurement pass: pack dimension sections greedily, two per page when the
+    # second still fits below the first. ``pages`` is a list of section-lists.
+    df = _footer_bits(docs)
+    ticker_asof = (ticker, as_of)
+    pages, cur, y_avail = [], [], page_top
+    for dim, key in dim_pages:
+        h = _measure_dimension_height(ticker_asof, df, bundle, docs, dim, key,
+                                      dim_charts.get(dim, []), page_top)
+        if cur and (y_avail - SECTION_GAP - h) < page_bottom:
+            pages.append(cur)
+            cur, y_avail = [], page_top
+        cur.append((dim, key, h))
+        y_avail -= h + (SECTION_GAP if len(cur) > 1 else 0)
+    if cur:
+        pages.append(cur)
+
+    # 2 exec + packed dim pages + 1 options + 1 downside/monitoring + 1 appendix.
+    doc.total_pages = 2 + len(pages) + 3
 
     # Exec pages first (repeated).
     _draw_exec_page1(doc, bundle, docs, slots, diff, prev_date)
     _draw_exec_page2(doc, bundle, docs, slots)
 
-    # Per-dimension pages.
-    for dim, key in dim_pages:
+    # Per-dimension pages (packed).
+    for page_sections in pages:
         top = doc.begin_page()
-        _draw_dimension_section(doc, bundle, docs, dim, key,
-                                dim_charts.get(dim, []), top - 12)
+        y = top - 12
+        for i, (dim, key, h) in enumerate(page_sections):
+            if i > 0:
+                y -= SECTION_GAP
+                doc.hairline(doc.MARGIN, y + SECTION_GAP / 2,
+                             doc.MARGIN + doc.CONTENT_W, rgb=doc.GRAY_LT)
+            y = _draw_dimension_section(doc, bundle, docs, dim, key,
+                                        dim_charts.get(dim, []), y)
         doc.end_page()
 
     # Options page.
@@ -1313,15 +1393,25 @@ def _draw_score_delta_bars(doc, x, y_top, w, diff):
         doc.text(x, y_top - 16, "no comparable dimensions", font=doc.FONT_I,
                  size=7.4, rgb=doc.GRAY_MD)
         return y_top - 24
+
+    labels = {name: _DIM_LABELS.get(name, name.title()) for name, _ in dims}
+    # Reserve a label column wide enough for the longest row name so the chart
+    # zone (bars + value text) NEVER reaches back into the labels. The bar
+    # extent is clamped to this zone -- a full-magnitude down bar stops clear of
+    # the labels rather than overprinting them.
+    label_w = max(doc.string_width(t, doc.FONT, 7.4) for t in labels.values())
+    chart_x0 = x + label_w + 8            # start of the plotting zone
+    val_w = 40                            # room reserved for the +/-value text
+    zero_x = chart_x0 + (x + w - chart_x0) / 2
+    half = min(zero_x - chart_x0, x + w - zero_x) - val_w
+    if half < 6:                          # degenerate-narrow column safety net
+        half = max(6, (x + w - chart_x0) / 2 - val_w)
     max_abs = max(abs(blk["delta"]) for _, blk in dims) or 1.0
-    zero_x = x + w * 0.45
-    half = min(w * 0.45, w - (zero_x - x)) - 40
     row_h = 16
     y = y_top - 16
     for name, blk in dims:
         d = blk["delta"]
-        label = _DIM_LABELS.get(name, name.title())
-        doc.text(x, y, label, font=doc.FONT, size=7.4, rgb=doc.INK)
+        doc.text(x, y, labels[name], font=doc.FONT, size=7.4, rgb=doc.INK)
         bar_len = (abs(d) / max_abs) * half
         if d >= 0:
             doc.rect(zero_x, y - 3, bar_len, 6, fill_rgb=doc.GREEN)
@@ -1360,7 +1450,7 @@ def _draw_what_changed_table(doc, x, y_top, w, diff, prev_date):
             if pct and isinstance(v, (int, float)):
                 return "%s%.1f%%" % (lead, v * 100)
             if money and isinstance(v, (int, float)):
-                return "%s$%s" % (lead, _fmt(v))
+                return fmt_money_delta(v, plus=(lead == "+"))
             return "%s%s" % (lead, _fmt(v))
         dc = doc.GRAY_DK
         dtxt = "n/a"

@@ -16,7 +16,8 @@ already-QC'd bundle. Two invariants are load-bearing and tested here:
      present (exit 2 with the fix command), so an un-gated slots file can never be
      embedded.
 
-The render smoke tests (exec 2pp, detail >=8pp, delta 1pp, footer strings) require
+The render smoke tests (exec 2pp, detail full docket >=6pp with packed dimension
+pages, delta 1pp, footer strings) require
 reportlab + matplotlib and are guarded by ``skipUnless(find_spec(...))`` so the base
 suite stays green without the render venv. Page counts are read from the PDF bytes
 (``/Type /Pages ... /Count N``) -- no pypdf dependency.
@@ -255,6 +256,49 @@ class TestDiffBundles(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# fmt_money_delta: sign OUTSIDE the dollar sign (review polish, fix 1).
+# --------------------------------------------------------------------------- #
+
+class TestFmtMoneyDelta(unittest.TestCase):
+    def test_negative_puts_sign_before_dollar(self):
+        # the defect: '$-182.44'. The fix: '-$182.44'.
+        self.assertEqual(rp.fmt_money_delta(-182.44), "-$182.44")
+        self.assertEqual(rp.fmt_money_delta(-3.0), "-$3")
+
+    def test_positive_plain(self):
+        self.assertEqual(rp.fmt_money_delta(5.0), "$5")
+        self.assertEqual(rp.fmt_money_delta(182.44), "$182.44")
+
+    def test_positive_with_plus_lead(self):
+        self.assertEqual(rp.fmt_money_delta(5.0, plus=True), "+$5")
+        # negatives never gain a '+', even with plus=True.
+        self.assertEqual(rp.fmt_money_delta(-5.0, plus=True), "-$5")
+
+    def test_zero_is_never_signed(self):
+        self.assertEqual(rp.fmt_money_delta(0), "$0")
+        self.assertEqual(rp.fmt_money_delta(0.0, plus=True), "$0")
+
+    def test_non_number_is_na(self):
+        self.assertEqual(rp.fmt_money_delta(None), "n/a")
+        self.assertEqual(rp.fmt_money_delta(True), "n/a")
+
+    def test_what_changed_rows_money_negative_sign_outside(self):
+        # Entry 1 dropping 95 -> 92 => a money row with a -$3 delta and the
+        # value cells sign-correct (no '$-' anywhere in the money row).
+        old, new = TestDiffBundles()._two_bundles()
+        diff = rp.diff_bundles(old, new)
+        rows = rp._what_changed_rows(diff)
+        entry_row = [r for r in rows if r[0] == "Entry 1"][0]
+        _, old_s, new_s, delta_s, is_down = entry_row
+        self.assertEqual(old_s, "$95")
+        self.assertEqual(new_s, "$92")
+        self.assertEqual(delta_s, "-$3")
+        self.assertTrue(is_down)
+        for cell in (old_s, new_s, delta_s):
+            self.assertNotIn("$-", cell)
+
+
+# --------------------------------------------------------------------------- #
 # report_qc --pdf-slots: orphan fails, clean passes + stamp written.
 # --------------------------------------------------------------------------- #
 
@@ -418,14 +462,20 @@ class TestRenderSmoke(unittest.TestCase):
             self.assertTrue(os.path.isfile(pdf), out + err)
             self.assertEqual(_pdf_page_count(pdf), 2)
 
-    def test_detail_renders_at_least_eight_pages(self):
+    def test_detail_renders_full_docket(self):
+        # The detail is the multi-page evidence docket: 2 exec pages + one or
+        # more PACKED dimension pages (two/three small sections flow onto one
+        # page -- density fix) + options + downside/monitoring + appendix. The
+        # floor is therefore 2 exec + >=1 dim + 3 tail = 6; the minimal fixture
+        # (chart-less sections all pack onto a single dim page) renders exactly
+        # 6. A regression that dropped a whole section-block would fall below.
         with tempfile.TemporaryDirectory() as d:
             self._prep_stamped(d)
             rc, out, err = _render(d, "detail")
             self.assertEqual(rc, 0, out + err)
             pdf = os.path.join(d, "MU_Detail_2026-07-16.pdf")
             self.assertTrue(os.path.isfile(pdf), out + err)
-            self.assertGreaterEqual(_pdf_page_count(pdf), 8)
+            self.assertGreaterEqual(_pdf_page_count(pdf), 6)
 
     def test_delta_renders_one_page(self):
         with tempfile.TemporaryDirectory() as old, tempfile.TemporaryDirectory() as new:
