@@ -354,6 +354,46 @@ class TestCLI(unittest.TestCase):
             cmd += extra
         return subprocess.run(cmd, capture_output=True, text=True)
 
+    def _write_stamped_context(self):
+        ctx = {"skill": "company-context", "version": "1.0.0", "ticker": "MU",
+               "as_of": "2026-07-16", "mode": "coverage_distilled",
+               "findings": [{"id": "C1", "claim": "x", "source": "coverage/research.md"}],
+               "qc": {"qc_passed": True, "checked_utc": "2026-07-16T00:00:00Z"}}
+        with open(os.path.join(self.dir, "module_context.json"), "w") as fh:
+            json.dump(ctx, fh)
+
+    def test_context_grounding_enforced_when_stamped_context_exists(self):
+        # coverage-first: with a QC-stamped context module, variant and
+        # catalyst-clarity justifications MUST cite finding IDs (C<n>).
+        self._write_stamped_context()
+        proc = self._run()  # base flags carry no C-IDs
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("must cite context finding IDs", proc.stderr)
+        # citing IDs passes
+        flags = self._base_flags()
+        flags[flags.index("gross-margin path differentiated")] = \
+            "gross-margin path differentiated (C1)"
+        flags[flags.index("HBM ramp dated")] = "HBM ramp dated per C1"
+        cmd = [sys.executable, SCRIPT, "--bundle", self.dir] + flags
+        proc2 = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(proc2.returncode, 0, proc2.stderr)
+
+    def test_no_grounding_requirement_without_context_module(self):
+        # compressed floor: no context module -> free-text justifications OK
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_unstamped_context_does_not_enforce(self):
+        self._write_stamped_context()
+        p = os.path.join(self.dir, "module_context.json")
+        with open(p) as fh:
+            ctx = json.load(fh)
+        ctx["qc"] = None
+        with open(p, "w") as fh:
+            json.dump(ctx, fh)
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
     def test_cli_exit0_writes_module_json(self):
         proc = self._run()
         self.assertEqual(proc.returncode, 0,

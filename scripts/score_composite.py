@@ -498,6 +498,30 @@ def main(argv=None):
         print(f"ERROR: bundle directory not found: {args.bundle}", file=sys.stderr)
         return 2
 
+    # CONTEXT GROUNDING ENFORCEMENT (coverage-first): when a QC-stamped
+    # company-context module exists, the variant and catalyst-clarity
+    # justifications must cite its finding IDs (C<n>) — prose discipline
+    # graduated to a script gate, per the project's required-artifact rule.
+    # Invalidation is exempt (its legs cite trade-plan levels, not context).
+    ctx_path = os.path.join(args.bundle, "module_context.json")
+    if os.path.exists(ctx_path):
+        try:
+            with open(ctx_path) as fh:
+                _ctx = json.load(fh)
+        except (OSError, ValueError):
+            _ctx = {}
+        if (_ctx.get("qc") or {}).get("qc_passed"):
+            import re as _re
+            for flag, just in (("--variant", args.variant_justification),
+                               ("--catalyst-clarity",
+                                args.catalyst_clarity_justification)):
+                if not _re.search(r"C\d+", just or ""):
+                    print(f"ERROR: {flag}-justification must cite context "
+                          f"finding IDs (e.g. C3) — a QC-stamped "
+                          f"module_context.json exists for this bundle.",
+                          file=sys.stderr)
+                    return 2
+
     # -- scenario file -------------------------------------------------------
     if not os.path.isfile(args.scenarios):
         print(f"ERROR: scenario file not found: {args.scenarios}", file=sys.stderr)
