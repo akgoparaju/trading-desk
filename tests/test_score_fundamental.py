@@ -28,6 +28,14 @@ validation), determinism, and one end-to-end CLI run against a real snapshot bun
 fabricated exactly the way test_score_sentiment.py does. The scoring functions take
 already-parsed sub-blocks so branches pin without a full snapshot.
 
+RUBRIC v1.1.0 -> v1.2.0 (sector-scales batch): the SNAPSHOT-MODE valuation tests
+above are UNCHANGED (only the module rubric_version assertions move to "1.2.0" --
+the snapshot valuation floor is byte-identical). Quality/moat are untouched. The
+NEW anchored-mode tests (TestAnchored*) pin the DCF/comps/own-history/fcf/
+justified-band components, the disagreement>25% widen + 0.75 haircut arithmetic,
+the peg_display block, PEG's absence from the anchored subscores, and the CLI
+exit-2 on a malformed anchors file.
+
 stdlib-only; unittest.
 """
 
@@ -638,6 +646,406 @@ class TestScore(unittest.TestCase):
         self.assertEqual(result["score"], 90)
 
 
+# =========================================================================== #
+# ANCHORED-MODE VALUATION (v1.2.0): DCF(17) + comps(13) + own-history(8) +
+# fcf(7) + justified-band(5). PEG removed from scoring (peg_display top-level).
+# =========================================================================== #
+
+def _anchors(**over):
+    """A valid valuation_anchors dict; override per test.
+
+    dcf_base 100, comps [90,110] -> comps_mid 100 -> disagreement 0 (no widen).
+    """
+    base = {
+        "dcf_base": 100.0, "dcf_bear": 70.0, "dcf_bull": 130.0,
+        "comps_low": 90.0, "comps_high": 110.0,
+    }
+    base.update(over)
+    return base
+
+
+class TestValidateAnchors(unittest.TestCase):
+    def test_valid(self):
+        self.assertEqual(sf.validate_anchors(_anchors()), [])
+
+    def test_not_a_dict(self):
+        issues = sf.validate_anchors(["x"])
+        self.assertTrue(any("not a JSON object" in i for i in issues))
+
+    def test_missing_each_required(self):
+        for key in ("dcf_base", "dcf_bear", "dcf_bull", "comps_low", "comps_high"):
+            a = _anchors()
+            del a[key]
+            issues = sf.validate_anchors(a)
+            self.assertTrue(any(key in i for i in issues), key)
+
+    def test_nonpositive_rejected(self):
+        issues = sf.validate_anchors(_anchors(dcf_base=-5.0))
+        self.assertTrue(any("dcf_base" in i and "positive" in i for i in issues))
+
+    def test_nonnumeric_rejected(self):
+        issues = sf.validate_anchors(_anchors(comps_low="cheap"))
+        self.assertTrue(any("comps_low" in i and "numeric" in i for i in issues))
+
+    def test_current_pb_optional(self):
+        self.assertEqual(sf.validate_anchors(_anchors(current_pb=2.5)), [])
+
+    def test_current_pb_bad(self):
+        issues = sf.validate_anchors(_anchors(current_pb=-1.0))
+        self.assertTrue(any("current_pb" in i for i in issues))
+
+
+class TestAnchoredDcfBand(unittest.TestCase):
+    # No disagreement (comps_mid == dcf_base == 100); banding on r = last/dcf_base.
+    def test_deep_discount_is_17(self):
+        pts, _ = sf._dcf_band_position(70.0, _anchors())  # r=0.7 <= 0.8
+        self.assertEqual(pts, 17)
+
+    def test_boundary_08_is_17(self):
+        pts, _ = sf._dcf_band_position(80.0, _anchors())  # r=0.8 (<=0.8)
+        self.assertEqual(pts, 17)
+
+    def test_at_base_is_14(self):
+        pts, _ = sf._dcf_band_position(100.0, _anchors())  # r=1.0 in (0.8,1.1]
+        self.assertEqual(pts, 14)
+
+    def test_boundary_11_is_14(self):
+        pts, _ = sf._dcf_band_position(110.0, _anchors())  # r=1.1
+        self.assertEqual(pts, 14)
+
+    def test_modest_premium_is_9(self):
+        pts, _ = sf._dcf_band_position(140.0, _anchors())  # r=1.4 in (1.1,1.5]
+        self.assertEqual(pts, 9)
+
+    def test_boundary_15_is_9(self):
+        pts, _ = sf._dcf_band_position(150.0, _anchors())  # r=1.5
+        self.assertEqual(pts, 9)
+
+    def test_rich_premium_is_4(self):
+        pts, _ = sf._dcf_band_position(200.0, _anchors())  # r=2.0 in (1.5,2.5]
+        self.assertEqual(pts, 4)
+
+    def test_boundary_25_is_4(self):
+        pts, _ = sf._dcf_band_position(250.0, _anchors())  # r=2.5
+        self.assertEqual(pts, 4)
+
+    def test_far_above_is_1(self):
+        pts, _ = sf._dcf_band_position(300.0, _anchors())  # r=3.0 > 2.5
+        self.assertEqual(pts, 1)
+
+
+class TestAnchoredDisagreementWiden(unittest.TestCase):
+    # comps [40,60] -> comps_mid 50; disagreement = |100-50|/75 = 0.6667 > 0.25.
+    def _wide(self):
+        return _anchors(comps_low=40.0, comps_high=60.0)
+
+    def test_haircut_scales_max_to_1275(self):
+        # r=0.7 -> base 17, haircut 0.75 -> 12.75.
+        pts, s = sf._dcf_band_position(70.0, self._wide())
+        self.assertEqual(pts, 12.75)
+
+    def test_haircut_visible_in_arithmetic(self):
+        pts, s = sf._dcf_band_position(70.0, self._wide())
+        self.assertIn("WIDEN", s)
+        self.assertIn("x0.75", s)
+        self.assertIn("17 -> 12.75", s)
+
+    def test_widened_effective_band_disclosed(self):
+        # effective_band = [min(dcf_bear 70, comps_low 40), max(dcf_bull 130,
+        # comps_high 60)] = [40, 130].
+        _, s = sf._dcf_band_position(70.0, self._wide())
+        self.assertIn("[40,130]", s)
+
+    def test_haircut_on_lower_tier(self):
+        # r=1.4 -> base 9 -> 9 * 0.75 = 6.75.
+        pts, _ = sf._dcf_band_position(140.0, self._wide())
+        self.assertEqual(pts, 6.75)
+
+    def test_disagreement_below_threshold_no_widen(self):
+        # comps [90,110] -> comps_mid 100 == dcf_base -> disagreement 0 (<= 0.25)
+        # -> no widen, full 17 (the boundary at exactly 0.25 is float-fragile and
+        # deliberately not pinned; only the clearly-inside case is asserted).
+        pts, s = sf._dcf_band_position(70.0, _anchors())  # r=0.7
+        self.assertEqual(pts, 17)
+        self.assertIn("no widen", s)
+
+    def test_disagreement_just_above_threshold_widens(self):
+        # comps_mid 70 -> disagreement = |100-70|/85 = 0.3529 > 0.25 -> widen.
+        a = _anchors(comps_low=60.0, comps_high=80.0)  # mid 70
+        pts, s = sf._dcf_band_position(70.0, a)  # r=0.7 -> 17*0.75
+        self.assertEqual(pts, 12.75)
+        self.assertIn("WIDEN", s)
+
+
+class TestAnchoredComps(unittest.TestCase):
+    # comps [90,110] -> mid 100.
+    def test_below_low_is_13(self):
+        pts, _ = sf._comps_range_position(80.0, _anchors())
+        self.assertEqual(pts, 13)
+
+    def test_lower_half_is_9(self):
+        pts, _ = sf._comps_range_position(95.0, _anchors())
+        self.assertEqual(pts, 9)
+
+    def test_boundary_mid_is_9(self):
+        pts, _ = sf._comps_range_position(100.0, _anchors())  # <= mid
+        self.assertEqual(pts, 9)
+
+    def test_upper_half_is_6(self):
+        pts, _ = sf._comps_range_position(105.0, _anchors())
+        self.assertEqual(pts, 6)
+
+    def test_boundary_high_is_6(self):
+        pts, _ = sf._comps_range_position(110.0, _anchors())  # <= high
+        self.assertEqual(pts, 6)
+
+    def test_above_high_within_15x_is_3(self):
+        pts, _ = sf._comps_range_position(150.0, _anchors())  # <= 1.5*110=165
+        self.assertEqual(pts, 3)
+
+    def test_boundary_15x_high_is_3(self):
+        pts, _ = sf._comps_range_position(165.0, _anchors())  # == 1.5*110
+        self.assertEqual(pts, 3)
+
+    def test_far_above_high_is_1(self):
+        pts, _ = sf._comps_range_position(200.0, _anchors())  # > 165
+        self.assertEqual(pts, 1)
+
+
+class TestAnchoredOwnHistory(unittest.TestCase):
+    # v1.1 pe_fwd/pe_5yr_median band rescaled from 20 to 8; sanity band [0.2,5].
+    def test_discount_is_8(self):
+        pts, _, ok = sf._own_history_position(15.0, 20.0, "approx_current_eps")
+        self.assertEqual(pts, 8)
+        self.assertTrue(ok)
+
+    def test_in_line_is_56(self):
+        # 18/20=0.9 in (0.75,1.0] -> 20-tier 14 rescaled to 8: 14*8/20 = 5.6.
+        pts, _, ok = sf._own_history_position(18.0, 20.0, "approx_current_eps")
+        self.assertEqual(pts, 5.6)
+
+    def test_modest_premium_is_32(self):
+        # 22/20=1.1 in (1.0,1.25] -> 8*8/20 = 3.2.
+        pts, _, ok = sf._own_history_position(22.0, 20.0, "approx_current_eps")
+        self.assertEqual(pts, 3.2)
+
+    def test_rich_premium_is_12(self):
+        # 30/20=1.5 > 1.25 -> 3*8/20 = 1.2.
+        pts, _, ok = sf._own_history_position(30.0, 20.0, "approx_current_eps")
+        self.assertEqual(pts, 1.2)
+
+    def test_method_label_in_arithmetic(self):
+        _, s, _ = sf._own_history_position(15.0, 20.0, "approx_current_eps")
+        self.assertIn("approx_current_eps", s)
+
+    def test_sanity_band_out_is_na(self):
+        # 9.828/1.82 = 5.4 > 5.0 -> component n/a, not evaluable.
+        pts, s, ok = sf._own_history_position(9.828, 1.82, "approx_current_eps")
+        self.assertEqual(pts, 0)
+        self.assertFalse(ok)
+        self.assertIn("outside sanity band [0.2,5]", s)
+
+    def test_null_is_na(self):
+        pts, s, ok = sf._own_history_position(None, 20.0, "approx_current_eps")
+        self.assertEqual(pts, 0)
+        self.assertFalse(ok)
+
+
+class TestAnchoredFcfYield(unittest.TestCase):
+    def test_high_is_7(self):
+        pts, _, ok = sf._fcf_yield_anchored(0.06)
+        self.assertEqual(pts, 7)
+
+    def test_boundary_005_is_7(self):
+        pts, _, ok = sf._fcf_yield_anchored(0.05)
+        self.assertEqual(pts, 7)
+
+    def test_good_is_5(self):
+        pts, _, ok = sf._fcf_yield_anchored(0.04)
+        self.assertEqual(pts, 5)
+
+    def test_thin_is_3(self):
+        pts, _, ok = sf._fcf_yield_anchored(0.02)
+        self.assertEqual(pts, 3)
+
+    def test_meager_is_2(self):
+        pts, _, ok = sf._fcf_yield_anchored(0.01)
+        self.assertEqual(pts, 2)
+
+    def test_nonpositive_is_1(self):
+        pts, _, ok = sf._fcf_yield_anchored(-0.01)
+        self.assertEqual(pts, 1)
+
+    def test_null_is_na(self):
+        pts, s, ok = sf._fcf_yield_anchored(None)
+        self.assertEqual(pts, 0)
+        self.assertFalse(ok)
+
+
+def _scale_pb(**over):
+    """A valid justified_pb sector scale w/ metric_source; override per test.
+
+    roe .35 r .12 g .04 -> low 2.7125, mid 3.875, high 5.0375.
+    """
+    base = {
+        "scale": "memory_semis", "version": "2026.1", "effective": "2026-07-01",
+        "basis": "x", "formula": "justified_pb",
+        "parameters": {"roe_normalized": 0.35, "r": 0.12, "g": 0.04},
+        "evidence": ["C1"], "falsifiers": [], "prior": None,
+        "metric_source": "anchors:current_pb",
+    }
+    base.update(over)
+    return base
+
+
+class TestAnchoredJustifiedBand(unittest.TestCase):
+    # band [2.7125, 3.875, 5.0375] via the pinned pb scale.
+    def test_below_low_is_5(self):
+        pts, _, ok = sf._justified_band_position(
+            _scale_pb(), {}, {"current_pb": 2.0})
+        self.assertEqual(pts, 5)
+        self.assertTrue(ok)
+
+    def test_low_to_mid_is_4(self):
+        pts, _, ok = sf._justified_band_position(
+            _scale_pb(), {}, {"current_pb": 3.0})
+        self.assertEqual(pts, 4)
+
+    def test_mid_to_high_is_2(self):
+        pts, _, ok = sf._justified_band_position(
+            _scale_pb(), {}, {"current_pb": 4.5})
+        self.assertEqual(pts, 2)
+
+    def test_above_high_is_1(self):
+        pts, _, ok = sf._justified_band_position(
+            _scale_pb(), {}, {"current_pb": 6.0})
+        self.assertEqual(pts, 1)
+
+    def test_anchors_current_pb_source_resolves(self):
+        # the metric_source "anchors:current_pb" resolves from the anchors dict.
+        _, s, ok = sf._justified_band_position(
+            _scale_pb(), {}, {"current_pb": 2.0})
+        self.assertTrue(ok)
+        self.assertIn("anchors:current_pb", s)
+
+    def test_dotted_snapshot_source_resolves(self):
+        scale = _scale_pb(metric_source="valuation.pb_proxy")
+        pts, _, ok = sf._justified_band_position(
+            scale, {"valuation": {"pb_proxy": 3.0}}, {})
+        self.assertEqual(pts, 4)
+        self.assertTrue(ok)
+
+    def test_unresolvable_metric_is_na(self):
+        scale = _scale_pb(metric_source="valuation.pb_proxy")
+        pts, s, ok = sf._justified_band_position(scale, {"valuation": {}}, {})
+        self.assertEqual(pts, 0)
+        self.assertFalse(ok)
+        self.assertIn("unresolvable", s)
+
+    def test_no_scale_is_na(self):
+        pts, s, ok = sf._justified_band_position(None, {}, {})
+        self.assertEqual(pts, 0)
+        self.assertFalse(ok)
+        self.assertIn("no --scale", s)
+
+
+class TestScoreValuationAnchored(unittest.TestCase):
+    def test_all_components_sum_to_50_max(self):
+        sub = sf.score_valuation_anchored(
+            _val(), _anchors(), 100.0, _scale_pb(), None)
+        self.assertEqual(sub["max"], 50)
+        self.assertEqual(sub["valuation_mode"], "anchored_v1.2")
+
+    def test_component_points_recorded(self):
+        # last=70 (r=0.7 -> DCF 17), comps below low (70<90 -> 13),
+        # own-history 18/20=0.9 -> 5.6, fcf 0.04 -> 5, justified pb 2.0 -> 5.
+        anchors = _anchors(current_pb=2.0)
+        sub = sf.score_valuation_anchored(
+            _val(pe_fwd=18.0, pe_5yr_median=20.0, fcf_yield=0.04),
+            anchors, 70.0, _scale_pb(), None)
+        inp = sub["inputs"]
+        self.assertEqual(inp["dcf_band_points"], 17)
+        self.assertEqual(inp["comps_range_points"], 13)
+        self.assertEqual(inp["own_history_points"], 5.6)
+        self.assertEqual(inp["fcf_yield_points"], 5)
+        self.assertEqual(inp["justified_band_points"], 5)
+        # 17 + 13 + 5.6 + 5 + 5 = 45.6
+        self.assertEqual(sub["points"], 45.6)
+
+    def test_peg_not_in_subscore_inputs(self):
+        # PEG is removed from anchored scoring entirely.
+        sub = sf.score_valuation_anchored(
+            _val(peg=1.2), _anchors(), 100.0, None, None)
+        self.assertNotIn("peg_points", sub["inputs"])
+        self.assertNotIn("peg", sub["inputs"])
+
+    def test_no_scale_justified_band_na(self):
+        sub = sf.score_valuation_anchored(_val(), _anchors(), 100.0, None, None)
+        self.assertEqual(sub["inputs"]["justified_band_points"], 0)
+
+
+class TestScoreAnchoredMode(unittest.TestCase):
+    def test_score_uses_anchored_when_anchors_given(self):
+        result = sf.score(_fund(), _val(), anchors=_anchors(), last=100.0)
+        val_sub = next(s for s in result["subscores"] if s["name"] == "valuation")
+        self.assertEqual(val_sub["valuation_mode"], "anchored_v1.2")
+
+    def test_score_uses_snapshot_without_anchors(self):
+        result = sf.score(_fund(), _val())
+        val_sub = next(s for s in result["subscores"] if s["name"] == "valuation")
+        self.assertEqual(val_sub["valuation_mode"], "snapshot_v1.1")
+
+    def test_score_snapshot_when_last_missing(self):
+        # anchors given but no price -> cannot band DCF/comps -> snapshot floor.
+        result = sf.score(_fund(), _val(), anchors=_anchors(), last=None)
+        val_sub = next(s for s in result["subscores"] if s["name"] == "valuation")
+        self.assertEqual(val_sub["valuation_mode"], "snapshot_v1.1")
+
+
+class TestBuildModuleAnchored(unittest.TestCase):
+    def _snap(self, **over):
+        snap = {
+            "fundamentals": _fund(), "valuation": _val(),
+            "price": {"last": 70.0},
+            "meta": {"ticker": "MU", "as_of_utc": "2026-07-15T00:00:00Z"},
+        }
+        snap.update(over)
+        return snap
+
+    def test_peg_display_present_in_anchored(self):
+        doc = sf.build_module(self._snap(), anchors=_anchors())
+        self.assertIn("peg_display", doc)
+        self.assertEqual(doc["peg_display"]["value"], _val()["peg"])
+        self.assertIn("display-only", doc["peg_display"]["note"])
+        self.assertIn("excluded from scoring", doc["peg_display"]["note"])
+
+    def test_peg_absent_from_anchored_subscores(self):
+        doc = sf.build_module(self._snap(), anchors=_anchors())
+        val_sub = next(s for s in doc["subscores"] if s["name"] == "valuation")
+        self.assertNotIn("peg_points", val_sub["inputs"])
+
+    def test_no_peg_display_in_snapshot_mode(self):
+        doc = sf.build_module(self._snap())  # no anchors
+        self.assertNotIn("peg_display", doc)
+        # snapshot mode still SCORES peg.
+        val_sub = next(s for s in doc["subscores"] if s["name"] == "valuation")
+        self.assertIn("peg_points", val_sub["inputs"])
+
+    def test_sector_scale_recorded(self):
+        doc = sf.build_module(self._snap(), anchors=_anchors(current_pb=2.0),
+                              scale=_scale_pb())
+        self.assertEqual(doc["sector_scale"], "memory_semis@2026.1")
+
+    def test_sector_scale_null_without_scale(self):
+        doc = sf.build_module(self._snap(), anchors=_anchors())
+        self.assertIsNone(doc["sector_scale"])
+
+    def test_valuation_mode_on_subscore(self):
+        doc = sf.build_module(self._snap(), anchors=_anchors())
+        val_sub = next(s for s in doc["subscores"] if s["name"] == "valuation")
+        self.assertEqual(val_sub["valuation_mode"], "anchored_v1.2")
+
+
 # --------------------------------------------------------------------------- #
 # INPUT_FIELDS / GUARD_FIELDS declaration
 # --------------------------------------------------------------------------- #
@@ -673,7 +1081,7 @@ class TestModeDisclosure(unittest.TestCase):
         self.assertIn("snapshot-only", doc["mode_note"])
         self.assertIn("deep FSI", doc["mode_note"])
         self.assertEqual(doc["skill"], "fundamental")
-        self.assertEqual(doc["rubric_version"], "1.1.0")
+        self.assertEqual(doc["rubric_version"], "1.2.0")
 
 
 # --------------------------------------------------------------------------- #
@@ -736,7 +1144,7 @@ class TestCLI(unittest.TestCase):
         with open(out) as fh:
             doc = json.load(fh)
         self.assertEqual(doc["skill"], "fundamental")
-        self.assertEqual(doc["rubric_version"], "1.1.0")
+        self.assertEqual(doc["rubric_version"], "1.2.0")
         self.assertEqual(doc["fundamental_mode"], "compressed_snapshot_pass")
         self.assertIn("snapshot-only", doc["mode_note"])
         self.assertEqual(doc["ticker"], "MU")
@@ -862,6 +1270,88 @@ class TestCLI(unittest.TestCase):
         proc = self._run(extra=["--out", out])
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertTrue(os.path.exists(out))
+
+    # -- anchored mode CLI --------------------------------------------------
+
+    def _write_anchors(self, obj):
+        path = os.path.join(self.dir, "valuation_anchors.json")
+        with open(path, "w") as fh:
+            if isinstance(obj, str):
+                fh.write(obj)
+            else:
+                json.dump(obj, fh)
+        return path
+
+    def test_cli_anchors_switches_to_anchored_mode(self):
+        # A valid anchors file switches the valuation dimension to anchored mode,
+        # emits peg_display, and drops peg from the subscore.
+        anchors = {"dcf_base": 100.0, "dcf_bear": 70.0, "dcf_bull": 130.0,
+                   "comps_low": 90.0, "comps_high": 110.0,
+                   "assumptions": {"wacc": 0.10, "terminal_g": 0.03},
+                   "citations": {"dcf": "C1"}, "as_of": "2026-07-15"}
+        path = self._write_anchors(anchors)
+        proc = self._run(extra=["--anchors", path])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        out = os.path.join(self.dir, "module_fundamental.json")
+        with open(out) as fh:
+            doc = json.load(fh)
+        val_sub = next(s for s in doc["subscores"] if s["name"] == "valuation")
+        self.assertEqual(val_sub["valuation_mode"], "anchored_v1.2")
+        self.assertIn("peg_display", doc)
+        self.assertNotIn("peg_points", val_sub["inputs"])
+        self.assertIn("dcf_band_points", val_sub["inputs"])
+
+    def test_cli_anchors_with_scale_records_sector_scale(self):
+        anchors = {"dcf_base": 100.0, "dcf_bear": 70.0, "dcf_bull": 130.0,
+                   "comps_low": 90.0, "comps_high": 110.0, "current_pb": 2.0}
+        apath = self._write_anchors(anchors)
+        scale = {"scale": "memory_semis", "version": "2026.1",
+                 "effective": "2026-07-01", "basis": "x",
+                 "formula": "justified_pb",
+                 "parameters": {"roe_normalized": 0.35, "r": 0.12, "g": 0.04},
+                 "evidence": ["C1"], "falsifiers": [], "prior": None,
+                 "metric_source": "anchors:current_pb"}
+        spath = os.path.join(self.dir, "memory_semis.json")
+        with open(spath, "w") as fh:
+            json.dump(scale, fh)
+        proc = self._run(extra=["--anchors", apath, "--scale", spath])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        out = os.path.join(self.dir, "module_fundamental.json")
+        with open(out) as fh:
+            doc = json.load(fh)
+        self.assertEqual(doc["sector_scale"], "memory_semis@2026.1")
+        val_sub = next(s for s in doc["subscores"] if s["name"] == "valuation")
+        # current_pb 2.0 < band low 2.7125 -> justified band 5.
+        self.assertEqual(val_sub["inputs"]["justified_band_points"], 5)
+
+    def test_cli_malformed_anchors_exit2(self):
+        # missing dcf_base -> validate_anchors fails -> exit 2 naming the issue.
+        path = self._write_anchors({"dcf_bear": 70.0, "dcf_bull": 130.0,
+                                    "comps_low": 90.0, "comps_high": 110.0})
+        proc = self._run(extra=["--anchors", path])
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("dcf_base", proc.stderr)
+
+    def test_cli_anchors_bad_json_exit2(self):
+        path = self._write_anchors("{not json")
+        proc = self._run(extra=["--anchors", path])
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("not valid JSON", proc.stderr)
+
+    def test_cli_bad_scale_exit2(self):
+        anchors = {"dcf_base": 100.0, "dcf_bear": 70.0, "dcf_bull": 130.0,
+                   "comps_low": 90.0, "comps_high": 110.0}
+        apath = self._write_anchors(anchors)
+        # scale missing formula -> load_scale raises -> exit 2.
+        bad_scale = {"scale": "x", "version": "1", "effective": "2026-01-01",
+                     "basis": "x", "parameters": {}, "evidence": [],
+                     "falsifiers": [], "prior": None}
+        spath = os.path.join(self.dir, "bad_scale.json")
+        with open(spath, "w") as fh:
+            json.dump(bad_scale, fh)
+        proc = self._run(extra=["--anchors", apath, "--scale", spath])
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("formula", proc.stderr)
 
     def test_missing_bundle_errors(self):
         proc = subprocess.run(

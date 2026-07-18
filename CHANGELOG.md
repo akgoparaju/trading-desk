@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+- **Sector-scales library + fundamental valuation v1.2.0 (anchored mode, PEG
+  display-only) (Task V1).** New `scripts/sector_scales.py`: a versioned,
+  validated JSON contract per sector that computes a fair-value BAND from
+  first-principles fundamentals — `justified_pb` (Gordon residual income,
+  `mid = (roe_normalized - g)/(r - g)`), `justified_pe`
+  (`mid = (1 - g/roe_normalized)/(r - g)`), or `nav_based` (pass-through appraised
+  NAV multiples) — each enveloped at `±band_spread` (default 0.30), plus falsifier
+  evaluation over dotted snapshot metrics (`consecutive_quarters` is passed through
+  as caller metadata; unresolvable metrics report `tripped: None`). `validate_scale`
+  names every issue (required fields, formula ∈ FORMULAS, formula-specific params,
+  `r > g`, C-ID evidence, falsifier shape); `load_scale` raises on invalid.
+  Band math is unit-pinned (roe .35 / r .12 / g .04 → mid 3.875, low 2.7125,
+  high 5.0375).
+  - `scripts/score_fundamental.py` → rubric **v1.2.0**. Quality/moat UNCHANGED.
+    Valuation 50 gains an ANCHORED MODE (via `--anchors valuation_anchors.json`):
+    DCF-band position (17) + comps-range position (13) + own-history multiple (8,
+    the v1.1 pe_fwd/pe_5yr_median band rescaled, sanity band kept) + FCF yield (7,
+    rescaled) + justified sector-band position (5, via `--scale`) = 50. Maxima
+    (17/13/8/7/5) sized under a 35%-of-50 design cap. DCF disagreement rule: when
+    `|dcf_base - comps_mid| / mid > 0.25` the band widens to
+    `[min(dcf_bear,comps_low), max(dcf_bull,comps_high)]` and the DCF max takes a
+    0.75 confidence haircut (17→12.75), both disclosed in the arithmetic. PEG is
+    REMOVED from anchored scoring and re-emitted top-level as `peg_display`
+    (display-only). The active mode is disclosed on the valuation subscore
+    (`valuation_mode`: `anchored_v1.2` | `snapshot_v1.1`); the sector scale is
+    recorded as `sector_scale` (`name@version`). Absent `--anchors`, snapshot mode
+    (v1.1 floor: pe 20 / peg 15 / fcf 15) is byte-preserved with PEG still scored.
+    Malformed anchors/scale → exit 2 naming the issue.
+  - Files: `scripts/sector_scales.py` (new), `scripts/score_fundamental.py`,
+    `tests/test_sector_scales.py` (new), `tests/test_score_fundamental.py`.
+
 ## 0.11.0 — 2026-07-17 · Coverage-first analysis
 
 Deep coverage becomes the default read: the pipeline always initiates (or refreshes)
