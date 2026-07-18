@@ -9,6 +9,10 @@ report_qc catches any number the LLM smuggled into a prose slot.
 
 CLI: python3 scripts/report_qc.py --bundle <dir> --report <md path>
      [--waive "check:reason"]...  -> prints a check table + verdict, exits 0/1.
+The same gate runs number_provenance over the docket's `--pdf-slots` prose and over
+a company-context `--context` module (the latter adds structural checks over its
+findings registry / live_tape / mode). Exactly one of {--report, --pdf-slots,
+--context} is required.
 
 CHECKS (waiver mechanics mirror qc_gate.py):
  1. number_provenance   -- every numeric token in the report must trace to a
@@ -885,6 +889,269 @@ def _stamp_slots(slots_path, slots):
 
 
 # --------------------------------------------------------------------------- #
+# module_context.json provenance + structure gate (company-context, coverage-first).
+#
+# The company-context module (skill: company-context, v1.0.0) is the coverage-
+# distilled / web-compressed business+competitive+cases+risks brief that feeds
+# score_fundamental's --moat justification and grounds composite's conviction. It
+# is UNSCORED as a dimension — findings are its citation registry. This gate runs
+# BOTH:
+#   (1) number_provenance over EVERY prose string field (reusing the SAME allowed-
+#       set machinery as the report / pdf-slots gates) — a number in any narrative
+#       that is not a bundle leaf ORPHANS, exactly like a report prose slot;
+#   (2) structural checks over the findings registry, live_tape, and mode.
+# On PASS the caller stamps {"qc_passed": true, "checked_utc"} INTO module.qc so a
+# downstream consumer can tell the context passed its gate.
+# --------------------------------------------------------------------------- #
+
+# The two legal SOURCING modes the contract pins.
+_CONTEXT_MODES = ("coverage_distilled", "web_compressed")
+# Non-prose / structural top-level keys: their string VALUES are identifiers,
+# dates, mode labels, findings IDs+sources, or the stamp — NOT narrative prose, so
+# they are excluded from number_provenance (the structural checks cover them). The
+# findings' ``source`` strings are citation anchors (artifact sections / URLs), not
+# claims, so numbers inside a section name or URL must not orphan the whole gate.
+_CONTEXT_META_KEYS = ("skill", "version", "ticker", "as_of", "mode", "qc")
+# A finding ID is C followed by digits (C1..Cn); prose references them as "(C3)".
+_FINDING_ID_RE = re.compile(r"^C\d+$")
+_FINDING_REF_RE = re.compile(r"C\d+")
+# An inline finding reference token, optionally parenthesized: "(C3)" / "C3". These
+# are CITATION CHROME (they point into findings[]), not numeric claims -- scrubbed
+# from the prose before number_provenance so the reference digit never orphans.
+_CONTEXT_REF_SCRUB_RE = re.compile(r"\(?\bC\d+\)?")
+# A product/model name with a digit glued inside letters (HBM3E, RTX4090, A100,
+# Gen5, 3nm). The digit is part of an identifier, not a standalone data figure, so
+# it is scrubbed before the numeric scan. Requires a LETTER adjacent to the digit
+# run (so "$95.00" / "8.5%" / "130" -- real figures -- are untouched). Matches a
+# maximal alphanumeric run that contains at least one letter AND one digit.
+_CONTEXT_ALNUM_TOKEN_RE = re.compile(
+    r"\b(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*\d)[A-Za-z0-9]+\b")
+
+
+# Per-item keys that are CITATION ANCHORS, not narrative prose (parallel to a
+# finding's ``source``): a numeric section name or URL fragment inside one of these
+# must not orphan the number scan. risks[].anchor names the coverage artifact
+# section / URL grounding the risk, exactly like findings[].source.
+_CONTEXT_ANCHOR_KEYS = ("anchor",)
+
+
+def collect_context_strings(module):
+    """Every PROSE string in module_context to number-check (recursing dict/list).
+
+    Scans the narrative fields — business / competitive / live_tape / cases /
+    risks — where the LLM argues the situation; a number in any of these must
+    trace to the bundle. EXCLUDED:
+      * the structural/meta top-level keys (skill/version/ticker/as_of/mode/qc)
+        and the whole ``findings`` list — a finding's ``claim`` is the citation
+        registry entry and its ``source`` is an artifact-section or URL anchor
+        (numbers in a section name or URL are not data claims);
+      * per-item CITATION ANCHOR keys (risks[].anchor) — the coverage-artifact
+        section / URL grounding a risk, parallel to a finding's ``source``.
+    Prose that needs a number cites the finding ID "(C3)", and the number itself
+    must appear in a scanned narrative field, where this gate checks it.
+    """
+    out = []
+
+    def walk(obj):
+        if isinstance(obj, str):
+            out.append(obj)
+        elif isinstance(obj, dict):
+            for k, v in obj.items():
+                if k in _CONTEXT_ANCHOR_KEYS:
+                    continue
+                walk(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v)
+
+    if isinstance(module, dict):
+        for k, v in module.items():
+            if k in _CONTEXT_META_KEYS or k == "findings":
+                continue
+            walk(v)
+    return out
+
+
+def _context_prose_for_refs(module):
+    """The concatenated cases + competitive prose (where a finding ref must appear).
+
+    A finding is only load-bearing when the argued narrative cites it; the
+    structural check requires at least one C\\d+ reference somewhere in the cases
+    or competitive prose. Returns that prose as one string.
+    """
+    parts = []
+    for k in ("cases", "competitive"):
+        for s in collect_context_strings({k: module.get(k)}):
+            parts.append(s)
+    return "\n".join(parts)
+
+
+def check_context_structure(module, as_of=None):
+    """Structural checks over the findings registry, live_tape, and mode.
+
+    * findings: IDs match C\\d+, are unique, and are sequential C1..Cn; every
+      finding carries a non-empty claim AND a non-empty source.
+    * at least one C\\d+ reference appears in the cases or competitive prose (a
+      finding registry no prose cites is dead weight — the whole point is inline
+      grounding).
+    * live_tape: every entry's date parses as YYYY-MM-DD and is <= as_of.
+    * mode is one of the two legal values.
+    """
+    problems = []
+
+    # --- mode ---
+    mode = module.get("mode")
+    if mode not in _CONTEXT_MODES:
+        problems.append(
+            f"mode {mode!r} not one of {_CONTEXT_MODES}")
+
+    # --- findings registry ---
+    findings = module.get("findings")
+    if not isinstance(findings, list) or not findings:
+        problems.append("findings[] is empty or not a list")
+        findings = []
+    ids = []
+    for i, f in enumerate(findings):
+        if not isinstance(f, dict):
+            problems.append(f"findings[{i}] is not an object")
+            continue
+        fid = f.get("id")
+        if not isinstance(fid, str) or not _FINDING_ID_RE.match(fid or ""):
+            problems.append(f"findings[{i}] id {fid!r} is not C<n>")
+        else:
+            ids.append(fid)
+        if not (isinstance(f.get("claim"), str) and f["claim"].strip()):
+            problems.append(f"finding {fid!r} has an empty/missing claim")
+        if not (isinstance(f.get("source"), str) and f["source"].strip()):
+            problems.append(f"finding {fid!r} has an empty/missing source")
+    # unique IDs
+    dupes = sorted({x for x in ids if ids.count(x) > 1})
+    if dupes:
+        problems.append("duplicate finding id(s): " + ", ".join(dupes))
+    # sequential C1..Cn (order-insensitive: the SET must equal {C1..Cn}).
+    if ids and not dupes:
+        nums = sorted(int(x[1:]) for x in ids)
+        expected = list(range(1, len(nums) + 1))
+        if nums != expected:
+            problems.append(
+                "finding ids not sequential C1..C%d (got %s)"
+                % (len(nums), ", ".join("C%d" % n for n in nums)))
+
+    # --- at least one finding referenced from cases / competitive prose ---
+    ref_prose = _context_prose_for_refs(module)
+    if not _FINDING_REF_RE.search(ref_prose):
+        problems.append("no finding reference (C<n>) appears in cases or "
+                        "competitive prose")
+
+    # --- live_tape dates parse and are <= as_of ---
+    from datetime import date
+    as_of_d = None
+    if isinstance(as_of, str):
+        m = _DATE_RE.match(as_of)
+        if m:
+            try:
+                as_of_d = date.fromisoformat(m.group(0))
+            except ValueError:
+                as_of_d = None
+    live = module.get("live_tape")
+    if not isinstance(live, list):
+        problems.append("live_tape is not a list")
+        live = []
+    for i, ev in enumerate(live):
+        if not isinstance(ev, dict):
+            problems.append(f"live_tape[{i}] is not an object")
+            continue
+        d = ev.get("date")
+        parsed = None
+        if isinstance(d, str) and _DATE_RE.fullmatch(d):
+            try:
+                parsed = date.fromisoformat(d)
+            except ValueError:
+                parsed = None
+        if parsed is None:
+            problems.append(f"live_tape[{i}] date {d!r} does not parse (YYYY-MM-DD)")
+        elif as_of_d is not None and parsed > as_of_d:
+            problems.append(
+                f"live_tape[{i}] date {d} is after as_of {as_of_d.isoformat()}")
+
+    if problems:
+        return _result("context_structure", False, "; ".join(problems))
+    return _result("context_structure", True,
+                   f"{len(ids)} finding(s) C1..C{len(ids)}, live_tape dated "
+                   f"<= as_of, mode={mode}")
+
+
+def _scrub_context_prose(text, module):
+    """Remove context-specific CHROME before number_provenance scans the prose.
+
+    Three non-data token classes are stripped so they never orphan:
+      * inline finding references ("(C3)" / "C3") -- citation markers into
+        findings[], not figures;
+      * product/model names with a digit glued inside letters (HBM3E, A100, 3nm) --
+        the digit is part of an identifier, verified by the structure of the name,
+        not a data claim (real figures like $95.00 / 8.5% / 130 keep a
+        letter-free numeric run and are untouched);
+      * the module's OWN live_tape dates -- these are LLM-authored event dates,
+        validated separately by context_structure (parse + <= as_of), so they are
+        not checked against the bundle's date set (a live-tape event legitimately
+        post-dates the snapshot's fetch dates within the as_of ceiling).
+    """
+    scrubbed = _CONTEXT_REF_SCRUB_RE.sub(" ", text)
+    scrubbed = _CONTEXT_ALNUM_TOKEN_RE.sub(" ", scrubbed)
+    live = module.get("live_tape")
+    if isinstance(live, list):
+        for ev in live:
+            if isinstance(ev, dict):
+                d = ev.get("date")
+                if isinstance(d, str) and _DATE_RE.fullmatch(d):
+                    scrubbed = scrubbed.replace(d, " ")
+    return scrubbed
+
+
+def run_context_qc(bundle, module, previous=None):
+    """Run BOTH context checks and return a result list (reuses the CLI table).
+
+    number_provenance runs over every prose narrative string (the SAME allowed-set
+    machinery as the report / pdf-slots gates), after context CHROME is scrubbed
+    (finding refs, product-name digits, the module's own live_tape dates -- see
+    _scrub_context_prose); context_structure runs the findings / live_tape / mode
+    checks. ``previous`` folds an older bundle's values into the allowed set (a
+    carried-forward refresh may cite a prior figure).
+    """
+    docs = render_report.load_bundle(bundle)
+    prose_text = _scrub_context_prose(
+        "\n".join(collect_context_strings(module)), module)
+
+    extra = []
+    old_docs = None
+    if previous and os.path.isdir(previous):
+        old_docs = render_report.load_bundle(previous)
+        extra.extend(derived_delta_values(old_docs, docs))
+
+    return [
+        check_number_provenance(prose_text, docs, extra_values=extra,
+                                previous_docs=old_docs),
+        check_context_structure(module, as_of=module.get("as_of")),
+    ]
+
+
+def _stamp_context(context_path, module):
+    """Write {"qc_passed": true, "checked_utc": <UTC ISO Z>} INTO module.qc.
+
+    Preserves the original module content; only sets the ``qc`` key (contract:
+    ``qc`` is null pre-gate, an attestation object post-gate). Mirrors _stamp_slots.
+    """
+    from datetime import datetime, timezone
+    stamped = dict(module)
+    stamped["qc"] = {
+        "qc_passed": True,
+        "checked_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    with open(context_path, "w") as fh:
+        json.dump(stamped, fh, indent=2)
+
+
+# --------------------------------------------------------------------------- #
 # Waivers + CLI (mirrors qc_gate.py).
 # --------------------------------------------------------------------------- #
 
@@ -946,6 +1213,11 @@ def main(argv=None):
                         help="path to the docket pdf_slots.json (runs "
                              "number_provenance over its prose slots; stamps "
                              "qc_passed=true INTO the file on pass)")
+    parser.add_argument("--context", dest="context", default=None,
+                        help="path to a company-context module_context.json (runs "
+                             "number_provenance over its prose + structural checks "
+                             "over its findings/live_tape/mode; stamps qc.qc_passed="
+                             "true INTO the file on pass)")
     parser.add_argument("--delta", action="store_true",
                         help="treat the report as a delta report (checks 1/9/11)")
     parser.add_argument("--previous", default=None,
@@ -959,8 +1231,8 @@ def main(argv=None):
     if not os.path.isdir(args.bundle):
         print(f"ERROR: bundle directory not found: {args.bundle}", file=sys.stderr)
         return 1
-    if bool(args.report) == bool(args.pdf_slots):
-        print("ERROR: pass exactly one of --report or --pdf-slots",
+    if sum(bool(x) for x in (args.report, args.pdf_slots, args.context)) != 1:
+        print("ERROR: pass exactly one of --report, --pdf-slots, or --context",
               file=sys.stderr)
         return 1
 
@@ -989,6 +1261,31 @@ def main(argv=None):
             print("PDF SLOTS QC: PASS (qc_passed stamp written)")
         else:
             print("PDF SLOTS QC: FAIL")
+        return 0 if passed else 1
+
+    # --------------------------- context mode --------------------------- #
+    if args.context:
+        if not os.path.isfile(args.context):
+            print(f"ERROR: context not found: {args.context}", file=sys.stderr)
+            return 1
+        try:
+            with open(args.context) as fh:
+                module = json.load(fh)
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: cannot parse context {args.context}: {exc}",
+                  file=sys.stderr)
+            return 1
+
+        results = run_context_qc(args.bundle, module, previous=args.previous)
+        results, unwaived = _apply_waivers(results, waiver_reasons)
+        print(_render_table(results, set(waiver_reasons)))
+        print()
+        passed = unwaived == 0
+        if passed:
+            _stamp_context(args.context, module)
+            print("CONTEXT QC: PASS (qc.qc_passed stamp written)")
+        else:
+            print("CONTEXT QC: FAIL")
         return 0 if passed else 1
 
     # --------------------------- report mode --------------------------- #
