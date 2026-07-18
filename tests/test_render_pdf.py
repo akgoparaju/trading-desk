@@ -44,8 +44,12 @@ from scripts import report_qc as rq
 # Reuse the report-layer fixture bundle builders (identical module shapes).
 from tests.test_report_renderer import (
     _mk_bundle, _composite_doc, _tradeplan_doc, _snapshot_doc,
-    _LAST, _EV_AT_CURRENT,
+    _fundamental_doc, _LAST, _EV_AT_CURRENT,
 )
+
+# Convention constants the METHODOLOGY page PINS by import — the tests assert the
+# assembled page reflects THESE exact values (a drift is a test failure).
+from scripts import score_composite as _sc, score_fundamental as _sf
 
 
 _HAS_MPL = importlib.util.find_spec("matplotlib") is not None
@@ -187,6 +191,78 @@ def _write_context(bundle, module):
     path = os.path.join(bundle, "module_context.json")
     with open(path, "w") as fh:
         json.dump(module, fh)
+    return path
+
+
+# --------------------------------------------------------------------------- #
+# METHODOLOGY fixtures: anchored fundamental / custom composite / a scale JSON /
+# a refresh plan (for banners). All numbers are self-contained fixture leaves.
+# --------------------------------------------------------------------------- #
+
+def _fundamental_anchored():
+    """A v1.2 anchored-mode fundamental doc: valuation subscore carries
+    valuation_mode 'anchored_v1.2', a sector_scale stamp, and a peg_display block."""
+    fund = _fundamental_doc()
+    fund["rubric_version"] = "1.2.0"
+    fund["subscores"] = [
+        {"name": "quality", "points": 30, "max": 50, "arithmetic": "q"},
+        {"name": "valuation", "points": 40, "max": 50,
+         "valuation_mode": "anchored_v1.2", "arithmetic": "v"},
+    ]
+    fund["sector_scale"] = "memory_semis@2026.1"
+    fund["peg_display"] = {
+        "value": 0.8,
+        "note": ("display-only; excluded from scoring (institutional practice; "
+                 "unreliable for cyclicals)"),
+    }
+    return fund
+
+
+def _composite_custom():
+    """A composite doc scored under a CUSTOM weight set (long-term profile)."""
+    comp = _composite_doc(profile="long-term")
+    comp["weight_set"] = "CUSTOM deep-value@1.0"
+    # long-term custom column (sums to 1.0) recorded on the dimensions rows.
+    custom = {"technical": 0.05, "fundamental": 0.50, "sentiment": 0.10,
+              "risk": 0.15, "thesis_conviction": 0.20}
+    for d in comp["dimensions"]:
+        d["weight"] = custom[d["name"]]
+    return comp
+
+
+def _memory_semis_scale():
+    """A valid justified_pb sector scale (mirrors the sector_scales test fixture)."""
+    return {
+        "scale": "memory_semis", "name": "Memory Semis", "version": "2026.1",
+        "effective": "2026-07-01",
+        "basis": "Gordon residual-income justified P/B for a mid-cycle DRAM name.",
+        "formula": "justified_pb",
+        "parameters": {"roe_normalized": 0.35, "r": 0.12, "g": 0.04},
+        "evidence": ["C1", "C3"],
+        "falsifiers": [
+            {"metric": "fundamentals.roe", "op": "<", "value": 0.10,
+             "consecutive_quarters": 2,
+             "meaning": "structural ROE collapse below cost of equity"},
+        ],
+        "prior": {"version": "2025.4"},
+    }
+
+
+def _write_scale(bundle, scale):
+    """Write a scale under <bundle>/trading_desk_config/scales/<scale>.json."""
+    d = os.path.join(bundle, "trading_desk_config", "scales")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, "%s.json" % scale["scale"])
+    with open(path, "w") as fh:
+        json.dump(scale, fh)
+    return path
+
+
+def _write_refresh_plan(ticker_dir, plan):
+    """Write refresh_plan.json to the TICKER dir (bundle parent)."""
+    path = os.path.join(ticker_dir, "refresh_plan.json")
+    with open(path, "w") as fh:
+        json.dump(plan, fh)
     return path
 
 
@@ -622,6 +698,244 @@ class TestConvictionSubscoreParse(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# V4: diff_bundles weight-set + sector-scale transition rows (PURE).
+# --------------------------------------------------------------------------- #
+
+class TestDiffTransitions(unittest.TestCase):
+    """diff_bundles surfaces weight-set + sector-scale stamps and _transition_rows
+    emits a row only on a genuine change (both directions + no-change)."""
+
+    def _docs(self, weight_set=None, sector_scale=None):
+        comp = _composite_doc()
+        if weight_set is not None:
+            comp["weight_set"] = weight_set
+        fund = _fundamental_doc()
+        if sector_scale is not None:
+            fund["sector_scale"] = sector_scale
+        return {"module_composite": comp, "module_fundamental": fund}
+
+    def test_weight_set_and_scale_captured_in_diff(self):
+        old = self._docs(weight_set="standard v1", sector_scale=None)
+        new = self._docs(weight_set="CUSTOM deep-value@1.0",
+                         sector_scale="memory_semis@2026.1")
+        d = rp.diff_bundles(old, new)
+        self.assertEqual(d["weight_set"]["old"], "standard v1")
+        self.assertEqual(d["weight_set"]["new"], "CUSTOM deep-value@1.0")
+        self.assertIsNone(d["sector_scale"]["old"])
+        self.assertEqual(d["sector_scale"]["new"], "memory_semis@2026.1")
+
+    def test_transition_rows_on_change_forward(self):
+        old = self._docs(weight_set="standard v1", sector_scale=None)
+        new = self._docs(weight_set="CUSTOM deep-value@1.0",
+                         sector_scale="memory_semis@2026.1")
+        rows = rp._transition_rows(rp.diff_bundles(old, new))
+        labels = {r[0]: r[1] for r in rows}
+        self.assertEqual(labels["Weight set"],
+                         "standard v1 → CUSTOM deep-value@1.0")
+        self.assertEqual(labels["Scale"], "n/a → memory_semis@2026.1")
+
+    def test_transition_rows_on_change_reverse(self):
+        # A scale turning OFF and weights reverting to standard also surface.
+        old = self._docs(weight_set="CUSTOM x@1.0",
+                         sector_scale="memory_semis@2026.1")
+        new = self._docs(weight_set="standard v1", sector_scale=None)
+        rows = rp._transition_rows(rp.diff_bundles(old, new))
+        labels = {r[0]: r[1] for r in rows}
+        self.assertEqual(labels["Weight set"], "CUSTOM x@1.0 → standard v1")
+        self.assertEqual(labels["Scale"], "memory_semis@2026.1 → n/a")
+
+    def test_no_transition_rows_when_unchanged(self):
+        old = self._docs(weight_set="standard v1", sector_scale=None)
+        new = self._docs(weight_set="standard v1", sector_scale=None)
+        self.assertEqual(rp._transition_rows(rp.diff_bundles(old, new)), [])
+
+    def test_no_previous_bundle_old_is_none(self):
+        # A fresh bundle (no prior) has None olds; a stamped new -> a transition.
+        new = self._docs(weight_set="standard v1",
+                         sector_scale="memory_semis@2026.1")
+        d = rp.diff_bundles({}, new)
+        self.assertIsNone(d["weight_set"]["old"])
+        rows = dict(rp._transition_rows(d))
+        self.assertEqual(rows["Weight set"], "n/a → standard v1")
+        self.assertEqual(rows["Scale"], "n/a → memory_semis@2026.1")
+
+
+# --------------------------------------------------------------------------- #
+# V4: assemble_methodology — the PURE content-assembly function.
+# --------------------------------------------------------------------------- #
+
+class TestAssembleMethodology(unittest.TestCase):
+    """The methodology page's data assembly: anchored vs snapshot maxima, the
+    CUSTOM dual weight table, scale present/absent, the peg_display line, and that
+    the convention constants MATCH the score_composite imports (no drift)."""
+
+    def _block(self, blocks, kind):
+        return [b for b in blocks if b["kind"] == kind][0]
+
+    def _docs(self, fund, comp):
+        return {"module_technical": {"rubric_version": "1.0.0"},
+                "module_fundamental": fund, "module_sentiment": {"rubric_version": "1.0.0"},
+                "module_risk": {"rubric_version": "1.0.0"}, "module_composite": comp}
+
+    def test_blocks_in_contract_order(self):
+        blocks = rp.assemble_methodology(
+            self._docs(_fundamental_doc(), _composite_doc()), None)
+        kinds = [b["kind"] for b in blocks]
+        self.assertEqual(kinds, ["rubric_versions", "composite_weights",
+                                 "valuation_formula", "sector_scale",
+                                 "conventions", "governance"])
+
+    def test_snapshot_mode_maxima_and_peg_scored(self):
+        # snapshot mode -> 20/15/15 maxima with PEG SCORED (no display line).
+        fund = _fundamental_doc()  # v1.1 snapshot, no peg_display
+        blocks = rp.assemble_methodology(self._docs(fund, _composite_doc()), None)
+        val = self._block(blocks, "valuation_formula")
+        self.assertFalse(val["anchored"])
+        self.assertEqual(val["maxima"],
+                         [("Fwd P/E vs own 5-yr median", 20),
+                          ("PEG", 15), ("FCF yield", 15)])
+        self.assertIsNone(val["peg_line"])
+
+    def test_anchored_mode_maxima_match_scorer_and_peg_display(self):
+        # anchored mode -> 17/13/8/7/5 (pinned from score_fundamental) + PEG line.
+        fund = _fundamental_anchored()
+        blocks = rp.assemble_methodology(self._docs(fund, _composite_custom()),
+                                         _memory_semis_scale())
+        val = self._block(blocks, "valuation_formula")
+        self.assertTrue(val["anchored"])
+        self.assertEqual(
+            val["maxima"],
+            [("DCF-band position", _sf._DCF_MAX),
+             ("Comps-range position", _sf._COMPS_MAX),
+             ("Own-history multiple", _sf._OWNHIST_MAX),
+             ("FCF yield", _sf._FCFY_ANCHORED_MAX),
+             ("Justified sector-band", _sf._JUSTIFIED_MAX)])
+        self.assertIsNotNone(val["peg_line"])
+        self.assertIn("0.8", val["peg_line"])
+        self.assertIn("display-only", val["peg_line"])
+        self.assertIn("excluded from scoring", val["peg_line"])
+
+    def test_disagreement_rule_pins_scorer_constants(self):
+        blocks = rp.assemble_methodology(
+            self._docs(_fundamental_anchored(), _composite_doc()), None)
+        val = self._block(blocks, "valuation_formula")
+        # 25% threshold, x0.75 haircut, 17 -> 12.75, never averaged.
+        self.assertIn("25%", val["disagreement_rule"])
+        self.assertIn("0.75", val["disagreement_rule"])
+        self.assertIn("12.75", val["disagreement_rule"])
+        self.assertIn("never averaged", val["disagreement_rule"])
+
+    def test_standard_weights_single_row(self):
+        comp = _composite_doc()  # no weight_set -> standard v1 default
+        blocks = rp.assemble_methodology(self._docs(_fundamental_doc(), comp), None)
+        cw = self._block(blocks, "composite_weights")
+        self.assertFalse(cw["custom"])
+        self.assertEqual(cw["weight_set"], _sc.STANDARD_WEIGHT_SET)
+        # one row, its standard comparison column is None (no dual table).
+        self.assertEqual(len(cw["rows"]), 1)
+        profile, used, std = cw["rows"][0]
+        self.assertIsNone(std)
+
+    def test_custom_weights_dual_table_matches_standard_import(self):
+        comp = _composite_custom()  # long-term custom
+        blocks = rp.assemble_methodology(
+            self._docs(_fundamental_anchored(), comp), _memory_semis_scale())
+        cw = self._block(blocks, "composite_weights")
+        self.assertTrue(cw["custom"])
+        self.assertEqual(cw["weight_set"], "CUSTOM deep-value@1.0")
+        profile, used, std = cw["rows"][0]
+        self.assertEqual(profile, "long-term")
+        # the custom column is the dimensions' weights; the standard column is
+        # PINNED from score_composite.WEIGHTS (no retype).
+        self.assertEqual(std, _sc.WEIGHTS["long-term"])
+        self.assertEqual(used["fundamental"], 0.50)  # the custom tilt
+
+    def test_scale_block_present_carries_scale_fields(self):
+        scale = _memory_semis_scale()
+        blocks = rp.assemble_methodology(
+            self._docs(_fundamental_anchored(), _composite_doc()), scale)
+        sb = self._block(blocks, "sector_scale")
+        self.assertTrue(sb["present"])
+        self.assertEqual(sb["stamp"], "memory_semis@2026.1")
+        self.assertEqual(sb["effective"], "2026-07-01")
+        self.assertEqual(sb["formula"], "justified_pb")
+        self.assertEqual(sb["evidence"], ["C1", "C3"])
+        self.assertEqual(sb["prior_version"], "2025.4")
+        # a computed band + a falsifier row (metric/op/value/meaning).
+        self.assertIsInstance(sb["band"], dict)
+        self.assertEqual(sb["falsifiers"][0][0], "fundamentals.roe")
+        self.assertEqual(sb["falsifiers"][0][1], "<")
+        self.assertIn("ROE collapse", sb["falsifiers"][0][3])
+
+    def test_scale_block_absent_when_no_scale(self):
+        blocks = rp.assemble_methodology(
+            self._docs(_fundamental_doc(), _composite_doc()), None)
+        sb = self._block(blocks, "sector_scale")
+        self.assertFalse(sb["present"])
+
+    def test_conventions_pin_composite_constants(self):
+        blocks = rp.assemble_methodology(
+            self._docs(_fundamental_doc(), _composite_doc()), None)
+        conv = self._block(blocks, "conventions")
+        # horizon years MATCH the imported HORIZON_YEARS (no retype).
+        horizon = dict(conv["horizon_years"])
+        self.assertEqual(horizon, dict(_sc.HORIZON_YEARS))
+        # grade bands agree with score_composite.grade_for at each edge.
+        for letter, lo, action in conv["grade_bands"]:
+            self.assertEqual(_sc.grade_for(lo), (letter, action))
+        # the EV hurdle sentence names the imported hurdle rate.
+        self.assertIn("%g" % _sc._HURDLE_RATE, conv["ev_hurdle"])
+
+    def test_rubric_versions_read_from_modules(self):
+        blocks = rp.assemble_methodology(
+            self._docs(_fundamental_anchored(), _composite_doc()), None)
+        rv = self._block(blocks, "rubric_versions")
+        rows = {r[0]: r[1] for r in rv["rows"]}
+        self.assertEqual(rows["Fundamental"], "rubric v1.2.0")
+        self.assertEqual(rows["Composite (expression)"], "rubric v1.0.0")
+
+    def test_governance_four_pinned_sentences(self):
+        blocks = rp.assemble_methodology(
+            self._docs(_fundamental_doc(), _composite_doc()), None)
+        gov = self._block(blocks, "governance")
+        self.assertGreaterEqual(len(gov["sentences"]), 4)
+        joined = " ".join(gov["sentences"]).lower()
+        self.assertIn("forward-only", joined)
+        self.assertIn("pre-registered", joined)
+        self.assertIn("ratification", joined)
+        self.assertIn("append-only", joined)
+
+
+# --------------------------------------------------------------------------- #
+# V4: refresh-plan loader + banner name resolution (PURE).
+# --------------------------------------------------------------------------- #
+
+class TestRefreshPlanLoad(unittest.TestCase):
+    def test_loads_from_ticker_dir_parent(self):
+        with tempfile.TemporaryDirectory() as parent:
+            bundle = os.path.join(parent, "detail_reports_2026-07-16")
+            os.makedirs(bundle)
+            _write_refresh_plan(parent, {"scale_review_required": True})
+            plan = rp.load_refresh_plan(bundle)
+            self.assertIsInstance(plan, dict)
+            self.assertTrue(plan["scale_review_required"])
+
+    def test_absent_plan_returns_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(rp.load_refresh_plan(d))
+
+    def test_scale_review_name_picks_tripped_scale(self):
+        plan = {"scales": [
+            {"scale": "software_saas@2026.1", "any_tripped": False},
+            {"scale": "memory_semis@2026.1", "any_tripped": True}]}
+        self.assertEqual(rp._scale_review_name(plan), "memory_semis@2026.1")
+
+    def test_scale_review_name_none_when_no_trip(self):
+        plan = {"scales": [{"scale": "x@1", "any_tripped": False}]}
+        self.assertIsNone(rp._scale_review_name(plan))
+
+
+# --------------------------------------------------------------------------- #
 # report_qc --pdf-slots: orphan fails, clean passes + stamp written.
 # --------------------------------------------------------------------------- #
 
@@ -1024,6 +1338,123 @@ class TestRenderSmoke(unittest.TestCase):
             pdf = os.path.join(new, "MU_Delta_Note_2026-07-16.pdf")
             self.assertTrue(os.path.isfile(pdf), out + err)
             self.assertEqual(_pdf_page_count(pdf), 1)
+
+    # -- V4: METHODOLOGY appendix + stamps + banners (venv-guarded smokes). --
+
+    def test_detail_has_methodology_page_and_grows(self):
+        # The METHODOLOGY appendix header renders and the detail grows past the
+        # pre-methodology floor (was >=7; now >=8 with the appendix page).
+        with tempfile.TemporaryDirectory() as d:
+            self._prep_stamped(d)
+            rc, out, err = _render(d, "detail")
+            self.assertEqual(rc, 0, out + err)
+            pdf = os.path.join(d, "MU_Detail_2026-07-16.pdf")
+            self.assertGreaterEqual(_pdf_page_count(pdf), 8)
+            text = _pdf_text(pdf)
+            self.assertIn(b"METHODOLOGY", text)
+            self.assertIn(b"Rubric versions", text)
+            self.assertIn(b"Composite weights", text)
+            self.assertIn(b"Fundamental valuation", text)
+            self.assertIn(b"Governance", text)
+            # standard weight-set footer stamp is present.
+            self.assertIn(b"Weights: standard v1", text)
+            # no scale active -> the standard-bands line, and no Scale: stamp.
+            self.assertIn(b"No sector scale active", text)
+
+    def test_detail_methodology_anchored_custom_scale(self):
+        # Anchored fundamental + CUSTOM weights + an active scale render the
+        # anchored maxima, the dual weight table, the scale block, and the footer
+        # CUSTOM + Scale stamps.
+        with tempfile.TemporaryDirectory() as parent:
+            d = os.path.join(parent, "detail_reports_2026-07-16")
+            os.makedirs(d)
+            self._prep_stamped(d)
+            # Overwrite the composite + fundamental with the anchored/custom fixtures.
+            with open(os.path.join(d, "module_composite.json"), "w") as fh:
+                json.dump(_composite_custom(), fh)
+            with open(os.path.join(d, "module_fundamental.json"), "w") as fh:
+                json.dump(_fundamental_anchored(), fh)
+            _write_scale(d, _memory_semis_scale())
+            rc, out, err = _render(d, "detail")
+            self.assertEqual(rc, 0, out + err)
+            pdf = os.path.join(parent, "MU_Detail_2026-07-16.pdf")
+            text = _pdf_text(pdf)
+            # anchored maxima table.
+            self.assertIn(b"DCF-band position", text)
+            self.assertIn(b"Justified sector-band", text)
+            # CUSTOM dual weight table.
+            self.assertIn(b"standard v1 shown for comparison", text)
+            # the scale block (name + a falsifier meaning).
+            self.assertIn(b"Falsifiers", text)
+            self.assertIn(b"structural ROE collapse", text)
+            # PEG display-only line under the valuation subscores.
+            self.assertIn(b"display-only", text)
+            # footer machinery stamps: CUSTOM weights + Scale.
+            self.assertIn(b"Weights: CUSTOM deep-value@1.0", text)
+            self.assertIn(b"Scale: memory_semis@2026.1", text)
+
+    def test_detail_banners_when_plan_trips(self):
+        # A refresh plan with scale_review_required + a pending proposal renders
+        # both banners on Detail p1.
+        with tempfile.TemporaryDirectory() as parent:
+            d = os.path.join(parent, "detail_reports_2026-07-16")
+            os.makedirs(d)
+            self._prep_stamped(d)
+            _write_refresh_plan(parent, {
+                "scale_review_required": True,
+                "scales": [{"scale": "memory_semis@2026.1", "any_tripped": True}],
+                "pending_proposals": ["ep_upstream.json"],
+            })
+            rc, out, err = _render(d, "detail")
+            self.assertEqual(rc, 0, out + err)
+            text = _pdf_text(os.path.join(parent, "MU_Detail_2026-07-16.pdf"))
+            self.assertIn(b"SCALE REVIEW REQUIRED", text)
+            self.assertIn(b"memory_semis@2026.1", text)
+            self.assertIn(b"Pending scale proposal", text)
+
+    def test_delta_banner_and_transition_rows(self):
+        # The delta note carries the banner (from the new bundle's plan) and a
+        # weight-set transition row when the stamp changed between runs.
+        with tempfile.TemporaryDirectory() as parent_old, \
+                tempfile.TemporaryDirectory() as parent_new:
+            old = os.path.join(parent_old, "detail_reports_2026-07-15")
+            new = os.path.join(parent_new, "detail_reports_2026-07-16")
+            os.makedirs(old)
+            os.makedirs(new)
+            _mk_bundle(old)  # old: standard weight set (no weight_set key)
+            self._prep_stamped(new)
+            # new: CUSTOM weight set -> a Weight set transition row.
+            with open(os.path.join(new, "module_composite.json"), "w") as fh:
+                json.dump(_composite_custom(), fh)
+            _write_refresh_plan(parent_new, {
+                "scale_review_required": True,
+                "scales": [{"scale": "memory_semis@2026.1", "any_tripped": True}],
+                "pending_proposals": [],
+            })
+            rc, out, err = _render(new, "delta", ["--previous", old])
+            self.assertEqual(rc, 0, out + err)
+            text = _pdf_text(os.path.join(parent_new, "MU_Delta_Note_2026-07-16.pdf"))
+            self.assertIn(b"SCALE REVIEW REQUIRED", text)
+            # the weight-set transition row (standard v1 -> CUSTOM).
+            self.assertIn(b"Weight set", text)
+            self.assertIn(b"CUSTOM deep-value@1.0", text)
+
+    def test_exec_doc_has_no_methodology_or_banner(self):
+        # The standalone exec doc is UNCHANGED: no methodology page, and no banner
+        # even if a plan exists (banners are Detail/Delta only).
+        with tempfile.TemporaryDirectory() as parent:
+            d = os.path.join(parent, "detail_reports_2026-07-16")
+            os.makedirs(d)
+            self._prep_stamped(d)
+            _write_refresh_plan(parent, {"scale_review_required": True,
+                                         "pending_proposals": ["x.json"]})
+            rc, out, err = _render(d, "exec")
+            self.assertEqual(rc, 0, out + err)
+            pdf = os.path.join(parent, "MU_Trade_Report_2026-07-16.pdf")
+            self.assertEqual(_pdf_page_count(pdf), 2)
+            text = _pdf_text(pdf)
+            self.assertNotIn(b"METHODOLOGY", text)
+            self.assertNotIn(b"SCALE REVIEW REQUIRED", text)
 
     def test_exec_output_lands_in_bundle_parent_under_detail_reports(self):
         # detail_reports_<date> bundle -> PDF lands in the PARENT (mirrors md rule).

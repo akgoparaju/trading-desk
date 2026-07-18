@@ -55,6 +55,12 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from scripts import render_report, tdstyle
+# score_composite / score_fundamental are stdlib-only PURE modules (no reportlab/
+# matplotlib): the METHODOLOGY page PINS its convention constants (weights, horizon
+# years, grade bands, the anchored/snapshot component maxima) by IMPORTING them from
+# the rubric of record, so the appendix can never drift from the arithmetic it
+# documents. sector_scales is likewise pure (used to locate + read the active scale).
+from scripts import score_composite, score_fundamental, sector_scales
 
 _DISCLAIMER_SHORT = "educational research, not investment advice"
 
@@ -152,6 +158,46 @@ def context_gate_ok(context):
         return False
     qc = context.get("qc")
     return isinstance(qc, dict) and qc.get("qc_passed") is True
+
+
+def load_refresh_plan(bundle):
+    """Load the refresh plan JSON governing this bundle, or None.
+
+    The refresh planner writes ``refresh_plan.json`` to the TICKER dir (the bundle
+    PARENT under the detail_reports layout), so we look there first, then in the
+    bundle itself (legacy). Returns the parsed dict, or None when absent/unreadable.
+    The banners on Detail p1 + the Delta note read ``scale_review_required`` and
+    ``pending_proposals`` from it.
+    """
+    candidates = [
+        os.path.join(os.path.dirname(os.path.normpath(bundle)),
+                     "refresh_plan.json"),
+        os.path.join(bundle, "refresh_plan.json"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            try:
+                with open(path) as fh:
+                    plan = json.load(fh)
+                return plan if isinstance(plan, dict) else None
+            except (OSError, ValueError):
+                return None
+    return None
+
+
+def _scale_review_name(plan):
+    """The '<name>@<version>' of the first scale whose falsifier tripped, or None.
+
+    Reads ``plan['scales']`` (a list of {scale, any_tripped, ...}); returns the
+    first tripped scale's label so the SCALE REVIEW banner can name it. Falls back
+    to None (the banner then omits the name) when no tripped scale is identifiable.
+    """
+    if not isinstance(plan, dict):
+        return None
+    for entry in (plan.get("scales") or []):
+        if isinstance(entry, dict) and entry.get("any_tripped"):
+            return entry.get("scale")
+    return None
 
 
 def _charts_dir(bundle):
@@ -336,10 +382,25 @@ def diff_bundles(prev_docs, new_docs):
         "fundamental": {"old": o_fund, "new": n_fund},
     }
 
+    # Weight-set transition: composite carries the weight_set stamp
+    # ("standard v1" | "CUSTOM <set>@<ver>"). A change flags the machinery a report
+    # was weighted under moving between runs (a governance-visible transition).
+    weight_set = {"old": oc.get("weight_set") if prev_docs else None,
+                  "new": nc.get("weight_set")}
+
+    # Sector-scale transition: the fundamental module's sector_scale stamp
+    # ("<name>@<version>" | null). A change (including on/off) surfaces that the
+    # anchored valuation's sector anchor moved between runs.
+    of = (prev_docs.get("module_fundamental") or {}) if prev_docs else {}
+    nf = new_docs.get("module_fundamental") or {}
+    sector_scale = {"old": of.get("sector_scale") if prev_docs else None,
+                    "new": nf.get("sector_scale")}
+
     return {
         "composite": composite, "grade": grade, "dimensions": dims,
         "entry_1": entry_1, "ev_at_current": ev_at_current,
         "invalidation": invalidation,
+        "weight_set": weight_set, "sector_scale": sector_scale,
     }
 
 
@@ -364,6 +425,27 @@ def _what_changed_rows(diff):
         row("Technical", diff["dimensions"].get("technical", {})),
         row("Entry 1", diff["entry_1"], money=True),
     ]
+
+
+def _transition_rows(diff):
+    """Weight-set + sector-scale transition rows for the What-Changed table.
+
+    PURE (no drawing): returns a list of ``(label, "<prev> → <current>")`` rows,
+    one per machinery field that CHANGED between the two bundles. A field whose
+    old == new (including both None) yields NO row -- only genuine transitions are
+    surfaced. ``None`` renders as "n/a" so a fresh-vs-prior (old None) transition
+    reads "n/a → standard v1". Unit-tested in both directions + no-change.
+    """
+    rows = []
+    for key, label in (("weight_set", "Weight set"),
+                       ("sector_scale", "Scale")):
+        blk = diff.get(key) or {}
+        o, n = blk.get("old"), blk.get("new")
+        if o != n:
+            rows.append((label, "%s → %s"
+                         % (o if o is not None else "n/a",
+                            n if n is not None else "n/a")))
+    return rows
 
 
 # --------------------------------------------------------------------------- #
@@ -531,10 +613,14 @@ class Doc:
                       rgb=self.GRAY_LT, w=0.5)
         fb = self.footer_bits
         total = self.total_pages or self._page_no
+        # Weights stamp always shown; scale stamp only when a sector scale is active.
+        machinery = "Weights: %s" % fb.get("weight_set", "standard v1")
+        if fb.get("scale"):
+            machinery += "  ·  Scale: %s" % fb["scale"]
         foot = ("Source: verified snapshot %s  ·  QC %s  ·  "
-                "rubrics %s  ·  %s  ·  p %d/%d" % (
+                "rubrics %s  ·  %s  ·  %s  ·  p %d/%d" % (
                     fb.get("snapshot_date", "?"), fb.get("qc", "?"),
-                    fb.get("rubrics", "?"), _DISCLAIMER_SHORT,
+                    fb.get("rubrics", "?"), machinery, _DISCLAIMER_SHORT,
                     self._page_no, total))
         # Truncate to the content width so it never runs off the page.
         foot = self.truncate(foot, self.FONT, 6.2, self.CONTENT_W)
@@ -604,8 +690,16 @@ def _footer_bits(docs):
     if comp.get("rubric_version"):
         rubric = "v%s" % comp["rubric_version"]
 
+    # Weight-set stamp (standard v1 | CUSTOM <set>@<ver>) from the composite module,
+    # and the active sector-scale stamp (<name>@<version>) from the fundamental
+    # module — both surfaced in the footer so the machinery a page was rendered
+    # under is always disclosed on the page itself.
+    weight_set = comp.get("weight_set") or score_composite.STANDARD_WEIGHT_SET
+    fund = docs.get("module_fundamental") or {}
+    scale_stamp = fund.get("sector_scale")  # "<name>@<version>" | None
+
     return {"snapshot_date": date, "qc": counts, "rubrics": rubric,
-            "as_of": as_of}
+            "as_of": as_of, "weight_set": weight_set, "scale": scale_stamp}
 
 
 def _ticker_as_of(docs):
@@ -646,6 +740,15 @@ def _grade_box(doc, x, y_top, w, comp):
     if breakeven is not None:
         doc.text(x + 8, y_top - 50, "Breakeven entry %s" % fmt_price(breakeven),
                  font=doc.FONT, size=7.6, rgb=light)
+    # CUSTOM weight-set tag near the grade box (top-right corner) when this report
+    # was scored under a non-standard weight column — the tuning is never hidden.
+    weight_set = comp.get("weight_set")
+    if weight_set and weight_set != score_composite.STANDARD_WEIGHT_SET:
+        tag = "CUSTOM WEIGHTS"
+        tw = doc.string_width(tag, doc.FONT_B, 6.0) + 6
+        doc.rect(x + w - tw - 4, y_top - 12, tw, 9, fill_rgb=doc.WHITE)
+        doc.text(x + w - tw - 1, y_top - 10, tag, font=doc.FONT_B, size=6.0,
+                 rgb=doc.ACCENT)
     return h
 
 
@@ -666,6 +769,45 @@ def _sensitivity_strip(doc, x, y_top, w, comp):
         if i > 0:
             doc.vline(x + seg * i, y_top - h + 2, y_top - 2, rgb=doc.GRAY_LT)
     return h
+
+
+def _draw_scale_banners(doc, plan, y_top):
+    """Draw the scale-governance banner(s) for a bundle's refresh plan. Returns y.
+
+    Two one-line banners, drawn top-down when their trigger is present in ``plan``:
+      * scale_review_required True -> an ACCENT-colored banner:
+        "SCALE REVIEW REQUIRED — falsifier tripped on <name>@<version>; see
+         methodology page." (the name comes from the first tripped scale).
+      * pending_proposals non-empty -> a NEUTRAL (gray) banner:
+        "Pending scale proposal(s) awaiting ratification: <names>".
+    No plan / neither trigger -> nothing drawn, y_top returned unchanged. Placed on
+    Detail p1 (below the header band) and on the Delta note.
+    """
+    if not isinstance(plan, dict):
+        return y_top
+    M = doc.MARGIN
+    W = doc.CONTENT_W
+    y = y_top
+    if plan.get("scale_review_required"):
+        name = _scale_review_name(plan)
+        msg = ("SCALE REVIEW REQUIRED — falsifier tripped on %s; see methodology "
+               "page." % (name or "an active scale"))
+        h = 14
+        doc.rect(M, y - h, W, h, fill_rgb=doc.ACCENT)
+        doc.text(M + 6, y - 10, doc.truncate(msg, doc.FONT_B, 8, W - 12),
+                 font=doc.FONT_B, size=8, rgb=doc.WHITE)
+        y -= h + 5
+    proposals = plan.get("pending_proposals") or []
+    if proposals:
+        names = ", ".join(str(p) for p in proposals)
+        msg = "Pending scale proposal(s) awaiting ratification: %s" % names
+        h = 13
+        doc.rect(M, y - h, W, h, fill_rgb=(0.94, 0.94, 0.94),
+                 stroke_rgb=doc.GRAY_LT)
+        doc.text(M + 6, y - 9.5, doc.truncate(msg, doc.FONT, 7.4, W - 12),
+                 font=doc.FONT, size=7.4, rgb=doc.GRAY_DK)
+        y -= h + 5
+    return y
 
 
 def _what_changed_box(doc, x, y_top, w, diff, prev_date):
@@ -955,7 +1097,7 @@ def _load_brief(bundle, dim):
     return ""
 
 
-def _draw_exec_page1(doc, bundle, docs, slots, diff, prev_date):
+def _draw_exec_page1(doc, bundle, docs, slots, diff, prev_date, plan=None):
     top = doc.begin_page()
     M = doc.MARGIN
     gutter = 14
@@ -968,6 +1110,12 @@ def _draw_exec_page1(doc, bundle, docs, slots, diff, prev_date):
     snap = docs.get("snapshot") or {}
     price = snap.get("price", {}) or {}
     meta = snap.get("meta", {}) or {}
+
+    # Scale-governance banner(s) — Detail p1 only (``plan`` is threaded there; the
+    # standalone exec doc passes None so its layout is untouched). When a banner
+    # renders, the whole header band shifts DOWN by the consumed height so nothing
+    # overlaps.
+    top = _draw_scale_banners(doc, plan, top - 2) + 2 if plan else top
 
     # Header band.
     hb_top = top - 10
@@ -1197,7 +1345,26 @@ def _draw_dimension_section(doc, bundle, docs, dim, module_key, chart_names,
     # Subscore table (right column) at the section top.
     st_x = M + text_w + 16
     st_w = doc.CONTENT_W - text_w - 16
-    _subscore_table(doc, st_x, y_top - 16, st_w, module, "SUBSCORES")
+    sub_y = _subscore_table(doc, st_x, y_top - 16, st_w, module, "SUBSCORES")
+
+    # PEG display-only (anchored mode): where the snapshot-mode valuation exhibit
+    # renders PEG as a SCORED subscore, anchored mode surfaces it here as
+    # DISPLAY-ONLY with the exclusion note (it is not in the scored subscores). The
+    # note is a bundle leaf from module_fundamental.peg_display.
+    peg_disp = module.get("peg_display")
+    if isinstance(peg_disp, dict):
+        py = sub_y - 6
+        doc.text(st_x, py, "PEG (display-only)", font=doc.FONT_B, size=6.6,
+                 rgb=doc.GRAY_MD)
+        py -= 9
+        doc.text(st_x, py, "PEG %s" % _fmt(peg_disp.get("value")),
+                 font=doc.FONT, size=7.2, rgb=doc.INK)
+        py -= 9
+        for ln in doc.wrap("excluded from scoring — %s"
+                           % (peg_disp.get("note") or "unreliable for cyclicals"),
+                           doc.FONT_I, 6.6, st_w):
+            doc.text(st_x, py, ln, font=doc.FONT_I, size=6.6, rgb=doc.GRAY_MD)
+            py -= 8.2
 
     # Charts for this dimension, placed SIDE BY SIDE (two per row) below the
     # text/table block. Halving the vertical chart cost (was stacked full-width)
@@ -1495,6 +1662,568 @@ def _parse_grade_history(bundle):
             "composite": ("%s→%s" % (cm.group(1), cm.group(2))) if cm else "?",
         })
     return rows
+
+
+# --------------------------------------------------------------------------- #
+# METHODOLOGY appendix — the transparency page. 100% script-generated: every
+# string is a pinned constant in THIS module or a value read from the bundle's
+# module JSONs / the active scale JSON. ZERO LLM content. The convention constants
+# (weights, horizon years, grade bands, anchored/snapshot component maxima) are
+# IMPORTED from score_composite / score_fundamental — the rubric of record — so the
+# appendix can never drift from the arithmetic it documents.
+#
+# ``assemble_methodology`` is the PURE data-assembly half (no reportlab): it turns
+# the bundle module JSONs + an optional scale JSON into an ordered list of structured
+# BLOCKS ({"kind", "title", ...}); the draw path (``_draw_methodology``) renders each
+# block height-aware. Factoring the assembly out lets the anchored-vs-snapshot maxima
+# table, the CUSTOM dual weight table, the scale block present/absent branches, and
+# the peg_display line be unit-tested WITHOUT the render venv.
+# --------------------------------------------------------------------------- #
+
+def _fmt_const(v):
+    """Compact numeric constant string (int when integral, else %g). PURE."""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return "%g" % v
+
+
+# The dimension -> (rubric field, source module) rows the RUBRIC VERSIONS block
+# shows, in canonical order. Each reads ``rubric_version`` off its module JSON; the
+# composite is the "expression version" of record, the context module version is
+# shown only when a context module carries one.
+_METHODOLOGY_RUBRIC_DIMENSIONS = (
+    ("Technical", "module_technical"),
+    ("Fundamental", "module_fundamental"),
+    ("Sentiment", "module_sentiment"),
+    ("Risk", "module_risk"),
+    ("Composite (expression)", "module_composite"),
+)
+
+# Anchored-mode valuation component maxima (v1.2), PINNED from score_fundamental so
+# the table matches the scorer exactly.
+_ANCHORED_MAXIMA = (
+    ("DCF-band position", score_fundamental._DCF_MAX),
+    ("Comps-range position", score_fundamental._COMPS_MAX),
+    ("Own-history multiple", score_fundamental._OWNHIST_MAX),
+    ("FCF yield", score_fundamental._FCFY_ANCHORED_MAX),
+    ("Justified sector-band", score_fundamental._JUSTIFIED_MAX),
+)
+# Snapshot-mode (v1.1 floor) valuation component maxima. Pinned inline (score_
+# valuation uses literal 20/15/15); labeled so a reader sees PEG is SCORED here.
+_SNAPSHOT_MAXIMA = (
+    ("Fwd P/E vs own 5-yr median", 20),
+    ("PEG", 15),
+    ("FCF yield", 15),
+)
+
+# The DCF-vs-comps disagreement rule sentence, pinned from the scorer's constants.
+_DISAGREEMENT_RULE = (
+    "When DCF base vs comps-mid disagree by more than %d%%, the methods materially "
+    "conflict: the DCF band is WIDENED to span both and a x%s confidence haircut "
+    "scales the DCF component's max (%d → %s) — the estimates are never averaged."
+    % (int(score_fundamental._DISAGREE_THRESHOLD * 100),
+       _fmt_const(score_fundamental._CONFIDENCE_HAIRCUT),
+       score_fundamental._DCF_MAX,
+       _fmt_const(score_fundamental._DCF_MAX * score_fundamental._CONFIDENCE_HAIRCUT)))
+
+# Enumerated judgment flags (script-applied points, mandatory justification) — the
+# CONVENTIONS block lists these so a reader knows exactly which levers are asserted.
+_JUDGMENT_FLAGS = (
+    "variant (strong|some|none)",
+    "catalyst_clarity (clear|partial|vague)",
+    "invalidation (both-legs|one-leg|none)",
+    "moat (wide|narrow|none, fundamental quality)",
+)
+
+# The four GOVERNANCE sentences — pinned, forward-only versioning discipline.
+_GOVERNANCE_SENTENCES = (
+    "Versioning is forward-only: a rubric or scale change gets a new version; "
+    "historical reports are never recalculated under it.",
+    "A falsifier's auto-consequence must be pre-registered in the scale JSON "
+    "(on_trip) before it can fire — no consequence is invented after the trip.",
+    "A scale change requires adversarial review and explicit user ratification; a "
+    "drafted proposal is pending until ratified and is disclosed as such.",
+    "History is append-only: prior thesis entries and grades stand as written; a "
+    "re-score adds a dated entry, it does not overwrite the record.",
+)
+
+
+def _fmt_num(v):
+    """Compact numeric string for methodology tables (int when integral, else g)."""
+    if v is None:
+        return "n/a"
+    if isinstance(v, bool):
+        return str(v)
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    if isinstance(v, (int, float)):
+        return "%g" % v
+    return str(v)
+
+
+def assemble_methodology(bundle_modules, scale_json):
+    """Assemble the METHODOLOGY page content as an ordered list of BLOCKS (PURE).
+
+    ``bundle_modules`` is the ``{snapshot, module_<x>}`` docs dict (as ``load_docs``
+    returns). ``scale_json`` is the active sector scale dict (from the fundamental
+    module's ``sector_scale`` stamp, located + read) or None.
+
+    Each block is a dict ``{"kind", "title", ...}``:
+      - rubric_versions:  {"rows": [(dimension, "rubric v<x>" | "n/a", source_field)]}
+      - composite_weights:{"weight_set", "custom", "profiles": [...],
+                           "rows": [(profile, {dim: weight}, {dim: std_weight}|None)],
+                           "dims": [dim order]}
+      - valuation_formula:{"mode", "maxima": [(component, max)], "peg_line": str|None,
+                           "disagreement_rule": str}
+      - sector_scale:     {"present": bool, ...scale fields when present...}
+      - conventions:      {"ev_hurdle", "grade_bands": [...], "horizon_years": [...],
+                           "judgment_flags": [...]}
+      - governance:       {"sentences": [...]}
+
+    Every value is either a pinned module constant or a bundle/scale leaf — NO LLM
+    content. This is the transparency contract the page renders verbatim.
+    """
+    modules = bundle_modules or {}
+    blocks = []
+
+    # -- 1. Rubric versions -------------------------------------------------
+    rows = []
+    for label, key in _METHODOLOGY_RUBRIC_DIMENSIONS:
+        m = modules.get(key) or {}
+        rv = m.get("rubric_version")
+        rows.append((label, ("rubric v%s" % rv) if rv else "n/a",
+                     "%s.rubric_version" % key.replace("module_", "")))
+    # Context module version, only when a context module is present + versioned.
+    ctx = modules.get("module_context") or {}
+    ctx_ver = ctx.get("version") or ctx.get("rubric_version")
+    if ctx_ver:
+        rows.append(("Company context", "v%s" % ctx_ver, "context.version"))
+    blocks.append({"kind": "rubric_versions", "title": "Rubric versions",
+                   "rows": rows})
+
+    # -- 2. Composite weights ----------------------------------------------
+    comp = modules.get("module_composite") or {}
+    weight_set = comp.get("weight_set") or score_composite.STANDARD_WEIGHT_SET
+    is_custom = weight_set != score_composite.STANDARD_WEIGHT_SET
+    dim_order = ["technical", "fundamental", "sentiment", "risk",
+                 "thesis_conviction"]
+    profile = comp.get("profile")
+    # The weights ACTUALLY used, from the composite's dimensions rows (authoritative
+    # for the profile this report was scored under).
+    used_weights = {}
+    for d in (comp.get("dimensions") or []):
+        nm = d.get("name")
+        if nm is not None:
+            used_weights[nm] = d.get("weight")
+    weight_rows = []
+    if profile:
+        # The report's profile row: used weights + (when custom) the standard column
+        # for comparison, pinned from the WEIGHTS table.
+        std = score_composite.WEIGHTS.get(profile)
+        weight_rows.append((profile, used_weights, std if is_custom else None))
+    blocks.append({
+        "kind": "composite_weights", "title": "Composite weights",
+        "weight_set": weight_set, "custom": is_custom, "profile": profile,
+        "dims": dim_order, "rows": weight_rows,
+    })
+
+    # -- 3. Fundamental valuation formula set ------------------------------
+    fund = modules.get("module_fundamental") or {}
+    val_mode = None
+    for s in (fund.get("subscores") or []):
+        if s.get("name") == "valuation" and s.get("valuation_mode"):
+            val_mode = s.get("valuation_mode")
+            break
+    if val_mode is None:
+        # Fall back to the sector_scale stamp presence heuristic (anchored implies a
+        # sector_scale field may be set); default to snapshot floor when unknown.
+        val_mode = ("anchored_v1.2" if fund.get("sector_scale")
+                    else "snapshot_v1.1")
+    anchored = val_mode == "anchored_v1.2"
+    maxima = list(_ANCHORED_MAXIMA if anchored else _SNAPSHOT_MAXIMA)
+    peg_line = None
+    peg = fund.get("peg_display")
+    if isinstance(peg, dict):
+        peg_line = ("PEG %s — display-only, excluded from scoring (unreliable for "
+                    "cyclicals)" % _fmt_num(peg.get("value")))
+    blocks.append({
+        "kind": "valuation_formula", "title": "Fundamental valuation formula set",
+        "mode": val_mode, "anchored": anchored, "maxima": maxima,
+        "peg_line": peg_line, "disagreement_rule": _DISAGREEMENT_RULE,
+    })
+
+    # -- 4. Active sector scale --------------------------------------------
+    scale_block = {"kind": "sector_scale", "title": "Active sector scale"}
+    stamp = fund.get("sector_scale")  # "<name>@<version>" | None
+    if isinstance(scale_json, dict):
+        band = None
+        try:
+            band = sector_scales.compute_band(scale_json)
+        except (KeyError, TypeError, ZeroDivisionError):
+            band = None
+        falsifiers = []
+        for f in (scale_json.get("falsifiers") or []):
+            if isinstance(f, dict):
+                falsifiers.append((f.get("metric"), f.get("op"),
+                                   f.get("value"), f.get("meaning")))
+        params = []
+        for k, v in (scale_json.get("parameters") or {}).items():
+            params.append((k, v))
+        prior = scale_json.get("prior")
+        prior_ver = prior.get("version") if isinstance(prior, dict) else None
+        scale_block.update({
+            "present": True,
+            "stamp": stamp or "%s@%s" % (scale_json.get("scale"),
+                                         scale_json.get("version")),
+            "name": scale_json.get("name") or scale_json.get("scale"),
+            "version": scale_json.get("version"),
+            "effective": scale_json.get("effective"),
+            "basis": scale_json.get("basis"),
+            "formula": scale_json.get("formula"),
+            "parameters": params,
+            "band": band,
+            "evidence": list(scale_json.get("evidence") or []),
+            "falsifiers": falsifiers,
+            "prior_version": prior_ver,
+        })
+    else:
+        scale_block["present"] = False
+        scale_block["stamp"] = stamp  # may be a stamp we could not locate on disk
+    blocks.append(scale_block)
+
+    # -- 5. Conventions -----------------------------------------------------
+    grade_bands = []
+    for lo, letter, action in ((80, "A", "Buy/Add"),
+                               (60, "B", "Hold/Accumulate-on-weakness"),
+                               (45, "C", "Hold/Trim"),
+                               (0, "D", "Reduce/Avoid")):
+        # Verify the pinned band edges agree with the scorer (defensive, no drift).
+        letter_check, action_check = score_composite.grade_for(lo)
+        grade_bands.append((letter_check, lo, action_check))
+    horizon_rows = [(p, score_composite.HORIZON_YEARS[p])
+                    for p in score_composite.WEIGHTS]
+    ev_hurdle = ("EV hurdle = %g × horizon-years (an %g%%/yr return bar); EV must "
+                 "clear the hurdle to earn asymmetry points."
+                 % (score_composite._HURDLE_RATE,
+                    score_composite._HURDLE_RATE * 100))
+    blocks.append({
+        "kind": "conventions", "title": "Conventions",
+        "ev_hurdle": ev_hurdle, "grade_bands": grade_bands,
+        "horizon_years": horizon_rows, "judgment_flags": list(_JUDGMENT_FLAGS),
+    })
+
+    # -- 6. Governance ------------------------------------------------------
+    blocks.append({"kind": "governance", "title": "Governance",
+                   "sentences": list(_GOVERNANCE_SENTENCES)})
+
+    return blocks
+
+
+def _locate_scale_json(bundle, docs):
+    """Locate + read the active sector scale JSON for the methodology page, or None.
+
+    The fundamental module stamps ``sector_scale`` as "<name>@<version>" when an
+    anchored valuation used a scale. We resolve the scale NAME from that stamp and
+    look for ``trading_desk_config/scales/<name>.json`` under the bundle dir and the
+    CWD (the two conventional locations, per sector_scales.find_scale_for). Returns
+    the parsed+validated scale dict, or None when there is no stamp or the file is
+    absent/invalid (the page then renders the "no sector scale active" branch).
+    """
+    fund = docs.get("module_fundamental") or {}
+    stamp = fund.get("sector_scale")
+    if not isinstance(stamp, str) or "@" not in stamp:
+        return None
+    name = stamp.split("@", 1)[0]
+    for base in (bundle, os.getcwd()):
+        path = sector_scales.find_scale_for(base, name)
+        if path:
+            try:
+                return sector_scales.load_scale(path)
+            except ValueError:
+                continue
+    return None
+
+
+def _draw_methodology(doc, bundle, docs, y_top):
+    """Draw the METHODOLOGY appendix from ``assemble_methodology`` blocks.
+
+    100% script-generated (ZERO LLM content). Height-aware like _draw_findings_block:
+    each block is measured (its wrapped height) before it is drawn; when the next
+    block would cross the footer band the current page closes and a fresh one opens
+    under a ``METHODOLOGY (continued)`` kicker. Returns the y reached on the final
+    page. The layout matches the detail aesthetic (dense 8-9pt, hairline tables,
+    accent kickers).
+    """
+    M = doc.MARGIN
+    W = doc.CONTENT_W
+    page_bottom = doc.MARGIN + 24
+    scale_json = _locate_scale_json(bundle, docs)
+    blocks = assemble_methodology(docs, scale_json)
+
+    doc.section_head(M, y_top, "METHODOLOGY", w=W)
+    y = y_top - 16
+
+    def _kicker(yk, label):
+        doc.text(M, yk, label, font=doc.FONT_B, size=8, rgb=doc.ACCENT)
+        doc.hairline(M, yk - 3, M + W, rgb=doc.GRAY_LT)
+        return yk - 12
+
+    def _ensure(need):
+        """Page-break helper: if ``need`` px won't fit, spill to a fresh page."""
+        nonlocal y
+        if y - need < page_bottom:
+            doc.end_page()
+            top = doc.begin_page()
+            doc.section_head(M, top - 12, "METHODOLOGY (continued)", w=W)
+            y = top - 12 - 16
+
+    for block in blocks:
+        kind = block["kind"]
+        # A conservative per-block header budget so a kicker never orphans at the
+        # very bottom of a page (block bodies then flow and _ensure re-checks rows).
+        _ensure(40)
+        y = _kicker(y, block["title"])
+
+        if kind == "rubric_versions":
+            for dim, ver, src in block["rows"]:
+                _ensure(11)
+                doc.text(M + 6, y, dim, font=doc.FONT, size=7.6, rgb=doc.INK)
+                doc.text(M + 180, y, ver, font=doc.FONT_B, size=7.6,
+                         rgb=doc.GRAY_DK)
+                doc.text(M + W, y, src, font=doc.FONT_I, size=6.6,
+                         rgb=doc.GRAY_MD, align="right")
+                y -= 10.5
+            y -= 6
+
+        elif kind == "composite_weights":
+            ws = block["weight_set"]
+            note = ("%s — standard v1 shown for comparison" % ws
+                    if block["custom"] else ws)
+            doc.text(M + 6, y, "Weight set: %s" % note, font=doc.FONT_I,
+                     size=7.0, rgb=doc.GRAY_MD)
+            y -= 11
+            dims = block["dims"]
+            dim_short = {"technical": "Tech", "fundamental": "Fund",
+                         "sentiment": "Sent", "risk": "Risk",
+                         "thesis_conviction": "Conv"}
+            # Column header row (profile + one column per dimension weight).
+            col0 = M + 6
+            colw = (W - 90) / len(dims)
+            _ensure(11)
+            doc.text(col0, y, "Profile", font=doc.FONT_B, size=6.6,
+                     rgb=doc.GRAY_MD)
+            for i, d in enumerate(dims):
+                doc.text(M + 90 + colw * i + colw / 2, y, dim_short.get(d, d),
+                         font=doc.FONT_B, size=6.6, rgb=doc.GRAY_MD,
+                         align="center")
+            doc.hairline(M, y - 3, M + W, rgb=doc.GRAY_LT)
+            y -= 11
+            for profile, used, std in block["rows"]:
+                _ensure(11 if std is None else 20)
+                doc.text(col0, y, profile, font=doc.FONT_B, size=7.4, rgb=doc.INK)
+                for i, d in enumerate(dims):
+                    doc.text(M + 90 + colw * i + colw / 2, y,
+                             _fmt_num(used.get(d)), font=doc.FONT, size=7.4,
+                             rgb=doc.INK, align="center")
+                y -= 10.5
+                if std is not None:
+                    doc.text(col0, y, "standard v1", font=doc.FONT_I, size=6.8,
+                             rgb=doc.GRAY_MD)
+                    for i, d in enumerate(dims):
+                        doc.text(M + 90 + colw * i + colw / 2, y,
+                                 _fmt_num(std.get(d)), font=doc.FONT_I, size=6.8,
+                                 rgb=doc.GRAY_MD, align="center")
+                    y -= 10.5
+            y -= 6
+
+        elif kind == "valuation_formula":
+            doc.text(M + 6, y, "Valuation mode: %s" % block["mode"],
+                     font=doc.FONT_B, size=7.4, rgb=doc.INK)
+            y -= 11
+            for comp_name, mx in block["maxima"]:
+                _ensure(10)
+                doc.text(M + 12, y, comp_name, font=doc.FONT, size=7.4,
+                         rgb=doc.GRAY_DK)
+                doc.text(M + 12 + 190, y, "max %s" % _fmt_num(mx),
+                         font=doc.FONT_B, size=7.4, rgb=doc.INK)
+                y -= 9.8
+            if block["peg_line"]:
+                _ensure(11)
+                y -= 1
+                for ln in doc.wrap(block["peg_line"], doc.FONT_I, 7.2, W - 12):
+                    doc.text(M + 6, y, ln, font=doc.FONT_I, size=7.2,
+                             rgb=doc.GRAY_MD)
+                    y -= 9.4
+            _ensure(20)
+            y -= 2
+            for ln in doc.wrap(block["disagreement_rule"], doc.FONT, 7.2, W - 6):
+                doc.text(M + 6, y, ln, font=doc.FONT, size=7.2, rgb=doc.GRAY_DK)
+                y -= 9.4
+            y -= 6
+
+        elif kind == "sector_scale":
+            if not block.get("present"):
+                stamp = block.get("stamp")
+                msg = ("No sector scale active — standard bands."
+                       if not stamp else
+                       "Sector scale %s stamped but not locatable on disk — "
+                       "standard bands." % stamp)
+                for ln in doc.wrap(msg, doc.FONT_I, 7.4, W - 6):
+                    doc.text(M + 6, y, ln, font=doc.FONT_I, size=7.4,
+                             rgb=doc.GRAY_MD)
+                    y -= 9.6
+                y -= 6
+            else:
+                head = "%s  (effective %s)" % (block["stamp"],
+                                               block.get("effective") or "?")
+                doc.text(M + 6, y, head, font=doc.FONT_B, size=7.6, rgb=doc.INK)
+                y -= 11
+                basis = block.get("basis")
+                if basis:
+                    for ln in doc.wrap("Basis: %s" % basis, doc.FONT, 7.2,
+                                       W - 12):
+                        _ensure(9)
+                        doc.text(M + 12, y, ln, font=doc.FONT, size=7.2,
+                                 rgb=doc.GRAY_DK)
+                        y -= 9.2
+                doc.text(M + 6, y, "Formula: %s" % block.get("formula"),
+                         font=doc.FONT, size=7.2, rgb=doc.GRAY_DK)
+                y -= 10
+                # Parameters table.
+                params = block.get("parameters") or []
+                if params:
+                    doc.text(M + 6, y, "Parameters", font=doc.FONT_B, size=6.8,
+                             rgb=doc.GRAY_MD)
+                    y -= 9.5
+                    for k, v in params:
+                        _ensure(9)
+                        doc.text(M + 12, y, str(k), font=doc.FONT, size=7.2,
+                                 rgb=doc.GRAY_DK)
+                        doc.text(M + 12 + 160, y, _fmt_num(v), font=doc.FONT_B,
+                                 size=7.2, rgb=doc.INK)
+                        y -= 9.0
+                band = block.get("band")
+                if isinstance(band, dict):
+                    _ensure(9)
+                    doc.text(M + 6, y, "Band [low/mid/high]: %s / %s / %s"
+                             % (_fmt_num(round(band.get("low"), 4)
+                                         if band.get("low") is not None else None),
+                                _fmt_num(round(band.get("mid"), 4)
+                                         if band.get("mid") is not None else None),
+                                _fmt_num(round(band.get("high"), 4)
+                                         if band.get("high") is not None else None)),
+                             font=doc.FONT, size=7.2, rgb=doc.GRAY_DK)
+                    y -= 10
+                evidence = block.get("evidence") or []
+                if evidence:
+                    _ensure(9)
+                    doc.text(M + 6, y, "Evidence: %s" % ", ".join(evidence),
+                             font=doc.FONT_I, size=7.0, rgb=doc.GRAY_MD)
+                    y -= 9.5
+                # Falsifiers table.
+                fals = block.get("falsifiers") or []
+                if fals:
+                    _ensure(11)
+                    doc.text(M + 6, y, "Falsifiers", font=doc.FONT_B, size=6.8,
+                             rgb=doc.GRAY_MD)
+                    doc.hairline(M, y - 3, M + W, rgb=doc.GRAY_LT)
+                    y -= 10
+                    cols = [M + 6, M + 6 + 150, M + 6 + 205]
+                    for j, hd in enumerate(("Metric", "Op", "Value")):
+                        doc.text(cols[j], y, hd, font=doc.FONT_B, size=6.4,
+                                 rgb=doc.GRAY_MD)
+                    y -= 9
+                    for metric, op, value, meaning in fals:
+                        _ensure(9)
+                        doc.text(cols[0], y, doc.truncate(str(metric), doc.FONT,
+                                 7.0, 140), font=doc.FONT, size=7.0, rgb=doc.INK)
+                        doc.text(cols[1], y, str(op), font=doc.FONT, size=7.0,
+                                 rgb=doc.GRAY_DK)
+                        doc.text(cols[2], y, _fmt_num(value), font=doc.FONT,
+                                 size=7.0, rgb=doc.GRAY_DK)
+                        y -= 8.6
+                        if meaning:
+                            for ln in doc.wrap("— %s" % meaning, doc.FONT_I,
+                                               6.6, W - 18):
+                                _ensure(8)
+                                doc.text(cols[0] + 6, y, ln, font=doc.FONT_I,
+                                         size=6.6, rgb=doc.GRAY_MD)
+                                y -= 8.0
+                        y -= 1
+                pv = block.get("prior_version")
+                _ensure(9)
+                doc.text(M + 6, y, "Prior version: %s"
+                         % (pv if pv else "none (first version)"),
+                         font=doc.FONT_I, size=7.0, rgb=doc.GRAY_MD)
+                y -= 10
+                y -= 4
+
+        elif kind == "conventions":
+            for ln in doc.wrap(block["ev_hurdle"], doc.FONT, 7.2, W - 6):
+                _ensure(9)
+                doc.text(M + 6, y, ln, font=doc.FONT, size=7.2, rgb=doc.GRAY_DK)
+                y -= 9.4
+            y -= 2
+            # Grade bands row.
+            _ensure(10)
+            doc.text(M + 6, y, "Grade bands:", font=doc.FONT_B, size=7.2,
+                     rgb=doc.INK)
+            bands = "  ·  ".join("%s ≥ %s (%s)" % (letter, lo, action)
+                                 for letter, lo, action in block["grade_bands"])
+            for ln in doc.wrap(bands, doc.FONT, 7.0,
+                               W - doc.string_width("Grade bands: ", doc.FONT_B,
+                                                    7.2) - 10):
+                doc.text(M + 6 + doc.string_width("Grade bands: ", doc.FONT_B,
+                         7.2), y, ln, font=doc.FONT, size=7.0, rgb=doc.GRAY_DK)
+                y -= 9.2
+            y -= 2
+            # Horizon years per profile.
+            _ensure(9)
+            hz = "  ·  ".join("%s %sy" % (p, _fmt_num(yrs))
+                              for p, yrs in block["horizon_years"])
+            doc.text(M + 6, y, "Horizon (years): %s" % hz, font=doc.FONT,
+                     size=7.2, rgb=doc.GRAY_DK)
+            y -= 10
+            # Judgment flags.
+            _ensure(11)
+            doc.text(M + 6, y, "Judgment flags (script-applied points, mandatory "
+                     "justification):", font=doc.FONT_B, size=7.0, rgb=doc.INK)
+            y -= 9.5
+            flags = "; ".join(block["judgment_flags"])
+            for ln in doc.wrap(flags, doc.FONT, 7.0, W - 12):
+                _ensure(9)
+                doc.text(M + 12, y, ln, font=doc.FONT, size=7.0, rgb=doc.GRAY_DK)
+                y -= 9.0
+            y -= 6
+
+        elif kind == "governance":
+            for i, sentence in enumerate(block["sentences"], start=1):
+                _ensure(11)
+                lines = doc.wrap("%d. %s" % (i, sentence), doc.FONT, 7.2, W - 12)
+                _ensure(len(lines) * 9.2)
+                for ln in lines:
+                    doc.text(M + 6, y, ln, font=doc.FONT, size=7.2,
+                             rgb=doc.GRAY_DK)
+                    y -= 9.2
+                y -= 2
+            y -= 4
+
+    return y
+
+
+def _measure_methodology_pages(docs_ticker_asof, footer_bits, bundle, docs, y_top):
+    """Pages the METHODOLOGY appendix consumes, WITHOUT drawing to the real doc.
+
+    Mirrors _measure_context_pages: draws onto a throwaway canvas (same layout
+    code) so the p N/M footer count stays exact even when the appendix spills to a
+    METHODOLOGY (continued) page. Returns the page count.
+    """
+    scratch = Doc(os.devnull, docs_ticker_asof[0], "Detail",
+                  docs_ticker_asof[1], footer_bits)
+    scratch.total_pages = 1
+    scratch.begin_page()
+    _draw_methodology(scratch, bundle, docs, y_top)
+    return scratch._page_no
 
 
 def _draw_appendix(doc, bundle, docs, y_top):
@@ -2120,14 +2849,23 @@ def render_detail(bundle, docs, slots, diff, prev_date, out_path):
         _measure_context_pages(ticker_asof, df, docs, context, context_top)
         if context_ok else 0)
 
+    # METHODOLOGY appendix page count: >=1, measured because a long sector-scale
+    # falsifier table (or a CUSTOM dual weight table) can spill onto a
+    # METHODOLOGY (continued) page.
+    methodology_pages = _measure_methodology_pages(ticker_asof, df, bundle, docs,
+                                                   page_top)
+
     # 2 exec + 1 why-this-call (carries the context DISCLOSURE inline when no
     # stamped module) + the measured context page(s) ONLY when the narrative
     # exists (fix 4e: a one-line disclosure never burns a near-empty page) +
-    # packed dim pages + 1 options + 1 downside/monitoring + 1 appendix.
-    doc.total_pages = 2 + 1 + context_pages + len(pages) + 3
+    # packed dim pages + 1 options + 1 downside/monitoring + 1 appendix +
+    # the measured METHODOLOGY page(s).
+    doc.total_pages = 2 + 1 + context_pages + len(pages) + 3 + methodology_pages
 
-    # Exec pages first (repeated).
-    _draw_exec_page1(doc, bundle, docs, slots, diff, prev_date)
+    # Exec pages first (repeated). Detail p1 carries the scale-governance banner(s)
+    # from the bundle's refresh plan (if present) — the standalone exec doc does not.
+    plan = load_refresh_plan(bundle)
+    _draw_exec_page1(doc, bundle, docs, slots, diff, prev_date, plan=plan)
     _draw_exec_page2(doc, bundle, docs, slots)
 
     # WHY THIS CALL page (right after the exec repeat) — the argued case. When no
@@ -2185,6 +2923,13 @@ def render_detail(bundle, docs, slots, diff, prev_date, out_path):
     top = doc.begin_page()
     y = _draw_appendix(doc, bundle, docs, top - 12)
     _draw_integrity_footer_page(doc, docs, y - 20)
+    doc.end_page()
+
+    # METHODOLOGY appendix (transparency) — the final page(s). 100% script-generated
+    # from the module JSONs + the active scale; height-aware (spills to a
+    # METHODOLOGY (continued) page when the scale/weight tables are long).
+    top = doc.begin_page()
+    _draw_methodology(doc, bundle, docs, top - 12)
     doc.end_page()
 
     doc.save()
@@ -2288,6 +3033,18 @@ def _draw_what_changed_table(doc, x, y_top, w, diff, prev_date):
             emit(_DIM_LABELS[name], diff["dimensions"][name])
     emit("Entry 1", diff["entry_1"], money=True)
     emit("EV(current)", diff["ev_at_current"], pct=True)
+
+    # Machinery transitions (weight-set / sector-scale) — one row each only when the
+    # stamp CHANGED between runs (a governance-visible transition). The old→new
+    # string sits in the Prior column, spanning to the New column (it is a label,
+    # not a numeric delta), so the Δ column stays "—".
+    for label, transition in _transition_rows(diff):
+        doc.text(cols[0], y, label, font=doc.FONT, size=7.6, rgb=doc.INK)
+        doc.text(cols[1], y, doc.truncate(transition, doc.FONT, 7.6,
+                 cols[3] - cols[1]), font=doc.FONT_B, size=7.6, rgb=doc.ACCENT)
+        doc.text(cols[3], y, "—", font=doc.FONT, size=7.6, rgb=doc.GRAY_MD,
+                 align="right")
+        y -= 11
     return y
 
 
@@ -2318,6 +3075,11 @@ def render_delta(bundle, docs, slots, diff, prev_date, out_path):
     M = doc.MARGIN
     gutter = 16
     col_w = (doc.CONTENT_W - gutter) / 2
+
+    # Scale-governance banner(s) from the bundle's refresh plan, at the top of the
+    # note (below the masthead). Shifts the body down when it renders.
+    plan = load_refresh_plan(bundle)
+    top = _draw_scale_banners(doc, plan, top - 2) + 2 if plan else top
 
     # What-Changed table (left) + score-delta bars (right).
     tbl_bottom = _draw_what_changed_table(doc, M, top - 14, col_w, diff, prev_date)
