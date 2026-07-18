@@ -1,6 +1,25 @@
 # Changelog
 
-## Unreleased
+## 0.12.0 — 2026-07-18 · Sector scales, anchored valuation, weights config, methodology
+
+Coverage anchors now SCORE (not just narrate): fundamental valuation v1.2.0 banding
+against the coverage DCF and comps, the downside floor moving to the DCF bear case,
+and a sector-agnostic **scales registry** that lets a ratified, versioned, falsifiable
+regime thesis (e.g. the HBM structural re-rating of memory) legally move the justified
+band — semi-deterministic (byte-identical given scale@version), governed (falsifier
+monitoring each refresh, adversarial proposal review, user ratification, forward-only
+history). Versioned custom composite weight-sets with standard-comparison
+transparency, and a fully script-generated METHODOLOGY appendix in every Detail PDF.
+Validated end-to-end on MU: fundamental 68 → 55.75, composite 61.1 → 58.0 (Hold/Trim),
+the long-term profile de-rating from #2 to last once valuation stopped over-crediting.
+
+- **Provenance gate admits governance stamps (V5 live finding).** Scale/weight-set
+  versions are not X.Y.Z-shaped (`2026.1`), so citing the active scale in gated prose
+  orphaned its digits — yet the full `name@version` stamp is exactly what disciplined
+  prose should cite. Bundle-carried stamps (`sector_scale`, `weight_set`) are now
+  scrubbed exact-match before the token scans; a fabricated stamp or a bare version
+  tail still orphans.
+  - Files: `scripts/report_qc.py`, `tests/test_report_renderer.py`.
 
 - **Sector-scales library + fundamental valuation v1.2.0 (anchored mode, PEG
   display-only) (Task V1).** New `scripts/sector_scales.py`: a versioned,
