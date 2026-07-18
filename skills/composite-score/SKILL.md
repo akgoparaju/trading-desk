@@ -44,11 +44,20 @@ If the user chooses install, hand them these EXACT commands (verified marketplac
 ```
 Then tell them: the new plugins load in the NEXT session — this run continues with the compressed pass, and the next analysis will use deep FSI mode automatically.
 
-    Unattended, or if the user declines, run the compressed-pass scorer directly:
+    Run the fundamental scorer. **The moat flags are context-grounded whenever `module_context.json` exists** (which it always does when this runs from full-trade-analysis Phase 2, and whenever the company-context skill has been run standalone). Read `module_context.json`'s `competitive` block (`position` / `moat_evidence`) and the `findings[]` behind it, then pass `--moat <wide|narrow|none>` with a `--moat-justification` that **cites ≥1 finding ID** (`C\d+`, e.g. `C3`):
+    ```bash
+    python3 ${CLAUDE_PLUGIN_ROOT}/scripts/score_fundamental.py \
+      --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> \
+      --moat narrow \
+      --moat-justification "durable HBM share but commoditizing DRAM caps the moat (C3, C5)"
+    ```
+    The script **exits 2** if `--moat` is given without a justification, and **exits 2** if the justification does not match the citation regex `C\d+` — so name real IDs from the context registry. `--moat wide` scores 10, `narrow` 6, `none` 2.
+
+    **The compressed-without-context floor is the last resort.** ONLY when no `module_context.json` exists (the FSI-absent floor where the context module ran `web_compressed` but produced no registry to cite, or context was skipped entirely), run the scorer with **`--moat` omitted**:
     ```bash
     python3 ${CLAUDE_PLUGIN_ROOT}/scripts/score_fundamental.py --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>
     ```
-    This is the snapshot-only compressed pass (deep FSI initiation/model reuse not applied) — **note that mode disclosure in your brief** (the module carries `fundamental_mode: "compressed_snapshot_pass"`).
+    Omitting `--moat` scores the moat sub-component `0` "n/a (no context assessment)" and does NOT count toward the dimension's evaluable inputs — **disclose that** in your brief. This is the snapshot-only compressed pass (deep FSI initiation/model reuse not applied); the module carries `fundamental_mode: "compressed_snapshot_pass"`.
 
     Then **write `<bundle>/brief_fundamental.md`** — fundamental has no standalone skill, so the composite step owns its evidence brief. Read `module_fundamental.json` directly and write the brief in the **same format as the other evidence briefs** (technical / sentiment / risk), in order:
       1. **Score headline** — `## Fundamental Score: <score>/100`. Copy `score` verbatim. If `renormalized` is true, add a one-line note quoting `renormalization_note`.
@@ -95,6 +104,8 @@ Read the four evidence briefs, then set all four flags (no defaults — each is 
 
 If you cannot justify a flag value from the briefs, pick the honest lower value — do not inflate conviction.
 
+**HARD RULE — conviction justifications and scenario reasoning ground in context finding IDs.** When `module_context.json` exists, the `--variant-justification`, `--catalyst-clarity-justification`, and `--scenario-reasoning` MUST cite the context registry by ID (`(C<n>)`): a `variant` call rests on the argued `module_context.cases`; a `catalyst-clarity` call on the `module_context.live_tape` and its dated findings. A conviction justification (or a scenario-probability rationale) that asserts a differentiated / dated view with **no `(C<n>)` anchor is unanchored** — cite the finding or drop to the honest lower flag. (These justification strings are free-text — the script does not regex them — so this discipline is on you; the moat justification IS regex-gated by `score_fundamental.py`.)
+
 ---
 
 ## Step 4 — Choose the profile and run the scorer
@@ -105,9 +116,9 @@ Ask the user for the profile if interactive; otherwise default `balanced`. The p
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/score_composite.py \
   --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> \
   --scenarios ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>/scenarios.json \
-  --scenario-reasoning "HBM demand is the asymmetric driver; base assumes in-line ramp" \
-  --variant some --variant-justification "differentiated on gross-margin path vs street" \
-  --catalyst-clarity clear --catalyst-clarity-justification "HBM3E ramp dated to next print" \
+  --scenario-reasoning "HBM demand is the asymmetric driver (C2); base assumes in-line ramp" \
+  --variant some --variant-justification "differentiated on gross-margin path vs street (C4)" \
+  --catalyst-clarity clear --catalyst-clarity-justification "HBM3E ramp dated to next print (C2)" \
   --invalidation both-legs --invalidation-justification "thesis: GM stalls <35%; trade stop below 200DMA" \
   --profile balanced
 ```
@@ -155,6 +166,7 @@ Report to the user (and to any calling skill):
 - **Grade bands are fixed.** A ≥80 → Buy/Add; B 60–79 → Hold/Accumulate-on-weakness; C 45–59 → Hold/Trim; D <45 → Reduce/Avoid. Never re-band.
 - **Scenario probabilities MUST carry reasoning.** `--scenario-reasoning` is mandatory. `25/50/25` is a disclosed fallback for "no differentiated view", never a lazy default you leave silent.
 - **The EV hurdle is profile-scoped, but sensitivity re-bands it.** The chosen profile's thesis-conviction EV asymmetry uses that profile's hurdle (`0.08 × horizon_years`). The `sensitivity` block recomputes the FULL composite — including the EV asymmetry re-banded per each profile's own hurdle — for all three profiles, which is why the same name can grade B under one lens and C under another.
+- **Context-grounded fundamentals + conviction (coverage-first).** When `module_context.json` exists, the fundamental step ALWAYS passes `--moat <wide|narrow|none> --moat-justification "<cites C-IDs>"` derived from `module_context.competitive` (the script exits 2 on a missing or non-citing justification), and the conviction/scenario justifications cite the context registry by ID. Compressed-without-context (no registry to cite) is the **last-resort floor**: `--moat` is omitted (moat sub-component `0` "n/a"), disclosed. The context module is UNSCORED — it grounds fundamental's moat and conviction's reasoning; it never adds a composite dimension, so single-mapping holds.
 - **Single-mapping preserved by construction.** This module scores NO snapshot field directly — it consumes module scores and reads `price.last` only as an EV reference. Its `INPUT_FIELDS` is empty, so it can never collide with an evidence module.
 - **Calibration is provisional.** The composite rubric's bands and weights are provisional until 5–10 names have been scored and the grade distribution reviewed — say so if a reader treats a single grade as gospel.
 - **Rubric version travels with the numbers.** The rubric version (`1.0.0`) is printed in the module JSON and MUST appear in the brief footer, so any reader can tell which scoring rule produced the call.

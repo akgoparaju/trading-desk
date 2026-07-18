@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+- **Coverage-first pipeline wiring (Task C3, SKILL prose): always-initiate,
+  context-grounded judgments, compressed demoted to floor.** Deep coverage is now
+  the DEFAULT read; the compressed pass is the FSI-absent floor only; the context
+  module feeds scoring.
+  - `full-trade-analysis`: new **Phase 0.5 — Coverage** (after scope, before
+    snapshot). Coverage EXISTS → freshness check, run FSI `model-update` if a quarter
+    postdates the model. ABSENT + FSI installed → ANNOUNCE + always-initiate (invoke
+    `equity-research:initiating-coverage` Tasks 1-3 only — research/model/valuation;
+    skip its Tasks 4-5, our docket owns charts/report — artifacts into `coverage/`;
+    "skip initiation" overrides per-run, records nothing). ABSENT + FSI absent →
+    recorded `fsi_offer` flow; declined → COMPRESSED FLOOR, loudly disclosed. Phase 2
+    gains the `company-context` invocation (mode per 0.5; parallel with
+    technical/sentiment; completes before composite; evidence gate now requires
+    `module_context.json`). Phase 3: HARD RULE — fundamental passes
+    `--moat <wide|narrow|none> --moat-justification "<cites C-IDs>"` from
+    `module_context.competitive` (`score_fundamental.py` exits 2 without a
+    C-ID-citing justification), and conviction flags + scenario probabilities ground
+    their justifications in context finding IDs. Phase 5/6 deliverables +
+    completeness report coverage mode (coverage_distilled vs web_compressed) and
+    initiation-run-this-session.
+  - `composite-score`: fundamental step ALWAYS passes the moat flags citing context
+    finding IDs when `module_context.json` exists; C-ID grounding rule for conviction
+    justifications; compressed-without-context (moat omitted → 0 n/a) demoted to the
+    last-resort floor, disclosed.
+  - `refresh-analysis`: coverage freshness in the plan step (new quarter since
+    coverage model → FSI `model-update` before rescoring, noted in plan); context
+    refresh rule — `live_tape` ALWAYS re-authored from fresh news, business/
+    competitive/cases carried forward `[carried forward from <date>]` unless
+    `judgment_review_required` → re-affirm, finding IDs stable, `--context` gate
+    re-run with `--previous`.
+  - README: new "Coverage-first analysis" section; FSI section reframed as
+    load-bearing for full depth; `company-context` added to the skills table + module
+    tree.
+- **Files:** `skills/full-trade-analysis/SKILL.md`,
+  `skills/composite-score/SKILL.md`, `skills/refresh-analysis/SKILL.md`, `README.md`.
+  Prose-only (no scripts); suite unchanged at 818 tests green.
 - **Fundamental rubric v1.0.0 -> v1.1.0 (coverage-first, Task C1): moat/positioning
   enters scoring via cited context.** The Quality dimension (still max 50) is
   rebalanced from five mechanical components to six: the mechanical bands shrink

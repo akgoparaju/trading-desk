@@ -46,7 +46,27 @@ Genuinely unattended (scheduled/cron re-runs) → compressed pass + disclose + r
 
 The source + data-mode preflight (Phase 1) runs inside market-snapshot — it reads `./trading_desk_config.json` (ask-once source selection) and detects the AV tier; fold both outcomes into the scope echo once known.
 
-One-line echo, e.g.: `Running full-trade-analysis MU · profile=balanced (assumed) · horizon: swing into next print · no position context · fundamental: compressed pass (no FSI initiation found) · data_source: alphavantage · data_mode: alpha_vantage.`
+One-line echo, e.g.: `Running full-trade-analysis MU · profile=balanced (assumed) · horizon: swing into next print · no position context · fundamental: coverage (deep, current) · data_source: alphavantage · data_mode: alpha_vantage.`
+
+---
+
+## Phase 0.5 — Coverage (deep is the DEFAULT; compressed is the FSI-absent floor)
+
+**The design in one line:** deep coverage is the default read; the compressed pass is the floor you fall to ONLY when FSI is absent and declined; `module_context` (Phase 2) feeds scoring either way. Check for existing coverage, and if absent, **always initiate** when FSI is installed — coverage is permanent and later runs are cheap, so the first run pays for every run after it.
+
+Look for `./trading_desk_<TICKER>/coverage/` (the FSI initiation artifacts — research / model / valuation) and branch:
+
+**(a) Coverage EXISTS.** Run a **freshness check**: compare the latest reported quarter in `snapshot.events` / `snapshot.fundamentals` against the quarter the coverage model was built on (the model artifact's own as-of / last-modeled quarter). If a reported quarter **postdates** the model artifacts, the model is stale — **run FSI `equity-research:model-update` on the `coverage/` artifacts** (mandatory per spec: stale coverage that scores as if current is a lie) before scoring, updating them in place. Announce plainly: `coverage current` (no newer quarter) or `coverage updated — model-update run for <quarter>` (refreshed). Coverage now feeds Phase 2 in `coverage_distilled` mode.
+
+**(b) Coverage ABSENT + FSI installed** (`equity-research:*` skills available). **ANNOUNCE plainly, then INITIATE — no ask** (always-initiate is the recorded default):
+> "No coverage for <TICKER> — running initiation now (FSI `initiating-coverage` Tasks 1-3: company research, financial model, valuation; typically 30-60+ min, token-heavy; coverage is permanent and later runs are cheap)."
+
+Then **INVOKE the `equity-research:initiating-coverage` skill scoped to Tasks 1-3 ONLY** — company research, the financial model, and the valuation. That skill requires **task-by-task execution with verified prerequisites** (it is its own gated workflow) — FOLLOW its SKILL, running Task 1 → Task 2 → Task 3 in order. **SKIP its Tasks 4-5** (chart generation, final report assembly): our docket renders charts and our report-renderer assembles the report, so those FSI stages are redundant. Direct the three artifacts into `./trading_desk_<TICKER>/coverage/` (the `research.md` / `model.md` / `valuation.md` layout the company-context skill reads). Coverage then feeds Phase 2 in `coverage_distilled` mode. (A user may say **"skip initiation"** to override for this one run → fall through to compressed as in (c); record nothing — the default stays always-initiate.)
+
+**(c) Coverage ABSENT + FSI absent** (no `equity-research:*` skills). This is the **recorded `fsi_offer` flow** (unchanged from Phase 0's FSI runtime offer — the ask-once, RECORDED gate above): honor a recorded choice silently, else ask once and record. If the user **installs**, the plugins load next session and *this* run continues compressed. If the user **declines** (or a recorded `"compressed"` choice), the run drops to the **COMPRESSED FLOOR, LOUDLY DISCLOSED**:
+> "Running compressed — no coverage, no FSI; the context module runs `web_compressed` and the fundamental moat is scored from cited web research, not a distilled model."
+
+Announce the coverage outcome in one line, e.g.: `Coverage: initiated this session (FSI Tasks 1-3) — coverage_distilled.` / `Coverage: current — coverage_distilled.` / `Coverage: none (FSI declined) — compressed floor, context runs web_compressed.` Carry the **coverage mode** (`coverage_distilled | web_compressed`) and **whether initiation ran this session** forward to Phases 2, 5, and 6.
 
 ---
 
@@ -66,8 +86,10 @@ Dispatch evidence scoring to **subagents via the Agent tool**, one per module, s
 
 **Dependency: technical-analysis must COMPLETE before risk-analytics starts** — risk-analytics reads the S/R ladder that technical-analysis mints (`module_technical.json`). So:
 
-- **Wave 1 (parallel):** `{ technical-analysis, sentiment-positioning }` — sentiment has no cross-module dependency; technical mints the ladder.
+- **Wave 1 (parallel):** `{ technical-analysis, sentiment-positioning, company-context }` — sentiment and context have no cross-module dependency; technical mints the ladder.
 - **Wave 2 (after wave 1 completes):** `{ risk-analytics }` — reads the ladder. (The **fundamental** compressed pass is NOT dispatched here — the **composite-score** skill runs `score_fundamental.py` itself in Phase 3 if `module_fundamental.json` is absent. Note this so you don't double-run it.)
+
+**The company-context module (Phase-0.5-scoped).** Invoke the **company-context** skill for `<TICKER>` (`${CLAUDE_PLUGIN_ROOT}/skills/company-context/SKILL.md`) in the **mode Phase 0.5 settled**: `coverage_distilled` when coverage exists/was initiated, `web_compressed` on the compressed floor. It runs parallel with technical/sentiment (no market fetch, no cross-module read — it consumes the snapshot + coverage/web), but it **MUST COMPLETE before Phase 3** — its `module_context.json` `findings[]` registry is the citation source the composite step's fundamental moat flag and conviction reasoning ground in. It is **UNSCORED** — it adds no dimension to the composite; it grounds the ones that are scored. The context skill runs its own blocking gate (`report_qc.py --context`); confirm `module_context.json` exists (with `qc.qc_passed: true`) before the composite.
 
 **Every subagent prompt MUST contain, verbatim in spirit:**
 1. **The bundle path** — `./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>` (absolute is safest; legacy `./td_bundle_<TICKER>_<date>` bundles also resolve via the discovery glob).
@@ -78,17 +100,22 @@ Dispatch evidence scoring to **subagents via the Agent tool**, one per module, s
 3. **The judgment-flag protocol** — set only honestly-supported flags off the snapshot's own text/context, each with a one-line written justification; an unjustifiable flag is a fabrication, not just a script error. (Sentiment: `--rating-actions` / `--inst-flow` / `--insider-baseline`. Technical: `--divergence` only with `--divergence-justification` citing chart evidence. Risk: the stress scenario `--stress-pct` + `--top-risk`, both together or neither.)
 4. **Single-snapshot + no-arithmetic-in-prose** — the subagent fetches nothing and computes nothing in text; every cited number already sits in the module JSON or snapshot.
 5. **Return contract:** the **score + the module JSON path + a ≤5-line summary** only. Briefs (`brief_<dim>.md`) live in the bundle, NOT in the conversation — never paste a brief or a file dump back.
-6. **Model guidance:** run at a **sonnet-or-opus class** model — a capable scorer, **never a frontier orchestrator model**. These are bounded, script-driven tasks; a heavyweight model wastes budget.
+6. **Model guidance:** run at a **sonnet-or-opus class** model — a capable scorer, **never a frontier orchestrator model**. These are bounded, script-driven tasks; a heavyweight model wastes budget. (The company-context skill runs the same class — it is authoring a cited registry off the snapshot + coverage, not orchestrating.)
 
-**GATE — evidence complete.** Confirm `module_technical.json`, `module_sentiment.json`, and `module_risk.json` all exist in the bundle, and that each subagent cited the snapshot only (no fetches). A module that internally renormalized around a null dimension is fine and disclosed — the **file** must exist.
+**GATE — evidence complete.** Confirm `module_technical.json`, `module_sentiment.json`, `module_risk.json`, and `module_context.json` all exist in the bundle (context's `qc.qc_passed` is `true`), and that each subagent cited the snapshot only (no fetches). A module that internally renormalized around a null dimension is fine and disclosed — the **file** must exist. The context module MUST be present before Phase 3 (the composite step cites its `findings[]` IDs).
 
 ---
 
 ## Phase 3 — Score
 
-Invoke the **composite-score** skill for `<TICKER>` at the chosen `--profile`. It: ensures the four evidence modules exist (running the **fundamental compressed pass** — `score_fundamental.py` — itself if `module_fundamental.json` is absent, in `compressed_snapshot_pass` mode); constructs the scenario set with **stated probability reasoning** (real anchors, `25/50/25` only as a disclosed fallback); sets the four conviction flags with honest justifications read off the evidence briefs; runs `score_composite.py`; and writes `brief_composite.md`.
+Invoke the **composite-score** skill for `<TICKER>` at the chosen `--profile`. It: ensures the four evidence modules exist (running the **fundamental pass** — `score_fundamental.py` — itself if `module_fundamental.json` is absent); constructs the scenario set with **stated probability reasoning** (real anchors, `25/50/25` only as a disclosed fallback); sets the four conviction flags with honest justifications read off the evidence briefs; runs `score_composite.py`; and writes `brief_composite.md`.
 
-**GATE — composite exists.** `module_composite.json` is present; scenario probabilities summed to 1.0 (the script enforces this — exit 2 otherwise); if ≥3 of 5 dimensions were missing the script would have exited 2. Capture the call (grade / action / score) and the three-profile sensitivity row.
+**HARD RULE — judgments ground in context finding IDs.** `module_context.json` is present (Phase 2 gate). The composite step MUST use it:
+
+- **The fundamental step passes the moat flags.** When `module_context.json` exists, `score_fundamental.py` is run with `--moat <wide|narrow|none> --moat-justification "<text citing ≥1 context finding ID, e.g. C3>"`, the level and citations derived from `module_context.competitive` (its `moat_evidence` / `position` and the `findings[]` behind them). This is not optional: `score_fundamental.py` **exits 2** if `--moat` is given without a justification, and **exits 2** if the justification does not match the citation regex `C\d+` — so the justification MUST name real finding IDs from the context registry. (Omitting `--moat` scores the moat sub-component `0` "n/a" — only correct on the compressed floor where no context registry exists to cite.)
+- **The four conviction flags and the scenario probabilities MUST cite context finding IDs** in their justifications. `--variant-justification` and `--catalyst-clarity-justification` (and the scenario `--scenario-reasoning`) ground their claims in `module_context` findings by ID — a variant call rests on the argued cases (`module_context.cases`), a catalyst-clarity call on the live tape (`module_context.live_tape`) and its findings. State this as a hard rule to the composite step: **a conviction justification or a scenario-probability rationale that asserts a differentiated view without a `(C<n>)` anchor is unanchored** — cite the finding or lower the flag.
+
+**GATE — composite exists.** `module_composite.json` is present; scenario probabilities summed to 1.0 (the script enforces this — exit 2 otherwise); if ≥3 of 5 dimensions were missing the script would have exited 2; and `module_fundamental.json`'s `flags` carry the moat level + a C-ID-citing justification (unless the compressed floor omitted `--moat`). Capture the call (grade / action / score) and the three-profile sensitivity row.
 
 ---
 
@@ -109,7 +136,7 @@ Invoke the **report-renderer** skill for the bundle: `render_report.py` writes t
 
 **GATE — report QC (`report_qc.py` exit 0, BLOCKING).** Fix the **prose**, never the numbers: `no_empty_slots` → fill the slot; `number_provenance` orphan → remove/rephrase to a printed figure (never invent a number); a table-driven check failing (composite_arithmetic / ev_consistency / sizing / strikes / pop_method) is an upstream module bug — fix the module and re-render. A genuinely justified failure may be `--waive "check:reason"` (disclosed, never to hide a fabricated number). Re-run until exit 0.
 
-**Deliver:** the **report path** — `render_report.py` writes it to the **ticker parent** `./trading_desk_<TICKER>/<TICKER>_Trade_Report_<date>.md` (a sibling of the `detail_reports_<date>/` data folder; legacy bundles keep it inside), printed to stdout — plus the **composite line** (`grade — action, score/100, profile`) + the **expression line** (recommended structure/size for the profile) + the **QC attestation** (gate verdict).
+**Deliver:** the **report path** — `render_report.py` writes it to the **ticker parent** `./trading_desk_<TICKER>/<TICKER>_Trade_Report_<date>.md` (a sibling of the `detail_reports_<date>/` data folder; legacy bundles keep it inside), printed to stdout — plus the **composite line** (`grade — action, score/100, profile`) + the **expression line** (recommended structure/size for the profile) + the **coverage line** (`coverage_distilled` vs `web_compressed`, and "initiation run this session" if Phase 0.5 (b) fired) + the **QC attestation** (gate verdict).
 
 **Then the docket (report-renderer Step 5).** After the md gate is green, report-renderer renders the **docket** — the `exec` (2pp) and `detail` (~10-15pp) PDFs — into the ticker parent (`<TICKER>_Trade_Report_<date>.pdf` / `<TICKER>_Detail_<date>.pdf`), gated by the `pdf_slots.json` provenance stamp. This requires the matplotlib+reportlab render venv: if `render_env.py --check` exits 3 the report ships **md-only** and the docket is skipped (disclosed, with the one-line bootstrap) — it never blocks the run. **Deliver the two PDF paths (or the md-only note).**
 
@@ -124,7 +151,7 @@ Invoke the **report-renderer** skill for the bundle: `render_report.py` writes t
 
 If the user accepts AND a scheduling facility is available (the `schedule` skill or `CronCreate`), create it — the scheduled action is exactly the re-run + `render_report.py --delta --previous <this_bundle>`. If no facility is available (or the user declines), hand them the one-line manual command instead. Never auto-create a schedule the user did not accept.
 
-**(c) Completeness statement (MANDATORY).** Emit the embedded completeness block: which of the five dimensions ran, which renormalized or were missing, whether FSI initiation coverage was reused or the compressed pass ran, the snapshot's `meta.data_mode`, its `meta.api_tier_notes`, and **whether the docket rendered (exec + detail PDFs) or degraded to md-only** (render venv not built). **When `data_mode` is not `alpha_vantage`, name it explicitly and list `fundamentals.web_transcribed_fields`** (the fields sourced from cited web transcription) so a reader sees the reduced-provenance surface. The report always ships with this statement even under degradation.
+**(c) Completeness statement (MANDATORY).** Emit the embedded completeness block: which of the five dimensions ran, which renormalized or were missing, the **coverage mode** (`coverage_distilled` vs `web_compressed`) and **whether an initiation was run this session** (Phase 0.5 (b)), whether the coverage model was current or `model-update`d this run, the snapshot's `meta.data_mode`, its `meta.api_tier_notes`, and **whether the docket rendered (exec + detail PDFs) or degraded to md-only** (render venv not built). **When `data_mode` is not `alpha_vantage`, name it explicitly and list `fundamentals.web_transcribed_fields`** (the fields sourced from cited web transcription) so a reader sees the reduced-provenance surface. The report always ships with this statement even under degradation.
 
 ---
 
@@ -153,9 +180,9 @@ _Sourced from bundle module JSONs · rubric versions in the report footer._
 
 ```markdown
 ### Run completeness — <TICKER> <YYYY-MM-DD>
-- **Dimensions run:** technical / fundamental / sentiment / risk / thesis-conviction — <ran | renormalized | missing> each.
+- **Dimensions run:** technical / fundamental / sentiment / risk / thesis-conviction — <ran | renormalized | missing> each. Context module (unscored): <ran, coverage_distilled | ran, web_compressed | missing>.
 - **Renormalized / missing:** <list any dimension the composite excluded or rescaled, or "none">.
-- **Fundamental depth:** <FSI initiation reused | compressed_snapshot_pass>.
+- **Coverage:** <coverage_distilled (current) | coverage_distilled (model-update run this session for <quarter>) | coverage_distilled (initiated this session, FSI Tasks 1-3) | web_compressed (compressed floor — no coverage, FSI absent/declined)>.
 - **Data mode:** <meta.data_mode; when not alpha_vantage, add: web-transcribed fields = <fundamentals.web_transcribed_fields, or "none">, options = stand-aside>.
 - **API tier notes:** <snapshot meta.api_tier_notes, verbatim>.
 - **Gates:** snapshot QC <PASS/WAIVED:…> · report QC <PASS/WAIVED:…>.
@@ -176,6 +203,7 @@ _Sourced from bundle module JSONs · rubric versions in the report footer._
 ## Important Notes
 
 - **Single-snapshot rule (pipeline-wide).** One `snapshot.json` feeds every module and every subagent. Nobody re-fetches market data; a missing figure is a snapshot extension request, not a fetch.
+- **Coverage-first: deep is the default, compressed is the floor.** Phase 0.5 initiates coverage the first time a ticker is seen (FSI installed) — the always-initiate default — because coverage is permanent and every later run reuses it cheaply. Stale coverage is `model-update`d, never scored as current. The compressed `web_compressed` floor is reached ONLY when FSI is absent and declined, and it is loudly disclosed. Either way the context module grounds scoring; the difference is `coverage_distilled` (distilled from the FSI model) vs `web_compressed` (cited web research).
 - **Data mode gates the depth, not the pipeline.** The market-snapshot preflight sets `alpha_vantage | av_free_degraded | web_fallback`. A degraded/fallback run still produces an honest, QC-passing report — options stand aside, fundamentals may be web-transcribed — but the completeness statement must name the mode. Only a FAILED snapshot QC gate stops the line.
 - **Subagent prompts forbid arithmetic-in-prose.** Every subagent must be told: cite only numbers already in the module JSON / snapshot; a number you would compute is a script change, not a prose change. This is the same rule the modules encode — the orchestrator enforces it at dispatch.
 - **Token hygiene.** Subagents return **paths + a ≤5-line summary**, never briefs or file dumps. Briefs live in the bundle; the report-renderer condenses them. **The options chain file is never read by anyone** but `scripts/chain.py`.

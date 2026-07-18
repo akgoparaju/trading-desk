@@ -55,7 +55,7 @@ trading_desk_<TICKER>/
 └── detail_reports_<date>/               ← the dated bundle
     ├── snapshot_<TICKER>_<date>.json     ← the verified single source of truth
     ├── manifest.json                     ← sources + data_mode + retrieval timestamps
-    ├── module_{technical,risk,sentiment,fundamental,composite,tradeplan,options}.json
+    ├── module_{technical,risk,sentiment,context,fundamental,composite,tradeplan,options}.json
     ├── brief_<dim>.md                    ← per-dimension evidence briefs
     ├── pdf_slots.json                    ← docket prose slots (provenance-gated)
     ├── charts/                           ← deterministic chart pack (script-minted PNGs)
@@ -76,9 +76,19 @@ The docket carries **zero LLM arithmetic**: every number on the page is script-m
 
 The renderers (matplotlib + reportlab) live in a **one-time ~30s venv bootstrap**, kept out of the stdlib-only core so a bare machine still runs the whole pipeline. Check/build it with `python3 scripts/render_env.py --check` (exit 3 = not built; run `python3 scripts/render_env.py` once). When the venv is absent the report ships **md-only** and the degradation is disclosed — the docket never blocks the run.
 
-## FSI integration (optional)
+## Coverage-first analysis
 
-Deep fundamental and valuation work can reuse the `equity-research` and `financial-analysis` skills from the claude-for-financial-services marketplace (`/plugin marketplace add anthropics/financial-services`). When those plugins are installed, trading-desk hands off to them for richer modeling. When they are absent, it runs a compressed fundamental pass instead and discloses the reduced depth — and at runtime, `full-trade-analysis` (and standalone `composite-score`) will **offer once, interactively, to install them** before falling back to the compressed pass. It never auto-installs. The soft dependency is declared in `.claude-plugin/marketplace.json` (`allowCrossMarketplaceDependenciesOn`); nothing about the FSI plugins is required for Phase 1.
+Deep coverage is the **default** read, not an upgrade. Before scoring a ticker, `full-trade-analysis` checks for `./trading_desk_<TICKER>/coverage/` — the FSI initiation artifacts (company research, financial model, valuation):
+
+- **No coverage yet, FSI installed → it initiates, automatically.** The first run on a name announces it and runs FSI `initiating-coverage` (Tasks 1-3 only — research, model, valuation; the docket renders charts and the report itself, so FSI's Tasks 4-5 are skipped). Initiation is **token-heavy and slow (~30-60+ min)**, but **coverage is permanent**: every later run reuses it and is cheap. That is the trade the default makes — pay once, reuse forever. (Say "skip initiation" to override for a single run.)
+- **Coverage exists → it is kept fresh.** If a new quarter has reported since the coverage model was built, the model is `model-update`d before scoring (never scored as if current). A refresh does the same freshness check.
+- **No FSI → the compressed floor.** With the FSI plugins absent (and declined), the run drops to the **compressed floor**, loudly disclosed: the fundamental pass is snapshot-only and the company-context module runs `web_compressed` (cited web research) instead of distilling a model. This is a genuine floor, not a peer of the default.
+
+What coverage buys: a `company-context` module (business / competitive / cases / risks + a dated live tape of *what is moving the stock now*), every claim traced through a `findings[]` citation registry. That registry is **load-bearing for scoring** — the fundamental moat flag and the composite's conviction justifications cite its finding IDs (`C3`), and the moat CLI *exits* if a justification names none. Context is unscored itself; it grounds the dimensions that are scored.
+
+## FSI integration (now load-bearing for full depth)
+
+The `equity-research` and `financial-analysis` skills from the claude-for-financial-services marketplace (`/plugin marketplace add anthropics/financial-services`) are **functionally load-bearing for the default deep read** — they produce the coverage the coverage-first pipeline initiates and reuses. When they are installed, trading-desk hands off to them for the initiation model, valuation, and quarterly `model-update`. When they are **absent**, the pipeline still runs — it drops to the compressed floor (snapshot-only fundamentals, `web_compressed` context) and discloses the reduced depth — and at runtime `full-trade-analysis` (and standalone `composite-score`) will **offer once, interactively, to install them**. It never auto-installs. The soft dependency is declared in `.claude-plugin/marketplace.json` (`allowCrossMarketplaceDependenciesOn`); nothing about the FSI plugins is required to run, but full depth needs them.
 
 ## Skills
 
@@ -88,6 +98,7 @@ Deep fundamental and valuation work can reuse the `equity-research` and `financi
 | `technical-analysis` | available |
 | `sentiment-positioning` | available |
 | `risk-analytics` | available |
+| `company-context` | available |
 | `composite-score` | available |
 | `trade-plan` | available |
 | `options-strategy` | available |
