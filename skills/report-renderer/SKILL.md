@@ -7,7 +7,7 @@ description: Render the final 3-page trade decision report (or a delta report) f
 
 Turn a completed bundle into the final **3-page trade decision report**. **Every number is script-written** by `scripts/render_report.py` from the module JSONs — you never type a level, a strike, an EV, a score, or a percent into the report. Your only job is to fill the prose slots the script leaves for you, then run the blocking QC gate until it is green.
 
-This is the **L4 output layer**. It consumes the entire bundle (snapshot + `module_{technical,risk,sentiment,fundamental,composite,tradeplan,options}.json`) and emits `<TICKER>_Trade_Report_<date>.md`.
+This is the **L4 output layer**. It consumes the entire bundle (snapshot + `module_{technical,risk,sentiment,fundamental,composite,tradeplan,options}.json`) and emits `<TICKER>_Trade_Report_<date>.md`. After the md QC gate passes it OPTIONALLY renders the **docket** — the exec/detail (and, on a refresh, delta) PDFs — when the render venv is present; if it is not, the report ships md-only and the degradation is disclosed (Step 5).
 
 **Output location:** if the bundle directory's basename starts with `detail_reports` (the `trading_desk_<T>/detail_reports_<date>/` layout), the report is written to the bundle's **parent** directory (a sibling of the data folder); otherwise it is written **inside** the bundle (legacy layout). The exact path is always printed to stdout — use that path for QC. `--out` overrides.
 
@@ -83,6 +83,59 @@ Re-run until exit 0. Then print the QC verdict and the report path to the user.
 
 ---
 
+## Step 5 — Docket (PDF) rendering (AFTER the md QC gate passes)
+
+Once the **md report QC gate is green**, render the institutional **docket** — three deterministic PDFs (`exec` 2pp, `detail` ~10-15pp, and, when a prior bundle exists, a `delta` note). The md report remains the source of truth; the docket is a bank-note-styled render of the SAME QC'd bundle. **Every number on the page is script-minted** (from the module JSONs, the deterministic chart pack, or the What-Changed diff); the only LLM content is the prose in `pdf_slots.json`, and that is provenance-gated before it reaches the renderer.
+
+**(a) Check the render venv (never blocks).**
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_env.py --check
+```
+Exit 0 prints `READY <venv-python>` — capture that interpreter path for steps (b) and (e). **Exit 3** = the matplotlib+reportlab venv is not built: announce **md-only** ("docket skipped — render venv not built"), give the one-line bootstrap instruction `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_env.py` (one-time ~30s build), and **SKIP the rest of Step 5**. Degradation is disclosed, never a hard stop.
+
+**(b) Render the deterministic chart pack** (use the venv python from step (a)):
+```bash
+<venv-python> ${CLAUDE_PLUGIN_ROOT}/scripts/render_charts.py \
+  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> --set all
+```
+Writes the PNGs + `charts/charts_manifest.json`. A chart with a missing input is SKIPPED (recorded with a reason) — the renderer simply omits it; you fabricate nothing.
+
+**(c) Author `<bundle>/pdf_slots.json`** — the ONLY LLM content in the docket. Shape (per `render_pdf.py`):
+```json
+{
+  "thesis_bullets": ["Lead — rest", "Lead — rest", "Lead — rest"],
+  "desk_read": {"setup": "…", "edge": "…", "trigger": "…", "risk": "…"},
+  "positioning": {"entry_discipline": "…", "sizing_kelly": "…",
+                  "path_dependency": "…", "monitoring": "…"},
+  "delta_interpretation": null
+}
+```
+- `thesis_bullets` — exactly **3**, each in the **"Lead — rest"** bold-lead form (em-dash separator).
+- `desk_read` — the four keys `setup / edge / trigger / risk`.
+- `positioning` — the four keys `entry_discipline / sizing_kelly / path_dependency / monitoring`.
+- `delta_interpretation` — **null** for exec/detail (it belongs to the delta note; the refresh-analysis skill fills it).
+- **Prose rules:** cite ONLY numbers that already appear in the gated md report or the module JSONs; **≤2 sentences per field**. This is the same number-provenance discipline as the md slots — a number with no bundle source fails the slots gate.
+
+**(d) Run the BLOCKING slots provenance gate** (stamps `qc_passed=true` INTO the file on pass; `render_pdf` refuses exec/detail without that stamp):
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/report_qc.py \
+  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> \
+  --pdf-slots ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>/pdf_slots.json
+```
+Exit 0 = pass (stamp written). On fail (orphan number), **fix the PROSE, never the numbers** — rephrase to a figure the bundle carries, exactly as with the md gate.
+
+**(e) Render the PDFs** (venv python from step (a)). Add `--previous <prev_bundle>` to `exec` when a prior bundle exists → the exec page shows a **What-Changed** box:
+```bash
+<venv-python> ${CLAUDE_PLUGIN_ROOT}/scripts/render_pdf.py \
+  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> --doc exec \
+  [--previous <previous_bundle>]
+<venv-python> ${CLAUDE_PLUGIN_ROOT}/scripts/render_pdf.py \
+  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> --doc detail
+```
+The PDFs land in the **ticker parent** (same location rule as the md report): `<TICKER>_Trade_Report_<date>.pdf` (exec) and `<TICKER>_Detail_<date>.pdf` (detail), path printed to stdout. `render_pdf` exits 3 with a bootstrap line if the venv disappeared between steps — treat that exactly like the (a) exit-3 md-only fallback.
+
+---
+
 ## Delta mode
 
 When the user wants a change-report vs a prior bundle:
@@ -102,7 +155,7 @@ A module absent in either bundle → that section reads "n/a (module absent in {
 
 ---
 
-## Step 5 — Optional docx conversion
+## Step 6 — Optional docx conversion
 
 If the **financial-analysis docx skill** is available, offer to convert the passed `.md` to `.docx` (Times New Roman, initiation-report conventions). If it is not available, note that the report is markdown-only and disclose that in one line — do not fabricate a docx path.
 
@@ -115,4 +168,6 @@ If the **financial-analysis docx skill** is available, offer to convert the pass
 - **Fix tables in the module, not the report.** If a scripted figure is wrong, the fix is upstream (re-run the module, re-render) — editing a number in the `.md` would pass a wrong figure past the gate on the next run and defeats the whole architecture.
 - **Waivers are disclosed, not silent.** A genuinely justified failure can be waived (`--waive "check:reason"`, same mechanics as the snapshot gate) — the report table then shows WAIVED with the reason. Use this only for a real, disclosed exception, never to hide a fabricated number.
 - **Word cap ~2100.** The three pages together must stay under the cap; the briefs are the main lever — condense the bundle briefs rather than expanding them.
-- **Read-only over the bundle.** This skill writes only the report `.md`; it never edits the snapshot or any module JSON.
+- **The docket is a render of the SAME bundle; md stays the source of truth.** The PDFs (exec/detail, + delta on a refresh) carry only script-minted numbers + gated `pdf_slots.json` prose. If the render venv is not built, `render_env.py --check` exits 3 → announce md-only with the one-line bootstrap and skip the PDF steps; **the docket never blocks the md report.**
+- **The slots gate is blocking and cannot be bypassed.** `render_pdf` refuses exec/detail unless `report_qc.py --pdf-slots` stamped `qc_passed=true`. Fix slot PROSE, never numbers — the same discipline as the md gate.
+- **Read-only over the bundle (except the two authored artifacts).** This skill writes the report `.md` and — for the docket — `pdf_slots.json` + the `charts/` PNGs + the PDFs; it never edits the snapshot or any module JSON.

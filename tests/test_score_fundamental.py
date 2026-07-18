@@ -327,6 +327,57 @@ class TestMultipleVsHistory(unittest.TestCase):
         sub = sf.score_valuation(_val(pe_fwd=-10.0, pe_5yr_median=20.0))
         self.assertEqual(sub["inputs"]["pe_ratio_points"], 0)
 
+    # -- pe_5yr_median sanity band [0.2, 5.0] (approx_current_eps breakdown) --
+
+    def test_ratio_above_band_is_na(self):
+        # real MU regime: pe_fwd 10 / pe_5yr_median 1.82 = 5.4 (> 5.0) -> the
+        # approx_current_eps median is garbage; component scored 0 + n/a and the
+        # sanity-band arithmetic string is emitted.
+        sub = sf.score_valuation(_val(pe_fwd=9.828, pe_5yr_median=1.82))
+        self.assertEqual(sub["inputs"]["pe_ratio_points"], 0)
+        self.assertIn("outside sanity band [0.2,5]", sub["arithmetic"])
+        self.assertIn("approx_current_eps method breakdown", sub["arithmetic"])
+        self.assertIn("component n/a", sub["arithmetic"])
+
+    def test_ratio_normal_09_bands_normally(self):
+        # 18/20 = 0.9 is inside the band -> normal (0.75,1.0] -> 14, no n/a.
+        sub = sf.score_valuation(_val(pe_fwd=18.0, pe_5yr_median=20.0))
+        self.assertEqual(sub["inputs"]["pe_ratio_points"], 14)
+        self.assertNotIn("sanity band", sub["arithmetic"])
+
+    def test_ratio_boundary_50_is_normal(self):
+        # exactly 5.0 is INSIDE the band (not > 5.0) -> banded (> 1.25 -> 3).
+        sub = sf.score_valuation(_val(pe_fwd=100.0, pe_5yr_median=20.0))
+        self.assertEqual(sub["inputs"]["pe_ratio_points"], 3)
+        self.assertNotIn("sanity band", sub["arithmetic"])
+
+    def test_ratio_boundary_501_is_na(self):
+        # 5.01 > 5.0 -> just outside the band -> n/a.
+        sub = sf.score_valuation(_val(pe_fwd=100.2, pe_5yr_median=20.0))
+        self.assertEqual(sub["inputs"]["pe_ratio_points"], 0)
+        self.assertIn("outside sanity band [0.2,5]", sub["arithmetic"])
+
+    def test_ratio_below_band_is_na(self):
+        # 0.19 < 0.2 -> just outside the low edge -> n/a (symmetric guard).
+        sub = sf.score_valuation(_val(pe_fwd=1.9, pe_5yr_median=10.0))
+        self.assertEqual(sub["inputs"]["pe_ratio_points"], 0)
+        self.assertIn("outside sanity band [0.2,5]", sub["arithmetic"])
+
+    def test_out_of_band_pe_renormalizes_dimension(self):
+        # When pe is the ONLY valuation input and its ratio is out of band, the
+        # component is n/a like a null -> the whole valuation dimension has zero
+        # evaluable inputs -> score() EXCLUDES it and renormalizes the fundamental
+        # score over the remaining quality max (50). Mirrors the null-valuation
+        # renormalization test, proving the sanity gate is treated as a null input.
+        result = sf.score(
+            _fund(),
+            {"pe_fwd": 9.828, "pe_5yr_median": 1.82,
+             "pe_median_method": "approx_current_eps",
+             "peg": None, "fcf_yield": None})
+        self.assertTrue(result["renormalized"])
+        maxes = sum(s["max"] for s in result["subscores"])
+        self.assertEqual(maxes, 50)
+
 
 # --------------------------------------------------------------------------- #
 # Valuation dim 2: PEG (max 15)

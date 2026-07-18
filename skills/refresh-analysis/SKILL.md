@@ -105,6 +105,28 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/report_qc.py --bundle <new_bundle> --repor
 ```
 (The delta report is auto-detected by its `Delta_Report` filename and runs the delta check subset; `--previous` folds the old bundle's values into the allowed provenance set.) Fix the PROSE, never the numbers; a table-driven failure is an upstream module bug. Waivers disclosed only.
 
+**Docket (PDFs) — AFTER both md gates pass.** A refresh renders the full docket, including the **delta note** vs the previous bundle. As in report-renderer Step 5, check the venv first — `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_env.py --check` (exit 3 → announce md-only + the one-line bootstrap `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_env.py`, and SKIP the PDF steps; never block). When READY, capture the printed `<venv-python>` and:
+
+```bash
+# 1. Deterministic chart pack
+<venv-python> ${CLAUDE_PLUGIN_ROOT}/scripts/render_charts.py --bundle <new_bundle> --set all
+# 2. Author <new_bundle>/pdf_slots.json (shape per render_pdf.py: thesis_bullets[3]
+#    "Lead — rest", desk_read{setup,edge,trigger,risk},
+#    positioning{entry_discipline,sizing_kelly,path_dependency,monitoring}).
+#    On a refresh delta_interpretation is REQUIRED — 1-2 sentences on what drove the
+#    composite/EV/level moves, citing ONLY numbers in the delta report / module JSONs
+#    (the Δ columns are legitimate: the slots gate is run with --previous below).
+# 3. BLOCKING slots provenance gate (stamps qc_passed; --previous admits the Δ values)
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/report_qc.py --bundle <new_bundle> \
+  --pdf-slots <new_bundle>/pdf_slots.json --previous <previous_bundle>
+# 4. Render the three docs (delta REQUIRES --previous; exec gets it too → What-Changed box)
+<venv-python> ${CLAUDE_PLUGIN_ROOT}/scripts/render_pdf.py --bundle <new_bundle> --doc delta --previous <previous_bundle>
+<venv-python> ${CLAUDE_PLUGIN_ROOT}/scripts/render_pdf.py --bundle <new_bundle> --doc exec  --previous <previous_bundle>
+<venv-python> ${CLAUDE_PLUGIN_ROOT}/scripts/render_pdf.py --bundle <new_bundle> --doc detail
+```
+
+The PDFs (`<TICKER>_Trade_Report_<as_of>.pdf`, `<TICKER>_Detail_<as_of>.pdf`, `<TICKER>_Delta_Note_<as_of>.pdf`) land in the ticker parent. Fix slot PROSE, never numbers.
+
 ---
 
 ## Step 7 — Append the thesis entry (dated, append-only)
@@ -130,8 +152,8 @@ For the invalidation check: compare the NEW snapshot's price against the previou
 
 Report to the user:
 - **Refresh plan summary** — refetched vs reused counts, judgment-review status, estimated calls (+ IV note if refreshed).
-- **Both report paths** — `<TICKER>_Trade_Report_<as_of>.md` and `<TICKER>_Delta_Report_<as_of>.md`.
-- **QC attestations** — both gate verdicts (snapshot QC + both report QCs).
+- **Both report paths** — `<TICKER>_Trade_Report_<as_of>.md` and `<TICKER>_Delta_Report_<as_of>.md`, plus (when the render venv is present) the **docket PDFs** `<TICKER>_Trade_Report_<as_of>.pdf` / `<TICKER>_Detail_<as_of>.pdf` / `<TICKER>_Delta_Note_<as_of>.pdf`; if the venv is absent, state the docket was skipped (md-only) with the one-line bootstrap.
+- **QC attestations** — the gate verdicts (snapshot QC + both report QCs + the pdf-slots gate when the docket rendered).
 - **One-line "what changed" verdict** — grade old→new + the single biggest driver (and any triggered invalidation leg, called out first).
 
 ---

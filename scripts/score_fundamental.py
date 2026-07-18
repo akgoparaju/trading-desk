@@ -38,7 +38,14 @@ unscored downside-map level (its valuation_floor), so there is no collision.
 
 The pe-vs-history component MUST carry the snapshot's ``valuation.pe_median_method``
 label ("approx_current_eps") into its arithmetic string so the approximation used
-to build the median is disclosed wherever this scores.
+to build the median is disclosed wherever this scores. That method back-projects
+TODAY's EPS across the 5-yr price history, so for a name whose EPS regime shifted
+(real MU: pe_5yr_median 1.82) the baseline is garbage. The component therefore
+carries a SANITY BAND on the ratio ``pe_fwd / pe_5yr_median``: a ratio outside
+[0.2, 5.0] is treated as the method having broken down under an EPS regime change --
+the component scores 0 and is treated as n/a (like a null input for the evaluable /
+renormalization accounting), so the dimension renormalizes over the components that
+remain rather than banding on a bogus multiple.
 
 No dependency on other scored modules: this module consumes the snapshot only.
 Reuses the build_snapshot I/O helper for the CLI ``as_of`` date. The scoring
@@ -256,9 +263,12 @@ def score_valuation(val) -> dict:
     """Fwd P/E vs own 5-yr median (20) + PEG (15) + FCF yield (15).
 
     multiple vs history: ratio = pe_fwd / pe_5yr_median (both > 0 required, else
-        the component is 0 "n/a"): <=0.75 -> 20 (discount to own history);
-        (0.75,1.0] -> 14; (1.0,1.25] -> 8; >1.25 -> 3. The arithmetic string carries
-        the ``pe_median_method`` label so the approximation is disclosed.
+        the component is 0 "n/a"): a ratio OUTSIDE the sanity band [0.2, 5.0] is
+        scored 0 and treated as n/a (approx_current_eps method breakdown under an
+        EPS regime change) -- not counted toward ``evaluable``; else <=0.75 -> 20
+        (discount to own history); (0.75,1.0] -> 14; (1.0,1.25] -> 8; >1.25 -> 3.
+        The arithmetic string carries the ``pe_median_method`` label so the
+        approximation is disclosed.
     PEG (peg): (0,1.0] -> 15; (1.0,2.0] -> 10; (2.0,3.0] -> 5; >3.0 -> 2;
         null or <=0 -> 0.
     FCF yield (fcf_yield): >=0.05 -> 15; [0.03,0.05) -> 11; [0.015,0.03) -> 7;
@@ -274,26 +284,43 @@ def score_valuation(val) -> dict:
     evaluable = 0
 
     # -- multiple vs own 5-yr history --------------------------------------
+    # The ratio only means something when pe_5yr_median is a real earnings-history
+    # baseline. The snapshot builds that median with the "approx_current_eps"
+    # method, which back-projects TODAY's EPS across the 5-yr price history -- for a
+    # name whose EPS exploded (real MU: pe_5yr_median 1.82) the baseline is garbage,
+    # producing a huge ratio that would band as a "rich premium" on noise. So we
+    # gate on a SANITY BAND [0.2, 5.0]: a ratio outside it means the approx method
+    # broke down under an EPS regime change, and the component is scored 0 and
+    # treated as n/a (NOT counted toward ``evaluable``, exactly like a null input),
+    # so the dimension renormalizes over the remaining components instead of banding
+    # on a bogus number.
     if (pe_fwd is not None and pe_fwd > 0
             and pe_median is not None and pe_median > 0):
-        evaluable += 1
         ratio = pe_fwd / pe_median
-        if ratio <= 0.75:
-            pe_pts = 20
-            band = "discount to own history"
-        elif ratio <= 1.0:
-            pe_pts = 14
-            band = "in line with own history"
-        elif ratio <= 1.25:
-            pe_pts = 8
-            band = "modest premium to own history"
-        else:  # > 1.25
-            pe_pts = 3
-            band = "rich premium to own history"
-        parts.append(
-            f"pe_fwd {_fmt(_clean(pe_fwd))} / pe_5yr_median "
-            f"{_fmt(_clean(pe_median))} (method {pe_method}) = "
-            f"{_fmt(_clean(ratio))} -> {pe_pts}/20 ({band})")
+        if ratio < 0.2 or ratio > 5.0:
+            pe_pts = 0
+            parts.append(
+                f"pe_fwd/pe_5yr_median ratio {_fmt(_clean(ratio))} outside "
+                f"sanity band [0.2,5] -- approx_current_eps method breakdown "
+                f"under EPS regime change; component n/a")
+        else:
+            evaluable += 1
+            if ratio <= 0.75:
+                pe_pts = 20
+                band = "discount to own history"
+            elif ratio <= 1.0:
+                pe_pts = 14
+                band = "in line with own history"
+            elif ratio <= 1.25:
+                pe_pts = 8
+                band = "modest premium to own history"
+            else:  # > 1.25
+                pe_pts = 3
+                band = "rich premium to own history"
+            parts.append(
+                f"pe_fwd {_fmt(_clean(pe_fwd))} / pe_5yr_median "
+                f"{_fmt(_clean(pe_median))} (method {pe_method}) = "
+                f"{_fmt(_clean(ratio))} -> {pe_pts}/20 ({band})")
     else:
         pe_pts = 0
         parts.append(

@@ -48,16 +48,33 @@ A run writes under a per-ticker parent in the invoker's CWD:
 ```
 trading_desk_<TICKER>/
 ├── <TICKER>_Trade_Report_<date>.md      ← the 3-page report (delta reports too)
+├── <TICKER>_Trade_Report_<date>.pdf     ← docket: exec (2pp)      ┐ optional, when the
+├── <TICKER>_Detail_<date>.pdf           ← docket: detail (~10-15pp)├ render venv is built
+├── <TICKER>_Delta_Note_<date>.pdf       ← docket: delta (refresh)  ┘
 ├── iv_history_<TICKER>.json             ← IV-history cache (persists across dates)
 └── detail_reports_<date>/               ← the dated bundle
     ├── snapshot_<TICKER>_<date>.json     ← the verified single source of truth
     ├── manifest.json                     ← sources + data_mode + retrieval timestamps
     ├── module_{technical,risk,sentiment,fundamental,composite,tradeplan,options}.json
     ├── brief_<dim>.md                    ← per-dimension evidence briefs
+    ├── pdf_slots.json                    ← docket prose slots (provenance-gated)
+    ├── charts/                           ← deterministic chart pack (script-minted PNGs)
     └── raw/                              ← raw AV / web responses (incl. the options chain, never read into context)
 ```
 
 The report lands in the **parent** `trading_desk_<TICKER>/` (a sibling of the dated data folder), so it is easy to find next to prior dates. (Legacy `td_bundle_<TICKER>_<date>/` bundles still work — discovery globs both; those keep the report inside the bundle.)
+
+## The docket
+
+After the markdown report passes its QC gate, trading-desk can render a **docket** — the institutional PDF render of the same QC'd bundle in a **bank-note aesthetic** (fine hairlines, restrained accent, weight-ticked score bars):
+
+- **exec** — a 2-page trade sheet (grade box, thesis, price/scenario/valuation charts, trade plan, desk read).
+- **detail** — the full ~10-15-page dossier (exec pages + per-dimension evidence, options & vol, downside map, appendix + integrity).
+- **delta** — a 1-page What-Changed note produced by a **refresh** vs the prior bundle (score deltas, level moves, invalidation status).
+
+The docket carries **zero LLM arithmetic**: every number on the page is script-minted from the module JSONs, the deterministic chart pack, or the What-Changed diff. The only authored content is the prose in `pdf_slots.json`, which passes the same number-provenance gate as the report before it can be embedded.
+
+The renderers (matplotlib + reportlab) live in a **one-time ~30s venv bootstrap**, kept out of the stdlib-only core so a bare machine still runs the whole pipeline. Check/build it with `python3 scripts/render_env.py --check` (exit 3 = not built; run `python3 scripts/render_env.py` once). When the venv is absent the report ships **md-only** and the degradation is disclosed — the docket never blocks the run.
 
 ## FSI integration (optional)
 

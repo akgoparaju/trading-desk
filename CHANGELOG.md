@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.10.0 — 2026-07-17 · The PDF docket
+
+The report layer gains an institutional **PDF docket** — the bank-note-styled render of
+an already-QC'd bundle — alongside the markdown report (which stays the source of truth).
+
+- **Three documents:** `exec` (2pp trade sheet), `detail` (~10-15pp dossier), and `delta`
+  (1pp What-Changed note on a refresh vs the prior bundle). All land in the ticker parent
+  next to the `.md` report.
+- **Zero LLM arithmetic.** Every number is script-minted — from the module JSONs, the
+  deterministic chart pack, or the What-Changed diff. The only authored content is the
+  prose in `pdf_slots.json`.
+- **Deterministic chart pack** (`render_charts.py`, exec 8 + detail 8): each chart is a
+  pure extract (unit-pinned against fixtures) + a matplotlib draw; a chart with a missing
+  input is skipped with a recorded reason, never fabricated.
+- **Slots provenance gate.** `report_qc.py --pdf-slots` runs number_provenance over the
+  docket prose and stamps `qc_passed=true` INTO the file on pass; `render_pdf` refuses to
+  render exec/detail without that stamp — the gate cannot be bypassed.
+- **Graceful degradation.** matplotlib + reportlab live in a one-time ~30s venv
+  (`render_env.py`, kept out of the stdlib-only core). `render_env.py --check` exits 3 when
+  absent → the skills ship the report md-only and disclose it; the docket never blocks.
+- **Chart-collision fixes** (review findings): staggered ladder-shelf labels, clamped event
+  callouts, football-field anchor redesign (nearest two supports, not min..max) + now-line
+  label offset, single captions, visible score-bar weight ticks.
+- **pe_5yr_median sanity gate** (scoring-integrity fix): the fundamental valuation
+  component `pe_fwd / pe_5yr_median` uses the `approx_current_eps` median, which back-projects
+  today's EPS across the price history. For a name whose EPS regime shifted (real MU:
+  pe_5yr_median 1.82) the baseline is garbage; a ratio outside the sanity band [0.2, 5.0]
+  now scores the component 0 and treats it as n/a (like a null input) so the dimension
+  renormalizes over the remaining components instead of banding on a bogus multiple.
+- **Skill wiring:** report-renderer gains a Docket (PDF) rendering step after the md QC gate;
+  refresh-analysis renders the delta note (+ exec/detail); full-trade-analysis's Phase 5
+  delivers the exec/detail PDFs and Phase 6 reports whether the docket rendered or degraded.
+
+**Modified:** `scripts/score_fundamental.py` (+ `tests/test_score_fundamental.py`),
+`skills/{report-renderer,refresh-analysis,full-trade-analysis}/SKILL.md`, `README.md`,
+`CHANGELOG.md`, `.claude-plugin/plugin.json` (→ 0.10.0). (R1-R3 landed the renderers:
+`tdstyle.py`, `render_env.py`, `render_charts.py`, `render_pdf.py`, `report_qc.py --pdf-slots`.)
+
 ## 0.9.1 — 2026-07-17 · Verified FSI marketplace reference shipped in-package
 
 Real-user finding #5: the FSI offer worked (recorded ask fired) but the agent could

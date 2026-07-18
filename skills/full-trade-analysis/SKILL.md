@@ -111,6 +111,8 @@ Invoke the **report-renderer** skill for the bundle: `render_report.py` writes t
 
 **Deliver:** the **report path** — `render_report.py` writes it to the **ticker parent** `./trading_desk_<TICKER>/<TICKER>_Trade_Report_<date>.md` (a sibling of the `detail_reports_<date>/` data folder; legacy bundles keep it inside), printed to stdout — plus the **composite line** (`grade — action, score/100, profile`) + the **expression line** (recommended structure/size for the profile) + the **QC attestation** (gate verdict).
 
+**Then the docket (report-renderer Step 5).** After the md gate is green, report-renderer renders the **docket** — the `exec` (2pp) and `detail` (~10-15pp) PDFs — into the ticker parent (`<TICKER>_Trade_Report_<date>.pdf` / `<TICKER>_Detail_<date>.pdf`), gated by the `pdf_slots.json` provenance stamp. This requires the matplotlib+reportlab render venv: if `render_env.py --check` exits 3 the report ships **md-only** and the docket is skipped (disclosed, with the one-line bootstrap) — it never blocks the run. **Deliver the two PDF paths (or the md-only note).**
+
 ---
 
 ## Phase 6 — Register & monitor
@@ -122,7 +124,7 @@ Invoke the **report-renderer** skill for the bundle: `render_report.py` writes t
 
 If the user accepts AND a scheduling facility is available (the `schedule` skill or `CronCreate`), create it — the scheduled action is exactly the re-run + `render_report.py --delta --previous <this_bundle>`. If no facility is available (or the user declines), hand them the one-line manual command instead. Never auto-create a schedule the user did not accept.
 
-**(c) Completeness statement (MANDATORY).** Emit the embedded completeness block: which of the five dimensions ran, which renormalized or were missing, whether FSI initiation coverage was reused or the compressed pass ran, the snapshot's `meta.data_mode`, and its `meta.api_tier_notes`. **When `data_mode` is not `alpha_vantage`, name it explicitly and list `fundamentals.web_transcribed_fields`** (the fields sourced from cited web transcription) so a reader sees the reduced-provenance surface. The report always ships with this statement even under degradation.
+**(c) Completeness statement (MANDATORY).** Emit the embedded completeness block: which of the five dimensions ran, which renormalized or were missing, whether FSI initiation coverage was reused or the compressed pass ran, the snapshot's `meta.data_mode`, its `meta.api_tier_notes`, and **whether the docket rendered (exec + detail PDFs) or degraded to md-only** (render venv not built). **When `data_mode` is not `alpha_vantage`, name it explicitly and list `fundamentals.web_transcribed_fields`** (the fields sourced from cited web transcription) so a reader sees the reduced-provenance surface. The report always ships with this statement even under degradation.
 
 ---
 
@@ -157,6 +159,7 @@ _Sourced from bundle module JSONs · rubric versions in the report footer._
 - **Data mode:** <meta.data_mode; when not alpha_vantage, add: web-transcribed fields = <fundamentals.web_transcribed_fields, or "none">, options = stand-aside>.
 - **API tier notes:** <snapshot meta.api_tier_notes, verbatim>.
 - **Gates:** snapshot QC <PASS/WAIVED:…> · report QC <PASS/WAIVED:…>.
+- **Docket:** <rendered (exec + detail PDFs) · pdf-slots gate PASS | md-only — render venv not built (bootstrap: `python3 scripts/render_env.py`)>.
 ```
 
 ---
