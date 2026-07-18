@@ -810,6 +810,81 @@ def run_report_qc(bundle, report_path, delta=False, previous=None):
 
 
 # --------------------------------------------------------------------------- #
+# pdf_slots.json provenance gate (§7): number_provenance over the LLM-authored
+# docket prose slots, using the SAME allowed-set machinery as the report gate.
+# On PASS the caller stamps {"qc_passed": true, "checked_utc"} INTO the slots file
+# and render_pdf.py refuses to render exec/detail unless that stamp is present.
+# --------------------------------------------------------------------------- #
+
+# The slot keys the docket carries (contract-pinned shape). Their string values
+# are the LLM-authored prose the render embeds; every number in them must trace to
+# the bundle exactly like a report prose slot. ``qc_passed``/``checked_utc`` are
+# the stamp keys and are NOT prose (skipped when collecting slot strings).
+_SLOT_STAMP_KEYS = ("qc_passed", "checked_utc")
+
+
+def collect_slot_strings(slots):
+    """Every prose string across the pdf_slots structure (recursing dict/list).
+
+    Skips the stamp keys (qc_passed/checked_utc) so a re-run over an already-
+    stamped file never scans the stamp itself. Returns a flat list of strings.
+    """
+    out = []
+
+    def walk(obj, skip_stamp=False):
+        if isinstance(obj, str):
+            out.append(obj)
+        elif isinstance(obj, dict):
+            for k, v in obj.items():
+                if skip_stamp and k in _SLOT_STAMP_KEYS:
+                    continue
+                walk(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v)
+
+    walk(slots, skip_stamp=True)
+    return out
+
+
+def run_pdf_slots_qc(bundle, slots, previous=None):
+    """Run number_provenance over the concatenated slot prose. Returns a result
+    list (one number_provenance result) so the CLI table/waiver code is reused.
+
+    ``previous`` (an older bundle dir) folds the old bundle's values AND the
+    script-computed Δ columns into the allowed set so a delta_interpretation slot
+    may legitimately cite a Δ (mirrors the delta-report handling).
+    """
+    docs = render_report.load_bundle(bundle)
+    slot_text = "\n".join(collect_slot_strings(slots))
+
+    extra = []
+    old_docs = None
+    if previous and os.path.isdir(previous):
+        old_docs = render_report.load_bundle(previous)
+        extra.extend(derived_delta_values(old_docs, docs))
+
+    return [check_number_provenance(slot_text, docs, extra_values=extra,
+                                    previous_docs=old_docs)]
+
+
+def _stamp_slots(slots_path, slots):
+    """Write {"qc_passed": true, "checked_utc": <UTC ISO Z>} INTO the slots file.
+
+    Preserves the original slot content; only adds/overwrites the two stamp keys.
+    The timestamp is generated fresh (this is a provenance attestation, not a
+    reproducibility-critical value), formatted as a Z-suffixed ISO-8601 UTC.
+    """
+    from datetime import datetime, timezone
+    stamped = dict(slots)
+    stamped["qc_passed"] = True
+    stamped["checked_utc"] = datetime.now(timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    with open(slots_path, "w") as fh:
+        json.dump(stamped, fh, indent=2)
+
+
+# --------------------------------------------------------------------------- #
 # Waivers + CLI (mirrors qc_gate.py).
 # --------------------------------------------------------------------------- #
 
@@ -863,13 +938,18 @@ def _render_table(results, waiver_names):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Report QC gate (§12, blocking): verify a rendered report "
-                    "numerically against its bundle. Exits 0 (pass) or 1 (fail).")
+                    "(or the docket's pdf_slots.json prose) numerically against "
+                    "its bundle. Exits 0 (pass) or 1 (fail).")
     parser.add_argument("--bundle", required=True, help="bundle directory")
-    parser.add_argument("--report", required=True, help="path to the report .md")
+    parser.add_argument("--report", default=None, help="path to the report .md")
+    parser.add_argument("--pdf-slots", dest="pdf_slots", default=None,
+                        help="path to the docket pdf_slots.json (runs "
+                             "number_provenance over its prose slots; stamps "
+                             "qc_passed=true INTO the file on pass)")
     parser.add_argument("--delta", action="store_true",
                         help="treat the report as a delta report (checks 1/9/11)")
     parser.add_argument("--previous", default=None,
-                        help="the older bundle dir (delta mode: lets "
+                        help="the older bundle dir (delta / pdf-slots mode: lets "
                              "number_provenance account for old values + deltas)")
     parser.add_argument("--waive", action="append", default=[],
                         metavar="check_name:reason",
@@ -879,13 +959,45 @@ def main(argv=None):
     if not os.path.isdir(args.bundle):
         print(f"ERROR: bundle directory not found: {args.bundle}", file=sys.stderr)
         return 1
+    if bool(args.report) == bool(args.pdf_slots):
+        print("ERROR: pass exactly one of --report or --pdf-slots",
+              file=sys.stderr)
+        return 1
+
+    waiver_reasons = _parse_waivers(args.waive)
+
+    # --------------------------- pdf_slots mode --------------------------- #
+    if args.pdf_slots:
+        if not os.path.isfile(args.pdf_slots):
+            print(f"ERROR: pdf_slots not found: {args.pdf_slots}", file=sys.stderr)
+            return 1
+        try:
+            with open(args.pdf_slots) as fh:
+                slots = json.load(fh)
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: cannot parse pdf_slots {args.pdf_slots}: {exc}",
+                  file=sys.stderr)
+            return 1
+
+        results = run_pdf_slots_qc(args.bundle, slots, previous=args.previous)
+        results, unwaived = _apply_waivers(results, waiver_reasons)
+        print(_render_table(results, set(waiver_reasons)))
+        print()
+        passed = unwaived == 0
+        if passed:
+            _stamp_slots(args.pdf_slots, slots)
+            print("PDF SLOTS QC: PASS (qc_passed stamp written)")
+        else:
+            print("PDF SLOTS QC: FAIL")
+        return 0 if passed else 1
+
+    # --------------------------- report mode --------------------------- #
     if not os.path.isfile(args.report):
         print(f"ERROR: report not found: {args.report}", file=sys.stderr)
         return 1
 
     results = run_report_qc(args.bundle, args.report, delta=args.delta,
                             previous=args.previous)
-    waiver_reasons = _parse_waivers(args.waive)
     results, unwaived = _apply_waivers(results, waiver_reasons)
 
     print(_render_table(results, set(waiver_reasons)))
