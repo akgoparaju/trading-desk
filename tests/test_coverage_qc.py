@@ -325,23 +325,35 @@ class ResearchDepth(unittest.TestCase):
             r = _by_name(cq.run_coverage_qc(cov, mode="full"))["research_depth"]
             self.assertIs(r["passed"], False)
 
-    def test_shallow_mode_lower_total_floor(self):
-        # 9 sections each 100 words = 900 words: below full 2500 floor but above
-        # shallow 800 floor, and each section clears the 150 per-section? no -- 100
-        # < 150, so use enough per section. 9*170 filler ~ passes both. Instead
-        # test: a research doc that passes shallow total but fails full total.
-        # Build sections each ~120 words (clears neither per-section 150). Use a
-        # doc with all sections at 100 words but total below full floor.
-        secs_md = _research_md(per_section_words=100)  # 900 words, sections thin
+    def test_per_section_floor_applies_in_shallow_mode(self):
+        # The 150-word per-section floor is mode-INDEPENDENT: 100w sections fail
+        # even in shallow mode, and the detail names the per-section floor.
+        secs_md = _research_md(per_section_words=100)
         with tempfile.TemporaryDirectory() as td:
             cov = _write_coverage(td, research=secs_md,
                                   manifest=_manifest(
                                       depth_mode="shallow (user-requested)"))
             r = _by_name(cq.run_coverage_qc(cov, mode="shallow"))["research_depth"]
-            # 100 words/section < 150 per-section floor -> still fails; that is
-            # intentional (per-section floor is mode-independent). Assert the
-            # detail cites the per-section floor, not the total.
             self.assertIs(r["passed"], False)
+            self.assertIn("150", r["detail"])
+
+    def test_shallow_total_floor_is_lower_than_full(self):
+        # 9 sections x 170w = 1530w: clears the 150 per-section floor and the
+        # shallow 800w total, but sits below the full 2500w total — the same doc
+        # passes shallow and fails full on the TOTAL floor.
+        secs_md = _research_md(per_section_words=170)
+        with tempfile.TemporaryDirectory() as td:
+            cov = _write_coverage(td, research=secs_md,
+                                  manifest=_manifest(
+                                      depth_mode="shallow (user-requested)"))
+            r = _by_name(cq.run_coverage_qc(cov, mode="shallow"))["research_depth"]
+            self.assertIs(r["passed"], True, r["detail"])
+        with tempfile.TemporaryDirectory() as td:
+            cov = _write_coverage(td, research=secs_md,
+                                  manifest=_manifest(depth_mode="full"))
+            r = _by_name(cq.run_coverage_qc(cov, mode="full"))["research_depth"]
+            self.assertIs(r["passed"], False)
+            self.assertIn("2500", r["detail"])
 
 
 class ModelDepth(unittest.TestCase):
