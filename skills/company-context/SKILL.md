@@ -36,11 +36,11 @@ Pick the mode by what is available, and disclose it. The mode is pinned in the m
 
 ### `coverage_distilled` (FSI initiation present)
 
-If an FSI equity-research **initiation** exists for the ticker (the `coverage/` artifacts — initiation research, financial model, valuation docs — under `trading_desk_<TICKER>/coverage/`), reuse them:
+If an FSI equity-research **initiation** exists for the ticker (the `coverage/` artifacts — initiation research, financial model, valuation docs — under `trading_desk_<TICKER>/coverage/`), reuse them. By the time this module is authored, Phase 0.5 has already run the initiation at **FULL FSI depth** and its **coverage QC gate** (`coverage_qc.py`) has passed — so `coverage/` carries the nine FSI Task-1 research sections, the 3-statement model, the DCF/comps valuation, the transcribed `valuation_anchors.json`, and the provenance `coverage_manifest.json`. You are distilling from a verified, full-depth artifact set, not from a stub:
 
 1. Read `trading_desk_<TICKER>/coverage/` artifacts (research.md / model.md / valuation.md, or whatever the initiation produced).
-2. Distill the business / competitive / cases / risks from the coverage.
-3. **Every claim cites the artifact section** — the finding's `source` is the exact section, e.g. `"coverage/research.md §Competition"` or `"coverage/model.md §Pricing"`.
+2. Distill the business / competitive / cases / risks from the FULL coverage.
+3. **Every claim cites the artifact section** — the finding's `source` is the exact section, e.g. `"coverage/research.md §Competitive Landscape"` or `"coverage/valuation.md §DCF"`.
 4. Fold the **live tape** from the bundle's `raw/news_sentiment.json` (recent headlines) and `snapshot.events` (dated catalysts).
 
 ### `web_compressed` (FSI-absent floor)
@@ -122,6 +122,7 @@ Report to the user (and to any calling skill — full-trade-analysis Phase 2):
 - **Findings-first is not optional.** Write `findings[]`, then the prose that references them. Prose that makes a substantive factual claim with no finding behind it is unanchored — the discipline (and the gate's reference check) exists to prevent exactly that.
 - **The gate is blocking.** A module that fails `report_qc.py --context` does not ship. Exit 0 is the ship criterion; the `qc.qc_passed` stamp is the attestation a downstream consumer reads.
 - **Numbers live in the snapshot, evidence lives in the coverage/web.** The gate checks prose numbers against the bundle and requires findings to carry a source — the two provenance surfaces. A narrative number with no snapshot source, or a claim with no coverage/URL source, does not belong in the module.
+- **`coverage_distilled` distills from FULL, gate-passed coverage.** When mode is `coverage_distilled`, Phase 0.5 has already run the FSI initiation at full depth and `coverage_qc.py` has already passed — `coverage/coverage_manifest.json` records the depth (`full`, or `shallow (user-requested)` on an explicit shallow run) and the skills invoked. This module does not re-run the coverage gate; it distills findings from artifacts whose depth is already verified. If a shallow coverage was recorded, that reduced depth is disclosed upstream — distill honestly from what the coverage actually contains, never fabricating around a thin section.
 - **Live tape is the founding requirement.** 3-6 dated entries answering *what is moving this stock NOW*, every date ≤ `as_of`. This is the "why now" the qualitative layer exists to answer — not a static company description.
 - **Carried-forward on refresh with event re-affirmation.** On a re-run, carry the module forward and re-affirm the live tape (drop stale events, add new dated ones ≤ the new `as_of`), keeping finding IDs stable; re-run the gate with `--previous <old_bundle>`.
 - **Read-only over the bundle except the two authored artifacts.** This skill writes `module_context.json` and `brief_context.md`; it never edits the snapshot or any evidence module JSON.
