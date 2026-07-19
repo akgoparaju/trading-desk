@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.13.0 — 2026-07-19 · Full-FSI-depth coverage contract
+
+Depth becomes the DEFAULT, CHECKABLE, and PROVENANCE-RECORDED. The user demanded
+FULL FSI initiation depth three times; the shipped "proportionate depth" override in
+full-trade-analysis Phase 0.5 was implementation drift the user never chose. Project
+law — "an instruction without a required artifact is a suggestion" — so this release
+gives depth its required artifact: a script gate + a provenance manifest. Shallow
+coverage now survives ONLY as an explicit per-run user request, disclosed everywhere.
+
+- **Coverage QC gate + provenance manifest (B1/B2).** New `scripts/coverage_qc.py`:
+  `--coverage <dir> [--mode full|shallow] [--waive check:reason ...]` runs eight
+  house-style checks (result dicts `{check, passed, detail}`, `--waive`, PASS/FAIL/
+  WAIVED table, exit 0 all pass-or-waived / 1 otherwise — all mirrored from
+  `report_qc.py`):
+  - `artifacts_present` — research.md, model.md, valuation.md, valuation_anchors.json,
+    coverage_manifest.json all exist.
+  - `manifest_shape` — the manifest carries `depth_mode` (`full` | `shallow
+    (user-requested)`), `skills_invoked` (list of `{skill, args_summary}`),
+    `data_endpoints`, `artifacts`, `generated_utc`; the `--mode` flag and the recorded
+    `depth_mode` must AGREE (a mismatch is a provenance lie → fail).
+  - `fsi_invoked` — the equity-research `initiating-coverage` skill was invoked.
+  - `subskills_invoked` — (full only; auto-pass shallow) ≥2 distinct
+    `financial-analysis:*` sub-skills (`3-statement-model` / `dcf-model` /
+    `comps-analysis`).
+  - `research_depth` — all NINE real FSI Task-1 sections present (Company Overview,
+    Company History, Management Team, Products & Services, Customers & Go-to-Market,
+    Industry Overview, Competitive Landscape, Market Opportunity, Risk Assessment),
+    each ≥150 words, total ≥2500 (full) / ≥800 (shallow).
+  - `model_depth` — 3-statement structure (income / balance / cash-flow) + ≥3 forward
+    fiscal years (full) / ≥1 (shallow); statements required in both modes.
+  - `valuation_depth` — DCF naming wacc/discount-rate AND terminal growth, a comps
+    table with ≥4 ticker rows (full) / ≥2 (shallow), and bull/base/bear (or
+    low/mid/high) scenario values.
+  - `anchors_coherent` — `valuation_anchors.json` validates (same required keys +
+    positivity as `score_fundamental.validate_anchors`, duplicated locally) AND
+    dcf_base/bear/bull each transcribed into valuation.md (±0.5% or exact string) —
+    anchors are transcriptions, not inventions.
+  The section lists and sub-skill names are the REAL FSI structure read from the
+  installed cache, not an approximation. Thresholds are FLOORS below FSI's own
+  templates — they exist to make silent shrinkage fail loudly, not to cap depth.
+  - Files: `scripts/coverage_qc.py`, `tests/test_coverage_qc.py` (35 new tests:
+    minimal passing fixtures + one-mutation breakers per check).
+
+- **Phase 0.5 rewrite: full depth is the contract, not a suggestion.** Deleted the
+  "proportionate depth" override and the anchors-not-a-10-tab-workbook framing from
+  `full-trade-analysis`. The orchestrator now announces the cost and runs FSI
+  `initiating-coverage` Tasks 1-3 at the FSI SKILL's own FULL deliverable depth,
+  invoking `financial-analysis:3-statement-model` / `:dcf-model` / `:comps-analysis`
+  where the workflow prescribes them (Tasks 4-5 still skipped — our docket/renderer
+  own charts + assembly). It writes `coverage/coverage_manifest.json` as the work
+  happens, transcribes `valuation_anchors.json` (rules unchanged), and runs
+  `coverage_qc.py --mode full` — a FAIL means the coverage is not done; complete it
+  or surface to the user, never waive a self-depth failure silently. Shallow mode is
+  an explicit per-run user request only (`depth_mode "shallow (user-requested)"`,
+  gate `--mode shallow`), disclosed in the coverage line, the report, and the Phase-6
+  completeness block. `company-context` distills from FULL, gate-passed coverage;
+  `refresh-analysis` appends a `model-update` manifest entry and re-runs the gate in
+  the recorded mode (the full-depth gate is an initiation contract, not re-decided on
+  refresh).
+  - Files: `skills/full-trade-analysis/SKILL.md`, `skills/company-context/SKILL.md`,
+    `skills/refresh-analysis/SKILL.md`.
+
 ## 0.12.1 — 2026-07-19
 
 - **Fix: anchored runs no longer carry the compressed-mode disclosure (ORCL live
