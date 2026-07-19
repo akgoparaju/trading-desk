@@ -1083,6 +1083,17 @@ class TestModeDisclosure(unittest.TestCase):
         self.assertEqual(doc["skill"], "fundamental")
         self.assertEqual(doc["rubric_version"], "1.2.0")
 
+    def test_anchored_run_discloses_anchored_mode(self):
+        # ORCL live finding: the static "deep FSI ... not applied" note shipped
+        # on a run where initiation HAD run and anchors scored the valuation.
+        snap = {"fundamentals": _fund(), "valuation": _val(),
+                "price": {"last": 120.0},
+                "meta": {"ticker": "ORCL", "as_of_utc": "2026-07-19T00:00:00Z"}}
+        doc = sf.build_module(snap, anchors=_anchors())
+        self.assertEqual(doc["fundamental_mode"], "coverage_anchored_pass")
+        self.assertIn("coverage-anchored", doc["mode_note"])
+        self.assertNotIn("not applied", doc["mode_note"])
+
 
 # --------------------------------------------------------------------------- #
 # Moat flag recorded in module flags (mirrors score_sentiment conventions)

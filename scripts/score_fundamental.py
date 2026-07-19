@@ -122,9 +122,17 @@ from scripts import sector_scales
 
 RUBRIC_VERSION = "1.2.0"
 SKILL_NAME = "fundamental"
+# Top-level mode disclosure tracks the valuation mode actually used (ORCL live
+# finding: the static "not applied" note shipped on runs where FSI initiation
+# HAD run and anchors scored the valuation — a false disclosure).
 FUNDAMENTAL_MODE = "compressed_snapshot_pass"
 MODE_NOTE = ("snapshot-only fundamental pass; deep FSI initiation/model reuse "
             "not applied")
+FUNDAMENTAL_MODE_ANCHORED = "coverage_anchored_pass"
+MODE_NOTE_ANCHORED = ("coverage-anchored pass; valuation scored against the "
+                      "coverage DCF/comps anchors (quality reads the snapshot "
+                      "per single-mapping; coverage enters via anchors + the "
+                      "cited moat flag)")
 
 # Moat/positioning judgment-flag choices + point table (v1.1.0). Mirrors the
 # score_sentiment judgment-flag pattern: OMITTING the flag (moat is None) is the
@@ -955,8 +963,9 @@ def build_module(snapshot, moat=None, moat_justification=None,
     doc = {
         "skill": SKILL_NAME,
         "rubric_version": RUBRIC_VERSION,
-        "fundamental_mode": FUNDAMENTAL_MODE,
-        "mode_note": MODE_NOTE,
+        "fundamental_mode": (FUNDAMENTAL_MODE_ANCHORED if anchored
+                             else FUNDAMENTAL_MODE),
+        "mode_note": MODE_NOTE_ANCHORED if anchored else MODE_NOTE,
         "ticker": meta.get("ticker"),
         "as_of": build_snapshot._as_of_date(meta.get("as_of_utc")),
         "score": scored["score"],

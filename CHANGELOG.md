@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.1 — 2026-07-19
+
+- **Fix: anchored runs no longer carry the compressed-mode disclosure (ORCL live
+  finding).** `score_fundamental`'s top-level `fundamental_mode`/`mode_note` were
+  static, so a coverage-anchored run shipped "snapshot-only fundamental pass;
+  deep FSI initiation/model reuse not applied" — a false disclosure on exactly
+  the runs where initiation HAD run. Anchored runs now stamp
+  `coverage_anchored_pass` with a note stating the actual split (valuation from
+  coverage anchors; quality from the snapshot per single-mapping; coverage also
+  enters via the cited moat flag). Snapshot-mode disclosure unchanged.
+  - Files: `scripts/score_fundamental.py`, `tests/test_score_fundamental.py`.
+
 ## 0.12.0 — 2026-07-18 · Sector scales, anchored valuation, weights config, methodology
 
 Coverage anchors now SCORE (not just narrate): fundamental valuation v1.2.0 banding
