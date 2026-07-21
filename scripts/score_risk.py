@@ -12,13 +12,30 @@ shallow-drawdown, deep-discount, asymmetric, liquid, cash-rich setup scores near
 100). This is the opposite polarity from a "danger meter" -- a high risk-analytics
 score means the *conditions* are favorable, not that the stock is dangerous.
 
-Scoring is over four dimensions (max 100 total):
-    1. Volatility state    (25)  -- rv30 vs 10-yr percentile + benchmark beta
-    2. Drawdown profile    (25)  -- max 10-yr drawdown + 30% episode count
-                                    + a 20%-vs-30% episode-spread severity proxy
-    3. Margin of safety    (30)  -- distance below the all-time high
-                                    + ladder asymmetry (support-vs-resistance)
-    4. Liquidity & solvency(20)  -- 3-month average dollar volume + net-cash ratio
+Scoring is over SIX dimensions (max 100 total) as of risk-v1.1.0 (PROVISIONAL --
+see the "risk-v1.1.0" note below). Rubric v1.0.0 scored only the first four (at
+maxes 25/25/30/20); v1.1.0 trims each of the four by a symmetric -5 to free 20 pts
+for the two event/tail factors that make the near-term binary REAL evidence:
+    1. Volatility state    (20)  -- rv30 vs 10-yr percentile (16) + benchmark beta (4)
+                                    [v1.0.0: 25 = pctile 20 + beta 5]
+    2. Drawdown profile    (20)  -- max 10-yr drawdown (10) + 30% episode count (6)
+                                    + a 20%-vs-30% episode-spread severity proxy (4)
+                                    [v1.0.0: 25 = maxdd 12 + episodes 8 + spread 5]
+    3. Margin of safety    (25)  -- distance below the all-time high (10)
+                                    + ladder asymmetry (15)
+                                    [v1.0.0: 30 = dist 12 + asymmetry 18]
+    4. Liquidity & solvency(15)  -- 3-month average dollar volume (8) + net-cash ratio (7)
+                                    [v1.0.0: 20 = ADV 10 + net 10]
+    5. Event risk          (12)  -- days-to-event x implied-move-vs-own-history (NEW v1.1.0)
+    6. Tail risk           (8)   -- overnight-gap kurtosis + p95 magnitude (NEW v1.1.0)
+
+RISK-v1.1.0 IS PROVISIONAL. The event/tail weights + bands are a versioned,
+falsifiable DEFAULT (user philosophy "A"): shipped loudly disclosed and UNRATIFIED
+pending the B9 calibration set (5-10 anchored names). The re-weight band SHAPES
+(thresholds) of the four pre-existing factors are IDENTICAL to v1.0.0 -- only the
+point ceilings scale down proportionally, so the ORDERING a name earns within each
+factor is unchanged; only its contribution to the composite shifts. A pre-registered
+falsifier (recorded in skills/risk-analytics/SKILL.md + here) governs the re-set.
 
 HARD DEPENDENCY: this module CONSUMES ``<bundle>/module_technical.json`` for the
 S/R ladder (the asymmetry component reads ``nearest_support``/``nearest_resistance``
@@ -86,8 +103,15 @@ if _REPO_ROOT not in sys.path:
 
 from scripts import build_snapshot, confidence, levels
 
-RUBRIC_VERSION = "1.0.0"
+RUBRIC_VERSION = "1.1.0"
 SKILL_NAME = "risk-analytics"
+
+# risk-v1.1.0 PROVISIONAL disclosure. Stamped into the module note so every brief
+# footer + the report methodology page carry the unratified flag verbatim. Promotes
+# out of PROVISIONAL only when the B9 calibration set ratifies the weights/bands.
+_PROVISIONAL_NOTE = (
+    "risk-v1.1.0 PROVISIONAL — event/tail weights unratified pending B9 "
+    "calibration; falsifier pre-registered")
 
 # Blue-sky convention: when there is NO resistance above ``last`` on the ladder,
 # treat headroom as 15% for the asymmetry ratio (labeled in the arithmetic).
@@ -113,21 +137,31 @@ INPUT_FIELDS = {
     # governance must see them here and nowhere else.
     "benchmark.beta_n_days",
     "technicals.ohlcv_rows",
+    # risk-v1.1.0 SCORED event/tail fields (Part B). PROMOTED from CONTEXT_FIELDS:
+    # these carry points now. days_to_event x implied_move_vs_own_history_pctile
+    # feed event_risk; overnight_gap (its excess_kurtosis + p95_abs) feeds
+    # tail_risk. They are single-mapped here and nowhere else (checked by the
+    # single-mapping governance test -- no other module scores these paths).
+    "events.days_to_event",
+    "events.implied_move_vs_own_history_pctile",
+    "technicals.overnight_gap",
 }
 
 # Snapshot fields consumed by this module as CONTEXT-ONLY (unscored, carry zero
 # points, excluded from INPUT_FIELDS so the single-mapping governance test is not
 # confused into treating them as scored). These are surfaced verbatim from the
-# snapshot into tables.event_context and tables.tail_context for disclosure —
-# scoring is gated on calibration (Part B). A2 additions.
+# snapshot into tables.event_context and tables.tail_context for disclosure.
+#
+# A2 originally listed FIVE fields here (all unscored, scoring gated on Part B).
+# risk-v1.1.0 (Part B) PROMOTED three of them to SCORED (moved to INPUT_FIELDS):
+# days_to_event + implied_move_vs_own_history_pctile (-> event_risk) and
+# overnight_gap (-> tail_risk). The two that remain are still pure context: the
+# raw implied_move fraction (implied_move_vs_own_history_pctile is what scores)
+# and the earnings_move_history LIST (surfaced for the reader; the percentile
+# distilled from it is what scores).
 CONTEXT_FIELDS = {
-    # event_context (A2)
-    "events.days_to_event",
     "events.implied_move",
-    "events.implied_move_vs_own_history_pctile",
     "events.earnings_move_history",
-    # tail_context (A2)
-    "technicals.overnight_gap",
 }
 
 # Minimum history for a component to be trusted (see the module docstring / the
@@ -157,14 +191,18 @@ def _clean(x):
 
 
 # --------------------------------------------------------------------------- #
-# 1. Volatility state (max 25): rv percentile (20) + beta (5)
+# 1. Volatility state (max 20): rv percentile (16) + beta (4)
 # --------------------------------------------------------------------------- #
 
 def score_volatility(tech, beta, beta_n_days=None, ohlcv_rows=None) -> dict:
-    """rv30_vs_10yr_pctile band (max 20) + benchmark beta band (max 5).
+    """rv30_vs_10yr_pctile band (max 16) + benchmark beta band (max 4).
 
-    pctile: <30 -> 20; 30-60 -> 14; 60-80 -> 8; >=80 -> 3; null -> 0 ("n/a").
-    beta: <1.2 -> +5; 1.2-1.8 -> +3; >1.8 -> +0; null -> 0.
+    RE-WEIGHT (risk-v1.1.0): factor max 25->20 (pctile 20->16, beta 5->4) to free
+    room for event_risk/tail_risk. Band SHAPES (thresholds) are UNCHANGED from
+    v1.0.0 -- only the point ceilings scale (pctile ~x0.8, beta ~x0.8):
+      pctile: <30 -> 16; 30-60 -> 11; 60-80 -> 6; >=80 -> 2; null -> 0 ("n/a").
+      beta:   <1.2 -> +4; 1.2-1.8 -> +2; >1.8 -> +0; null -> 0.
+    (v1.0.0 was pctile 20/14/8/3 + beta 5/3/0.)
     Lower volatility and lower beta = better conditions = more points.
 
     Short-history confidence gating (REAL-WORLD BUG: a beta of 3.61 computed from
@@ -192,14 +230,14 @@ def score_volatility(tech, beta, beta_n_days=None, ohlcv_rows=None) -> dict:
     elif pctile is not None:
         evaluable += 1
         if pctile < 30:
-            pctile_pts = 20
+            pctile_pts = 16
         elif pctile < 60:
-            pctile_pts = 14
+            pctile_pts = 11
         elif pctile < 80:
-            pctile_pts = 8
+            pctile_pts = 6
         else:  # >= 80
-            pctile_pts = 3
-        parts.append(f"rv30_vs_10yr_pctile {_fmt(pctile)} -> {pctile_pts}/20")
+            pctile_pts = 2
+        parts.append(f"rv30_vs_10yr_pctile {_fmt(pctile)} -> {pctile_pts}/16")
     else:
         pctile_pts = 0
         parts.append("rv30_vs_10yr_pctile: n/a (+0)")
@@ -212,9 +250,9 @@ def score_volatility(tech, beta, beta_n_days=None, ohlcv_rows=None) -> dict:
     elif beta is not None:
         evaluable += 1
         if beta < 1.2:
-            beta_pts = 5
+            beta_pts = 4
         elif beta <= 1.8:
-            beta_pts = 3
+            beta_pts = 2
         else:  # > 1.8
             beta_pts = 0
         parts.append(f"beta {_fmt(beta)} -> +{beta_pts}")
@@ -226,7 +264,7 @@ def score_volatility(tech, beta, beta_n_days=None, ohlcv_rows=None) -> dict:
     return {
         "name": "volatility_state",
         "points": _clean(total),
-        "max": 25,
+        "max": 20,
         "arithmetic": "; ".join(parts),
         "inputs": {"pctile_points": pctile_pts, "beta_points": beta_pts,
                    "rv30_vs_10yr_pctile": pctile, "beta": beta,
@@ -236,17 +274,20 @@ def score_volatility(tech, beta, beta_n_days=None, ohlcv_rows=None) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# 2. Drawdown profile (max 25): max_dd (12) + episodes (8) + spread proxy (5)
+# 2. Drawdown profile (max 20): max_dd (10) + episodes (6) + spread proxy (4)
 # --------------------------------------------------------------------------- #
 
 def score_drawdown(tech) -> dict:
-    """max_dd_10yr (max 12) + dd_episodes_30pct_10yr (max 8) + severity-spread
-    proxy (max 5).
+    """max_dd_10yr (max 10) + dd_episodes_30pct_10yr (max 6) + severity-spread
+    proxy (max 4).
 
-    max_dd (negative fraction): >= -0.35 -> 12; [-0.50,-0.35) -> 8;
-        [-0.65,-0.50) -> 4; < -0.65 -> 0.
-    episodes (30% count): <=1 -> 8; 2-3 -> 5; >=4 -> 2.
-    spread proxy (method "episode_spread_proxy"): (dd20 - dd30) <= 2 -> 5; else 2.
+    RE-WEIGHT (risk-v1.1.0): factor max 25->20, split as maxdd 12->10, episodes
+    8->6, spread 5->4 (10+6+4 = 20). Band SHAPES (thresholds) are UNCHANGED from
+    v1.0.0 -- only the ceilings scale:
+      max_dd (negative fraction): >= -0.35 -> 10; [-0.50,-0.35) -> 7;
+          [-0.65,-0.50) -> 3; < -0.65 -> 0.  (v1.0.0: 12/8/4/0)
+      episodes (30% count): <=1 -> 6; 2-3 -> 4; >=4 -> 2.  (v1.0.0: 8/5/2)
+      spread proxy ("episode_spread_proxy"): (dd20-dd30) <= 2 -> 4; else 2. (v1.0.0: 5/2)
     Shallower drawdowns and fewer/less-severe episodes = better = more points.
     """
     max_dd = tech.get("max_dd_10yr")
@@ -260,14 +301,14 @@ def score_drawdown(tech) -> dict:
     if max_dd is not None:
         evaluable += 1
         if max_dd >= -0.35:
-            maxdd_pts = 12
+            maxdd_pts = 10
         elif max_dd >= -0.50:
-            maxdd_pts = 8
+            maxdd_pts = 7
         elif max_dd >= -0.65:
-            maxdd_pts = 4
+            maxdd_pts = 3
         else:  # < -0.65
             maxdd_pts = 0
-        parts.append(f"max_dd_10yr {_fmt(max_dd)} -> {maxdd_pts}/12")
+        parts.append(f"max_dd_10yr {_fmt(max_dd)} -> {maxdd_pts}/10")
     else:
         maxdd_pts = 0
         parts.append("max_dd_10yr: n/a (+0)")
@@ -276,12 +317,12 @@ def score_drawdown(tech) -> dict:
     if dd30 is not None:
         evaluable += 1
         if dd30 <= 1:
-            episodes_pts = 8
+            episodes_pts = 6
         elif dd30 <= 3:
-            episodes_pts = 5
+            episodes_pts = 4
         else:  # >= 4
             episodes_pts = 2
-        parts.append(f"dd_episodes_30pct_10yr {_fmt(dd30)} -> {episodes_pts}/8")
+        parts.append(f"dd_episodes_30pct_10yr {_fmt(dd30)} -> {episodes_pts}/6")
     else:
         episodes_pts = 0
         parts.append("dd_episodes_30pct_10yr: n/a (+0)")
@@ -290,10 +331,10 @@ def score_drawdown(tech) -> dict:
     if dd20 is not None and dd30 is not None:
         evaluable += 1
         spread = dd20 - dd30
-        spread_pts = 5 if spread <= 2 else 2
+        spread_pts = 4 if spread <= 2 else 2
         parts.append(
             f"episode_spread_proxy (dd20 {_fmt(dd20)} - dd30 {_fmt(dd30)} = "
-            f"{_fmt(spread)}) -> {spread_pts}/5")
+            f"{_fmt(spread)}) -> {spread_pts}/4")
     else:
         spread_pts = 0
         parts.append("episode_spread_proxy: n/a (+0)")
@@ -302,7 +343,7 @@ def score_drawdown(tech) -> dict:
     return {
         "name": "drawdown_profile",
         "points": _clean(total),
-        "max": 25,
+        "max": 20,
         "arithmetic": "; ".join(parts),
         "inputs": {"maxdd_points": maxdd_pts, "episodes_points": episodes_pts,
                    "spread_points": spread_pts, "max_dd_10yr": max_dd,
@@ -313,19 +354,22 @@ def score_drawdown(tech) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# 3. Margin of safety (max 30): dist_from_ath (12) + asymmetry (18)
+# 3. Margin of safety (max 25): dist_from_ath (10) + asymmetry (15)
 # --------------------------------------------------------------------------- #
 
 def score_margin(tech, ladder, last) -> dict:
-    """dist_from_ath_pct (max 12) + ladder asymmetry (max 18).
+    """dist_from_ath_pct (max 10) + ladder asymmetry (max 15).
 
-    dist_from_ath (negative fraction): <= -0.15 -> 12; (-0.15,-0.05] -> 7;
-        > -0.05 -> 3; null -> 0 ("n/a").
-    asymmetry: d_support = |pct_from_last| of the nearest PROVEN support below
+    RE-WEIGHT (risk-v1.1.0): factor max 30->25, split as dist 12->10, asymmetry
+    18->15 (10+15 = 25). Band SHAPES (thresholds) are UNCHANGED from v1.0.0 --
+    only the ceilings scale:
+      dist_from_ath (negative fraction): <= -0.15 -> 10; (-0.15,-0.05] -> 6;
+          > -0.05 -> 3; null -> 0 ("n/a").  (v1.0.0: 12/7/3)
+      asymmetry: d_support = |pct_from_last| of the nearest PROVEN support below
         ``last`` (levels.nearest_support); d_resist = pct_from_last of the nearest
         resistance above (levels.nearest_resistance), or 0.15 blue-sky convention
         when none above. ratio = d_support / d_resist:
-            <=0.5 -> 18; (0.5,1.0] -> 12; (1.0,2.0] -> 6; >2.0 -> 2.
+            <=0.5 -> 15; (0.5,1.0] -> 10; (1.0,2.0] -> 5; >2.0 -> 2.  (v1.0.0: 18/12/6/2)
         NO proven support below -> 2 ("no proven floor" -- cannot anchor risk).
     Deeper discount and tighter downside relative to upside = better = more points.
     """
@@ -336,12 +380,12 @@ def score_margin(tech, ladder, last) -> dict:
     # -- distance from all-time high ---------------------------------------
     if dist is not None:
         if dist <= -0.15:
-            dist_pts = 12
+            dist_pts = 10
         elif dist <= -0.05:
-            dist_pts = 7
+            dist_pts = 6
         else:  # > -0.05
             dist_pts = 3
-        parts.append(f"dist_from_ath_pct {_fmt(dist)} -> {dist_pts}/12")
+        parts.append(f"dist_from_ath_pct {_fmt(dist)} -> {dist_pts}/10")
     else:
         dist_pts = 0
         parts.append("dist_from_ath_pct: n/a (+0)")
@@ -366,11 +410,11 @@ def score_margin(tech, ladder, last) -> dict:
         # convention). Ratio compares downside distance to upside distance.
         ratio = d_support / d_resist if d_resist else float("inf")
         if ratio <= 0.5:
-            asymmetry_pts = 18
+            asymmetry_pts = 15
         elif ratio <= 1.0:
-            asymmetry_pts = 12
+            asymmetry_pts = 10
         elif ratio <= 2.0:
-            asymmetry_pts = 6
+            asymmetry_pts = 5
         else:  # > 2.0
             asymmetry_pts = 2
         parts.append(
@@ -381,8 +425,8 @@ def score_margin(tech, ladder, last) -> dict:
     total = dist_pts + asymmetry_pts
     return {
         "name": "margin_of_safety",
-        "points": min(30, total),
-        "max": 30,
+        "points": min(25, total),
+        "max": 25,
         "arithmetic": "; ".join(parts),
         "inputs": {"dist_ath_points": dist_pts,
                    "asymmetry_points": asymmetry_pts,
@@ -394,15 +438,19 @@ def score_margin(tech, ladder, last) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# 4. Liquidity & solvency (max 20): ADV (10) + net-cash ratio (10)
+# 4. Liquidity & solvency (max 15): ADV (8) + net-cash ratio (7)
 # --------------------------------------------------------------------------- #
 
 def score_liquidity(adv, net, mktcap) -> dict:
-    """adv_dollar_3m (max 10) + net-cash ratio (max 10).
+    """adv_dollar_3m (max 8) + net-cash ratio (max 7).
 
-    adv: >=500e6 -> 10; [50e6,500e6) -> 7; [10e6,50e6) -> 4; <10e6 -> 1; null -> 0.
-    net_ratio = net / mktcap: >0.05 -> 10; [0,0.05] -> 7; [-0.10,0) -> 4;
-        < -0.10 -> 1; null (net or mktcap missing) -> 0.
+    RE-WEIGHT (risk-v1.1.0): factor max 20->15, split as ADV 10->8, net 10->7
+    (8+7 = 15). Band SHAPES (thresholds) are UNCHANGED from v1.0.0 -- only the
+    ceilings scale:
+      adv: >=500e6 -> 8; [50e6,500e6) -> 6; [10e6,50e6) -> 3; <10e6 -> 1; null -> 0.
+        (v1.0.0: 10/7/4/1)
+      net_ratio = net / mktcap: >0.05 -> 7; [0,0.05] -> 5; [-0.10,0) -> 3;
+        < -0.10 -> 1; null (net or mktcap missing) -> 0.  (v1.0.0: 10/7/4/1)
     Deeper liquidity and a stronger balance sheet = better = more points.
     """
     parts = []
@@ -412,14 +460,14 @@ def score_liquidity(adv, net, mktcap) -> dict:
     if adv is not None:
         evaluable += 1
         if adv >= 500e6:
-            adv_pts = 10
+            adv_pts = 8
         elif adv >= 50e6:
-            adv_pts = 7
+            adv_pts = 6
         elif adv >= 10e6:
-            adv_pts = 4
+            adv_pts = 3
         else:  # < 10e6
             adv_pts = 1
-        parts.append(f"adv_dollar_3m {_fmt(_clean(adv))} -> {adv_pts}/10")
+        parts.append(f"adv_dollar_3m {_fmt(_clean(adv))} -> {adv_pts}/8")
     else:
         adv_pts = 0
         parts.append("adv_dollar_3m: n/a (+0)")
@@ -429,16 +477,16 @@ def score_liquidity(adv, net, mktcap) -> dict:
         evaluable += 1
         net_ratio = net / mktcap
         if net_ratio > 0.05:
-            net_pts = 10
-        elif net_ratio >= 0:
             net_pts = 7
+        elif net_ratio >= 0:
+            net_pts = 5
         elif net_ratio >= -0.10:
-            net_pts = 4
+            net_pts = 3
         else:  # < -0.10
             net_pts = 1
         parts.append(
             f"net_ratio (net {_fmt(_clean(net))} / mktcap {_fmt(_clean(mktcap))} "
-            f"= {net_ratio*100:.1f}%) -> {net_pts}/10")
+            f"= {net_ratio*100:.1f}%) -> {net_pts}/7")
     else:
         net_pts = 0
         parts.append("net_ratio: n/a (+0)")
@@ -447,11 +495,157 @@ def score_liquidity(adv, net, mktcap) -> dict:
     return {
         "name": "liquidity_solvency",
         "points": _clean(total),
-        "max": 20,
+        "max": 15,
         "arithmetic": "; ".join(parts),
         "inputs": {"adv_points": adv_pts, "net_ratio_points": net_pts,
                    "adv_dollar_3m": adv, "net": net, "mktcap": mktcap},
         "evaluable": evaluable > 0,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 5. Event risk (max 12): days-to-event x implied-move-vs-own-history (v1.1.0)
+# --------------------------------------------------------------------------- #
+
+def score_event_risk(events) -> dict:
+    """days_to_event (d) x implied_move_vs_own_history_pctile (p) -> event_risk (max 12).
+
+    NEW in risk-v1.1.0 (PROVISIONAL). Higher = better (calmer) conditions: a name
+    with NO near-term binary earns the full 12; a name days out from earnings the
+    market is pricing an above-its-own-history move earns as little as 2. The two
+    inputs are Part-A deterministic snapshot fields (build_snapshot):
+      d = events.days_to_event (int days; null when no dated event)
+      p = events.implied_move_vs_own_history_pctile (0-100; null with no chain/history)
+
+    Bands (from the spec, verbatim):
+      - d null OR d > 30                    -> 12  (no near-term event risk)
+      - d <= 30, p null (proximity only)    -> d<=7: 6 ; d<=14: 8 ; else(<=30): 10
+      - d <= 30, p >= 90                    -> d<=7: 2 ; d<=14: 3 ; else: 5
+      - d <= 30, 60 <= p < 90               -> d<=7: 4 ; d<=14: 6 ; else: 8
+      - d <= 30, p < 60                     -> d<=7: 6 ; d<=14: 8 ; else: 10
+
+    ALWAYS evaluable: even with no dated event (d null) the factor makes a
+    deterministic claim ("no near-term event risk -> 12"), so it carries points
+    and stays in the renormalization denominator. (Contrast tail_risk, which is
+    NOT evaluable when its kurtosis input is null -- an unmeasurable tail is no
+    input.)
+    """
+    ev = events if isinstance(events, dict) else {}
+    d = ev.get("days_to_event")
+    p = ev.get("implied_move_vs_own_history_pctile")
+
+    # No dated event, or the event is beyond the 30-day near-term window: no
+    # near-term event risk -> full points.
+    if d is None or d > 30:
+        pts = 12
+        arithmetic = (f"days_to_event {_fmt(d)} (null or >30) -> no near-term "
+                      f"event risk -> 12/12")
+    else:
+        # A near-term event within 30d. Proximity buckets are the same in every
+        # implied-move branch; only the point ceiling per bucket changes with p.
+        if d <= 7:
+            bucket = "<=7d"
+        elif d <= 14:
+            bucket = "<=14d"
+        else:  # <= 30
+            bucket = "<=30d"
+
+        if p is None:
+            # Proximity only (no chain/history to price the move against).
+            table = {"<=7d": 6, "<=14d": 8, "<=30d": 10}
+            pband = "proximity only (implied_move_vs_own_history_pctile n/a)"
+        elif p >= 90:
+            # Market pricing a move at/above the 90th pctile of this name's own
+            # history: the binary is loud -> steepest discount.
+            table = {"<=7d": 2, "<=14d": 3, "<=30d": 5}
+            pband = "implied_pctile >= 90 (loud binary)"
+        elif p >= 60:
+            table = {"<=7d": 4, "<=14d": 6, "<=30d": 8}
+            pband = "60 <= implied_pctile < 90"
+        else:  # p < 60
+            table = {"<=7d": 6, "<=14d": 8, "<=30d": 10}
+            pband = "implied_pctile < 60 (below-average priced move)"
+
+        pts = table[bucket]
+        arithmetic = (f"event {_fmt(d)}d out ({bucket}), {pband} "
+                      f"[p={_fmt(p)}] -> {pts}/12")
+
+    return {
+        "name": "event_risk",
+        "points": _clean(pts),
+        "max": 12,
+        "arithmetic": arithmetic,
+        "inputs": {"days_to_event": d,
+                   "implied_move_vs_own_history_pctile": p,
+                   "event_points": pts},
+        "evaluable": True,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 6. Tail risk (max 8): overnight-gap kurtosis + p95 magnitude (v1.1.0)
+# --------------------------------------------------------------------------- #
+
+def score_tail_risk(overnight_gap) -> dict:
+    """overnight-gap excess_kurtosis + p95_abs -> tail_risk (max 8).
+
+    NEW in risk-v1.1.0 (PROVISIONAL). Higher = better (calmer) conditions. Both
+    inputs are Part-A deterministic snapshot fields on technicals.overnight_gap:
+      k = excess_kurtosis (4th standardized moment - 3; null when n<4 or degenerate)
+      p95 = p95_abs (95th-pctile ABSOLUTE overnight gap, a positive fraction)
+
+    Bands (from the spec, verbatim):
+      - excess_kurtosis null (n < 4) -> NOT evaluable (renormalize; do NOT zero --
+        an unmeasurable tail is no input, exactly like a null dimension elsewhere).
+      - k < 8  AND p95 < 0.04 -> 8  (calm tails)
+      - k < 20 AND p95 < 0.06 -> 5  (moderate)
+      - else                  -> 2  (violent tails)
+
+    The overnight_gap block may be absent entirely (None) on a degraded/web run
+    with no daily series -- that is also NOT evaluable (renormalize), same as a
+    null kurtosis.
+    """
+    og = overnight_gap if isinstance(overnight_gap, dict) else {}
+    k = og.get("excess_kurtosis")
+    p95 = og.get("p95_abs")
+
+    # NOT evaluable when the tail cannot be measured: no overnight_gap block, or
+    # excess_kurtosis null (n < 4). Renormalize -- never zero.
+    if not isinstance(overnight_gap, dict) or k is None:
+        why = ("no overnight_gap block" if not isinstance(overnight_gap, dict)
+               else "excess_kurtosis n/a (n<4)")
+        return {
+            "name": "tail_risk",
+            "points": 0,
+            "max": 8,
+            "arithmetic": f"tail_risk: n/a ({why}) -> renormalized (not zeroed)",
+            "inputs": {"excess_kurtosis": k, "p95_abs": p95, "tail_points": 0},
+            "evaluable": False,
+        }
+
+    # p95_abs is expected present whenever the block exists; treat a null p95 as
+    # failing the "< threshold" tests (falls through to the violent-tails band).
+    p95_ok_calm = p95 is not None and p95 < 0.04
+    p95_ok_moderate = p95 is not None and p95 < 0.06
+
+    if k < 8 and p95_ok_calm:
+        pts = 8
+        band = "calm tails (kurtosis < 8 & p95_abs < 0.04)"
+    elif k < 20 and p95_ok_moderate:
+        pts = 5
+        band = "moderate tails (kurtosis < 20 & p95_abs < 0.06)"
+    else:
+        pts = 2
+        band = "violent tails"
+
+    return {
+        "name": "tail_risk",
+        "points": _clean(pts),
+        "max": 8,
+        "arithmetic": (f"excess_kurtosis {_fmt(_clean(k))}, p95_abs "
+                       f"{_fmt(_clean(p95))} -> {band} -> {pts}/8"),
+        "inputs": {"excess_kurtosis": k, "p95_abs": p95, "tail_points": pts},
+        "evaluable": True,
     }
 
 
@@ -657,8 +851,9 @@ def build_vol_profile(tech, bench) -> dict:
 # --------------------------------------------------------------------------- #
 
 def score(tech, beta, ladder, last, adv, net, mktcap,
-          beta_n_days=None, ohlcv_rows=None) -> dict:
-    """Assemble the four subscores and the (possibly renormalized) 0-100 score.
+          beta_n_days=None, ohlcv_rows=None,
+          events=None, overnight_gap=None) -> dict:
+    """Assemble the SIX subscores and the (possibly renormalized) 0-100 score.
 
     A dimension whose ``evaluable`` is False (all its scored inputs null) is
     EXCLUDED from the max total and the score is rescaled to 0-100 over the
@@ -666,6 +861,13 @@ def score(tech, beta, ladder, last, adv, net, mktcap,
 
     ``beta_n_days``/``ohlcv_rows`` gate the volatility-state components on
     sufficient history (see score_volatility).
+
+    risk-v1.1.0 adds ``events`` (the snapshot events block -> event_risk) and
+    ``overnight_gap`` (technicals.overnight_gap -> tail_risk). event_risk is
+    ALWAYS evaluable (a null event is a real "no near-term risk" claim);
+    tail_risk is NOT evaluable when its kurtosis input is null (renormalize).
+    The six maxes sum to 100 (20+20+25+15+12+8); a renormalization over a
+    non-evaluable tail_risk rescales over the remaining 92.
     """
     subs = [
         score_volatility(tech, beta, beta_n_days=beta_n_days,
@@ -673,6 +875,8 @@ def score(tech, beta, ladder, last, adv, net, mktcap,
         score_drawdown(tech),
         score_margin(tech, ladder, last),
         score_liquidity(adv, net, mktcap),
+        score_event_risk(events),
+        score_tail_risk(overnight_gap),
     ]
 
     included = [s for s in subs if s.get("evaluable", True)]
@@ -776,9 +980,12 @@ def build_module(snapshot, ladder, stress_pct, top_risk, anchors=None,
     mktcap = price.get("mktcap_computed")
     net_cash = fund.get("net_cash_defined") or {}
     net = net_cash.get("net") if isinstance(net_cash, dict) else None
+    events = snapshot.get("events", {}) if isinstance(snapshot, dict) else {}
+    overnight_gap = tech.get("overnight_gap")  # may be None
 
     scored = score(tech, beta, ladder, last, adv, net, mktcap,
-                   beta_n_days=beta_n_days, ohlcv_rows=ohlcv_rows)
+                   beta_n_days=beta_n_days, ohlcv_rows=ohlcv_rows,
+                   events=events, overnight_gap=overnight_gap)
 
     vf = valuation_floor(val.get("pe_5yr_median"),
                          fund.get("eps_ntm_consensus"),
@@ -812,8 +1019,11 @@ def build_module(snapshot, ladder, stress_pct, top_risk, anchors=None,
         "downside_floor_mode": "dcf_bear" if isinstance(anchors, dict)
                                else "pe_median",
         "renormalized": scored["renormalized"],
-        "note": ("event-context v1 (unscored) — surfaced for disclosure; "
-                 "scoring gated on calibration (Part B)"),
+        # risk-v1.1.0 (Part B): event/tail are now SCORED factors, shipped
+        # PROVISIONAL and loudly disclosed (unratified pending B9 calibration).
+        # The report renderer surfaces this note verbatim -> the provisional flag
+        # travels into every brief/report footer.
+        "note": _PROVISIONAL_NOTE,
         "signal": None,
     }
     if scored["renormalization_note"]:

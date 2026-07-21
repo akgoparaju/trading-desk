@@ -55,9 +55,37 @@ Add to `skills/risk-analytics/SKILL.md` the doctrine the review named: **"Risk i
 
 ---
 
-# PART B — Event-aware SCORING (GATED — needs your decision, NOT executed)
+# PART B — Event-aware SCORING (RESOLVED via user philosophy "A": provisional versioned default + falsifier, ratify after B9)
 
-Part B turns the Part-A data into **risk points** and adds the two heuristic signals. Each item below states the specific decision required; none is fabricated.
+**Decision (user, 2026-07-20): philosophy A** — propose a versioned, cited, **falsifiable** default and **ratify after the B9 calibration set runs**. So `risk-v1.1.0` ships PROVISIONAL and loudly disclosed (unratified pending B9), exactly as sector scales / the DEPTH table do. `short_campaign` is **SKIPPED** (user's open option — a false-positive risk gate needs an entity list not provided). `news_heat` is **deferred to Wave 3** (sentiment domain; `t½=3d` cited default when built). So Part B here narrows to the deterministic **event_risk + tail_risk scored factors** built on Part-A data.
+
+## `risk-v1.1.0` — the provisional scored re-weight (EXECUTABLE now)
+**Weight re-vector** (symmetric −5 trim of the four existing factors to free 20 pts; event > tail as the named gap):
+`volatility_state 25→20 · drawdown_profile 25→20 · margin_of_safety 30→25 · liquidity_solvency 20→15 · event_risk 12 · tail_risk 8 = 100`.
+
+**event_risk (max 12)** — from `events.days_to_event` × `events.implied_move_vs_own_history_pctile` (both Part-A fields):
+- `days_to_event` null or > 30 → **12** (no near-term event risk).
+- event ≤ 30d, `implied_pctile` null (no chain/history) → proximity only: ≤7d→6, ≤14d→8, ≤30d→10.
+- event ≤ 30d, `implied_pctile ≥ 90` → ≤7d→2, ≤14d→3, ≤30d→5.
+- event ≤ 30d, `60 ≤ implied_pctile < 90` → ≤7d→4, ≤14d→6, ≤30d→8.
+- event ≤ 30d, `implied_pctile < 60` → ≤7d→6, ≤14d→8, ≤30d→10.
+
+**tail_risk (max 8)** — from `technicals.overnight_gap` (Part-A field):
+- `excess_kurtosis` null (n < 4) → n/a (renormalize, do not zero).
+- `kurtosis < 8` AND `p95_abs < 0.04` → **8** (calm tails).
+- `kurtosis < 20` AND `p95_abs < 0.06` → **5**.
+- else → **2** (violent tails).
+
+**Pre-registered falsifier** (`risk-v1.1.0`): *if across the B9 calibration set (5–10 anchored names) event_risk does not separate historically-gappy names (large `earnings_move_history`) from calm ones, OR event_risk+tail_risk together swing the composite grade by >1 letter on a name where the other four factors agree it should not, the weights/bands are refuted and re-set.* Recorded in the SKILL + methodology.
+
+**Disclosure (loud, not silent):** `rubric_version → "1.1.0"`; module note `"risk-v1.1.0 PROVISIONAL — event/tail weights unratified pending B9 calibration; falsifier pre-registered"`; the methodology page prints the provisional flag + the falsifier. Scores WILL move (expected — this is the calibration revision); the byte-identical-score contract from Part A is retired for the four re-weighted factors.
+
+**Confidence DEPTH:** keep `risk` at **MEDIUM** in `confidence.py` DEPTH_TABLE while provisional (event-aware but unratified); add a comment that `risk` at `1.1.0`-**ratified** (post-B9) → HIGH. Do NOT promote to HIGH on a provisional rubric.
+
+---
+
+## Deferred sub-items (unchanged from the original gate; NOT built here)
+The items below remain gated exactly as before — retained for the record.
 
 ### B-i — The scored re-weight (`risk-v1.1.0`) → **needs a calibration decision**
 To score event-proximity/implied-move and gap/jump, the current 25/25/30/20 must be cut to make room (verified: not additive). **Decision needed:** the new weight vector + the per-factor bands. This is exactly the review's B8/B9 calibration territory (marked 👤, "provisional until 5-10 names scored"). Proposed *starting* shape for your review (NOT a default I'll ship unasked): event-proximity/implied-move as a ~15-pt factor (days-to-event bands × implied-vs-own-history), gap/jump as a ~10-pt factor, taken proportionally from vol/drawdown/MoS/liq — but the numbers are yours to set, ideally after a few anchored runs sit side by side (B9).

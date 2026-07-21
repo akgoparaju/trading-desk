@@ -179,6 +179,22 @@ class TestDepthAxis(unittest.TestCase):
         d = C.compute_module(_risk_doc("1.0.0"), _snap())["depth"]
         self.assertEqual(d["level"], "MEDIUM")
 
+    def test_risk_rubric_110_still_medium_provisional(self):
+        # risk-v1.1.0 is event-aware BUT PROVISIONAL (unratified pending B9
+        # calibration). It must STAY depth MEDIUM -- it does NOT auto-promote to
+        # HIGH via the generic "rubric past 1.0.0" fallthrough; the explicit 1.1.0
+        # row overrides it. Promotion to HIGH is gated on B9 ratification only.
+        d = C.compute_module(_risk_doc("1.1.0"), _snap())["depth"]
+        self.assertEqual(d["level"], "MEDIUM")
+
+    def test_risk_rubric_110_module_level_medium(self):
+        # The OVERALL confidence level for a risk 1.1.0 module on a clean premium
+        # fresh-print snapshot: source HIGH, depth MEDIUM (provisional), staleness
+        # HIGH -> min = MEDIUM. The provisional depth pins it; it must not read HIGH.
+        block = C.compute_module(_risk_doc("1.1.0"), _snap())
+        self.assertEqual(block["depth"]["level"], "MEDIUM")
+        self.assertEqual(block["level"], "MEDIUM")
+
     def test_depth_never_low(self):
         # a scored module is at least MEDIUM depth.
         for doc in (_tech_doc(), _risk_doc(), _sent_doc(), _fund_doc()):
@@ -202,6 +218,8 @@ class TestDepthAxis(unittest.TestCase):
         self.assertEqual(C.DEPTH_TABLE["technical"]["1.0.0"][0], "MEDIUM")
         self.assertEqual(C.DEPTH_TABLE["sentiment"]["1.0.0"][0], "MEDIUM")
         self.assertEqual(C.DEPTH_TABLE["risk"]["1.0.0"][0], "MEDIUM")
+        # risk-v1.1.0 is PROVISIONAL -> stays MEDIUM (explicit row, no auto-promote).
+        self.assertEqual(C.DEPTH_TABLE["risk"]["1.1.0"][0], "MEDIUM")
 
 
 # --------------------------------------------------------------------------- #
@@ -394,7 +412,7 @@ class TestWhyDigitFree(unittest.TestCase):
         docs = [_tech_doc(), _risk_doc(), _sent_doc(),
                 _fund_doc("compressed_snapshot_pass"),
                 _fund_doc("coverage_anchored_pass"),
-                _tech_doc("1.1.0")]
+                _tech_doc("1.1.0"), _risk_doc("1.1.0")]
         modes = ["alpha_vantage", "av_free_degraded", "web_fallback"]
         latests = ["2026-07-20", "2026-07-17", None]
         for doc in docs:

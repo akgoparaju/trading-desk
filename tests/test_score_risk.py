@@ -23,6 +23,10 @@ import unittest
 
 from scripts import score_risk as sr
 
+# Sentinel distinguishing "argument omitted" from "explicitly None" in fixtures
+# (an explicit og=None means "no overnight_gap block", a distinct scenario).
+_UNSET = object()
+
 
 # --------------------------------------------------------------------------- #
 # Helpers: minimal snapshot sub-blocks and hand-built ladders.
@@ -54,38 +58,44 @@ def _ladder(entries):
 # --------------------------------------------------------------------------- #
 
 class TestVolatilityState(unittest.TestCase):
-    def test_pctile_25_is_20(self):
+    # risk-v1.1.0 re-weight: factor max 25->20 (pctile 20->16, beta 5->4). Band
+    # SHAPES (thresholds) unchanged from v1.0.0; only the point ceilings scale.
+    def test_pctile_25_is_16(self):
         sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=25.0), beta=None)
-        self.assertEqual(sub["inputs"]["pctile_points"], 20)
+        self.assertEqual(sub["inputs"]["pctile_points"], 16)
 
-    def test_pctile_45_is_14(self):
+    def test_pctile_45_is_11(self):
         sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=45.0), beta=None)
-        self.assertEqual(sub["inputs"]["pctile_points"], 14)
+        self.assertEqual(sub["inputs"]["pctile_points"], 11)
 
-    def test_pctile_70_is_8(self):
+    def test_pctile_70_is_6(self):
         sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=70.0), beta=None)
-        self.assertEqual(sub["inputs"]["pctile_points"], 8)
+        self.assertEqual(sub["inputs"]["pctile_points"], 6)
 
-    def test_pctile_85_is_3(self):
+    def test_pctile_85_is_2(self):
         sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=85.0), beta=None)
-        self.assertEqual(sub["inputs"]["pctile_points"], 3)
+        self.assertEqual(sub["inputs"]["pctile_points"], 2)
 
     def test_pctile_null_is_0_na(self):
         sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=None), beta=1.0)
         self.assertEqual(sub["inputs"]["pctile_points"], 0)
         self.assertIn("n/a", sub["arithmetic"])
 
-    def test_beta_1_0_is_plus5(self):
+    def test_beta_1_0_is_plus4(self):
         sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=None), beta=1.0)
-        self.assertEqual(sub["inputs"]["beta_points"], 5)
+        self.assertEqual(sub["inputs"]["beta_points"], 4)
 
-    def test_beta_1_5_is_plus3(self):
+    def test_beta_1_5_is_plus2(self):
         sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=None), beta=1.5)
-        self.assertEqual(sub["inputs"]["beta_points"], 3)
+        self.assertEqual(sub["inputs"]["beta_points"], 2)
 
     def test_beta_2_1_is_plus0(self):
         sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=None), beta=2.1)
         self.assertEqual(sub["inputs"]["beta_points"], 0)
+
+    def test_factor_max_is_20(self):
+        sub = sr.score_volatility(_tech(), beta=1.0)
+        self.assertEqual(sub["max"], 20)
 
     def test_beta_null_is_0(self):
         sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=25.0), beta=None)
@@ -117,10 +127,10 @@ class TestShortHistoryGating(unittest.TestCase):
         self.assertIn("150", sub["arithmetic"])
 
     def test_beta_ndays_200_bands_normally(self):
-        # 200 >= 150 -> normal banding; beta 1.0 -> +5.
+        # 200 >= 150 -> normal banding; beta 1.0 -> +4 (v1.1.0 re-weight).
         sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=None), beta=1.0,
                                   beta_n_days=200, ohlcv_rows=2520)
-        self.assertEqual(sub["inputs"]["beta_points"], 5)
+        self.assertEqual(sub["inputs"]["beta_points"], 4)
 
     def test_ohlcv_rows_100_gates_percentile_to_0(self):
         # 100 rows < 500 -> percentile component 0 with "n/a".
@@ -132,30 +142,30 @@ class TestShortHistoryGating(unittest.TestCase):
         self.assertIn("500", sub["arithmetic"])
 
     def test_ohlcv_rows_600_bands_normally(self):
-        # 600 >= 500 -> normal banding; pctile 25 -> 20.
+        # 600 >= 500 -> normal banding; pctile 25 -> 16 (v1.1.0 re-weight).
         sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=25.0), beta=None,
                                   beta_n_days=250, ohlcv_rows=600)
-        self.assertEqual(sub["inputs"]["pctile_points"], 20)
+        self.assertEqual(sub["inputs"]["pctile_points"], 16)
 
     def test_gate_at_exact_threshold_passes(self):
         # boundaries are inclusive: 150 return-days and 500 rows both pass.
         sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=25.0), beta=1.0,
                                   beta_n_days=150, ohlcv_rows=500)
-        self.assertEqual(sub["inputs"]["beta_points"], 5)
-        self.assertEqual(sub["inputs"]["pctile_points"], 20)
+        self.assertEqual(sub["inputs"]["beta_points"], 4)
+        self.assertEqual(sub["inputs"]["pctile_points"], 16)
 
     def test_absent_gating_inputs_do_not_gate(self):
         # No n_days/rows passed (the branch-test call shape) -> no gating.
         sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=25.0), beta=1.0)
-        self.assertEqual(sub["inputs"]["beta_points"], 5)
-        self.assertEqual(sub["inputs"]["pctile_points"], 20)
+        self.assertEqual(sub["inputs"]["beta_points"], 4)
+        self.assertEqual(sub["inputs"]["pctile_points"], 16)
 
     def test_gated_beta_still_evaluable_via_other_component(self):
         # A gated beta with a valid pctile still leaves the dimension evaluable.
         sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=25.0), beta=1.0,
                                   beta_n_days=99, ohlcv_rows=2520)
         self.assertTrue(sub["evaluable"])
-        self.assertEqual(sub["inputs"]["pctile_points"], 20)
+        self.assertEqual(sub["inputs"]["pctile_points"], 16)
         self.assertEqual(sub["inputs"]["beta_points"], 0)
 
     def test_both_gated_and_no_other_inputs_not_evaluable(self):
@@ -170,49 +180,54 @@ class TestShortHistoryGating(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 class TestDrawdownProfile(unittest.TestCase):
-    def test_maxdd_shallow_is_12(self):
-        # -0.30 >= -0.35 -> 12
+    # risk-v1.1.0 re-weight: factor max 25->20 (maxdd 12->10, episodes 8->6,
+    # spread 5->4). Band SHAPES unchanged from v1.0.0; only ceilings scale.
+    def test_maxdd_shallow_is_10(self):
+        # -0.30 >= -0.35 -> 10
         sub = sr.score_drawdown(_tech(max_dd_10yr=-0.30))
-        self.assertEqual(sub["inputs"]["maxdd_points"], 12)
+        self.assertEqual(sub["inputs"]["maxdd_points"], 10)
 
-    def test_maxdd_mid_is_8(self):
-        # -0.45 in [-0.50, -0.35) -> 8
+    def test_maxdd_mid_is_7(self):
+        # -0.45 in [-0.50, -0.35) -> 7
         sub = sr.score_drawdown(_tech(max_dd_10yr=-0.45))
-        self.assertEqual(sub["inputs"]["maxdd_points"], 8)
+        self.assertEqual(sub["inputs"]["maxdd_points"], 7)
 
-    def test_maxdd_deep_is_4(self):
-        # -0.55 in [-0.65, -0.50) -> 4
+    def test_maxdd_deep_is_3(self):
+        # -0.55 in [-0.65, -0.50) -> 3
         sub = sr.score_drawdown(_tech(max_dd_10yr=-0.55))
-        self.assertEqual(sub["inputs"]["maxdd_points"], 4)
+        self.assertEqual(sub["inputs"]["maxdd_points"], 3)
 
     def test_maxdd_extreme_is_0(self):
         # -0.70 < -0.65 -> 0
         sub = sr.score_drawdown(_tech(max_dd_10yr=-0.70))
         self.assertEqual(sub["inputs"]["maxdd_points"], 0)
 
-    def test_episodes_1_is_8(self):
+    def test_episodes_1_is_6(self):
         sub = sr.score_drawdown(_tech(dd_episodes_30pct_10yr=1))
-        self.assertEqual(sub["inputs"]["episodes_points"], 8)
+        self.assertEqual(sub["inputs"]["episodes_points"], 6)
 
-    def test_episodes_3_is_5(self):
+    def test_episodes_3_is_4(self):
         sub = sr.score_drawdown(_tech(dd_episodes_30pct_10yr=3))
-        self.assertEqual(sub["inputs"]["episodes_points"], 5)
+        self.assertEqual(sub["inputs"]["episodes_points"], 4)
 
     def test_episodes_5_is_2(self):
         sub = sr.score_drawdown(_tech(dd_episodes_30pct_10yr=5))
         self.assertEqual(sub["inputs"]["episodes_points"], 2)
 
-    def test_spread_2_is_5(self):
-        # (dd20 - dd30) = 2 -> <= 2 -> 5
+    def test_spread_2_is_4(self):
+        # (dd20 - dd30) = 2 -> <= 2 -> 4
         sub = sr.score_drawdown(_tech(dd_episodes_20pct_10yr=3,
                                       dd_episodes_30pct_10yr=1))
-        self.assertEqual(sub["inputs"]["spread_points"], 5)
+        self.assertEqual(sub["inputs"]["spread_points"], 4)
 
     def test_spread_4_is_2(self):
         # (dd20 - dd30) = 4 -> else -> 2
         sub = sr.score_drawdown(_tech(dd_episodes_20pct_10yr=5,
                                       dd_episodes_30pct_10yr=1))
         self.assertEqual(sub["inputs"]["spread_points"], 2)
+
+    def test_factor_max_is_20(self):
+        self.assertEqual(sr.score_drawdown(_tech())["max"], 20)
 
     def test_spread_method_label(self):
         sub = sr.score_drawdown(_tech())
@@ -235,17 +250,19 @@ class TestDrawdownProfile(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 class TestMarginOfSafety(unittest.TestCase):
-    def test_dist_ath_deep_is_12(self):
-        # -0.20 <= -0.15 -> 12
+    # risk-v1.1.0 re-weight: factor max 30->25 (dist 12->10, asymmetry 18->15).
+    # Band SHAPES unchanged from v1.0.0; only ceilings scale.
+    def test_dist_ath_deep_is_10(self):
+        # -0.20 <= -0.15 -> 10
         ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
         sub = sr.score_margin(_tech(dist_from_ath_pct=-0.20), ladder, last=100.0)
-        self.assertEqual(sub["inputs"]["dist_ath_points"], 12)
+        self.assertEqual(sub["inputs"]["dist_ath_points"], 10)
 
-    def test_dist_ath_mid_is_7(self):
-        # -0.08 in (-0.15, -0.05] -> 7
+    def test_dist_ath_mid_is_6(self):
+        # -0.08 in (-0.15, -0.05] -> 6
         ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
         sub = sr.score_margin(_tech(dist_from_ath_pct=-0.08), ladder, last=100.0)
-        self.assertEqual(sub["inputs"]["dist_ath_points"], 7)
+        self.assertEqual(sub["inputs"]["dist_ath_points"], 6)
 
     def test_dist_ath_shallow_is_3(self):
         # -0.02 > -0.05 -> 3
@@ -259,25 +276,25 @@ class TestMarginOfSafety(unittest.TestCase):
         self.assertEqual(sub["inputs"]["dist_ath_points"], 0)
         self.assertIn("n/a", sub["arithmetic"])
 
-    def test_asymmetry_ratio_0point4_is_18(self):
+    def test_asymmetry_ratio_0point4_is_15(self):
         # proven support at 96 -> d_support 4%; resistance at 110 -> d_resist 10%
-        # ratio 0.04/0.10 = 0.4 <= 0.5 -> 18
+        # ratio 0.04/0.10 = 0.4 <= 0.5 -> 15
         ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
         sub = sr.score_margin(_tech(), ladder, last=100.0)
-        self.assertEqual(sub["inputs"]["asymmetry_points"], 18)
+        self.assertEqual(sub["inputs"]["asymmetry_points"], 15)
 
-    def test_asymmetry_ratio_2point0_is_6(self):
+    def test_asymmetry_ratio_2point0_is_5(self):
         # support at 90 -> d_support 10%; resistance at 105 -> d_resist 5%
-        # ratio 0.10/0.05 = 2.0 in (1.0, 2.0] -> 6
+        # ratio 0.10/0.05 = 2.0 in (1.0, 2.0] -> 5
         ladder = _ladder([(90.0, "ma50"), (105.0, "swing_high")])
         sub = sr.score_margin(_tech(), ladder, last=100.0)
-        self.assertEqual(sub["inputs"]["asymmetry_points"], 6)
+        self.assertEqual(sub["inputs"]["asymmetry_points"], 5)
 
-    def test_asymmetry_ratio_mid_is_12(self):
-        # support at 96 -> 4%; resistance at 105 -> 5%; ratio 0.8 in (0.5,1.0] -> 12
+    def test_asymmetry_ratio_mid_is_10(self):
+        # support at 96 -> 4%; resistance at 105 -> 5%; ratio 0.8 in (0.5,1.0] -> 10
         ladder = _ladder([(96.0, "ma50"), (105.0, "swing_high")])
         sub = sr.score_margin(_tech(), ladder, last=100.0)
-        self.assertEqual(sub["inputs"]["asymmetry_points"], 12)
+        self.assertEqual(sub["inputs"]["asymmetry_points"], 10)
 
     def test_asymmetry_ratio_high_is_2(self):
         # support at 85 -> 15%; resistance at 105 -> 5%; ratio 3.0 > 2.0 -> 2
@@ -287,11 +304,15 @@ class TestMarginOfSafety(unittest.TestCase):
 
     def test_blue_sky_convention_resist_15pct(self):
         # no resistance above -> d_resist = 0.15 (labeled). support at 96 -> 4%.
-        # ratio 0.04/0.15 = 0.2667 <= 0.5 -> 18
+        # ratio 0.04/0.15 = 0.2667 <= 0.5 -> 15
         ladder = _ladder([(96.0, "ma50"), (95.0, "swing_low")])
         sub = sr.score_margin(_tech(), ladder, last=100.0)
-        self.assertEqual(sub["inputs"]["asymmetry_points"], 18)
+        self.assertEqual(sub["inputs"]["asymmetry_points"], 15)
         self.assertIn("blue_sky_convention_15pct", sub["arithmetic"])
+
+    def test_factor_max_is_25(self):
+        ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
+        self.assertEqual(sr.score_margin(_tech(), ladder, last=100.0)["max"], 25)
 
     def test_no_proven_support_is_2(self):
         # only a round_number below (not proven) -> asymmetry 2, "no proven floor"
@@ -306,17 +327,19 @@ class TestMarginOfSafety(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 class TestLiquiditySolvency(unittest.TestCase):
-    def test_adv_mega_is_10(self):
+    # risk-v1.1.0 re-weight: factor max 20->15 (ADV 10->8, net 10->7). Band
+    # SHAPES unchanged from v1.0.0; only ceilings scale.
+    def test_adv_mega_is_8(self):
         sub = sr.score_liquidity(adv=600e6, net=None, mktcap=None)
-        self.assertEqual(sub["inputs"]["adv_points"], 10)
+        self.assertEqual(sub["inputs"]["adv_points"], 8)
 
-    def test_adv_large_is_7(self):
+    def test_adv_large_is_6(self):
         sub = sr.score_liquidity(adv=100e6, net=None, mktcap=None)
-        self.assertEqual(sub["inputs"]["adv_points"], 7)
+        self.assertEqual(sub["inputs"]["adv_points"], 6)
 
-    def test_adv_mid_is_4(self):
+    def test_adv_mid_is_3(self):
         sub = sr.score_liquidity(adv=20e6, net=None, mktcap=None)
-        self.assertEqual(sub["inputs"]["adv_points"], 4)
+        self.assertEqual(sub["inputs"]["adv_points"], 3)
 
     def test_adv_thin_is_1(self):
         sub = sr.score_liquidity(adv=5e6, net=None, mktcap=None)
@@ -327,20 +350,20 @@ class TestLiquiditySolvency(unittest.TestCase):
         self.assertEqual(sub["inputs"]["adv_points"], 0)
         self.assertIn("n/a", sub["arithmetic"])
 
-    def test_net_ratio_positive_is_10(self):
-        # net/mktcap = 10/100 = 0.10 > 0.05 -> 10
+    def test_net_ratio_positive_is_7(self):
+        # net/mktcap = 10/100 = 0.10 > 0.05 -> 7
         sub = sr.score_liquidity(adv=None, net=10.0, mktcap=100.0)
-        self.assertEqual(sub["inputs"]["net_ratio_points"], 10)
-
-    def test_net_ratio_thin_positive_is_7(self):
-        # 3/100 = 0.03 in [0, 0.05] -> 7
-        sub = sr.score_liquidity(adv=None, net=3.0, mktcap=100.0)
         self.assertEqual(sub["inputs"]["net_ratio_points"], 7)
 
-    def test_net_ratio_small_negative_is_4(self):
-        # -5/100 = -0.05 in [-0.10, 0) -> 4
+    def test_net_ratio_thin_positive_is_5(self):
+        # 3/100 = 0.03 in [0, 0.05] -> 5
+        sub = sr.score_liquidity(adv=None, net=3.0, mktcap=100.0)
+        self.assertEqual(sub["inputs"]["net_ratio_points"], 5)
+
+    def test_net_ratio_small_negative_is_3(self):
+        # -5/100 = -0.05 in [-0.10, 0) -> 3
         sub = sr.score_liquidity(adv=None, net=-5.0, mktcap=100.0)
-        self.assertEqual(sub["inputs"]["net_ratio_points"], 4)
+        self.assertEqual(sub["inputs"]["net_ratio_points"], 3)
 
     def test_net_ratio_large_negative_is_1(self):
         # -20/100 = -0.20 < -0.10 -> 1
@@ -358,6 +381,189 @@ class TestLiquiditySolvency(unittest.TestCase):
     def test_both_null_not_evaluable(self):
         sub = sr.score_liquidity(adv=None, net=None, mktcap=None)
         self.assertFalse(sub["evaluable"])
+
+    def test_factor_max_is_15(self):
+        self.assertEqual(sr.score_liquidity(adv=600e6, net=10.0,
+                                            mktcap=100.0)["max"], 15)
+
+
+# --------------------------------------------------------------------------- #
+# 5. Event risk (max 12) -- NEW risk-v1.1.0. days_to_event x implied_pctile.
+# --------------------------------------------------------------------------- #
+
+class TestEventRisk(unittest.TestCase):
+    """risk-v1.1.0 event_risk factor: every band from the spec, pinned exactly.
+    Higher = calmer (no near-term binary earns the full 12)."""
+
+    def test_no_event_null_is_12(self):
+        sub = sr.score_event_risk({"days_to_event": None})
+        self.assertEqual(sub["points"], 12)
+        self.assertEqual(sub["max"], 12)
+        self.assertTrue(sub["evaluable"])
+
+    def test_event_far_out_is_12(self):
+        # d=40 > 30 -> no near-term event risk -> 12.
+        sub = sr.score_event_risk({"days_to_event": 40,
+                                   "implied_move_vs_own_history_pctile": 95})
+        self.assertEqual(sub["points"], 12)
+
+    def test_empty_events_block_is_12(self):
+        # No events dict at all -> treated as no event -> 12, still evaluable.
+        self.assertEqual(sr.score_event_risk(None)["points"], 12)
+        self.assertEqual(sr.score_event_risk({})["points"], 12)
+
+    # -- proximity-only path (implied_pctile null) -------------------------
+    def test_proximity_only_7d_is_6(self):
+        sub = sr.score_event_risk({"days_to_event": 5,
+                                   "implied_move_vs_own_history_pctile": None})
+        self.assertEqual(sub["points"], 6)
+
+    def test_proximity_only_14d_is_8(self):
+        sub = sr.score_event_risk({"days_to_event": 12,
+                                   "implied_move_vs_own_history_pctile": None})
+        self.assertEqual(sub["points"], 8)
+
+    def test_proximity_only_30d_is_10(self):
+        sub = sr.score_event_risk({"days_to_event": 25,
+                                   "implied_move_vs_own_history_pctile": None})
+        self.assertEqual(sub["points"], 10)
+
+    # -- p >= 90 (loud binary) ---------------------------------------------
+    def test_be_like_9d_p100_is_3(self):
+        # BE-like case from the directive: earnings ~9d out, market pricing at the
+        # 100th pctile of the name's own history (very loud binary) -> 3.
+        sub = sr.score_event_risk({"days_to_event": 9,
+                                   "implied_move_vs_own_history_pctile": 100})
+        self.assertEqual(sub["points"], 3)
+
+    def test_p90_7d_is_2(self):
+        sub = sr.score_event_risk({"days_to_event": 5,
+                                   "implied_move_vs_own_history_pctile": 95})
+        self.assertEqual(sub["points"], 2)
+
+    def test_p90_30d_is_5(self):
+        sub = sr.score_event_risk({"days_to_event": 25,
+                                   "implied_move_vs_own_history_pctile": 90})
+        self.assertEqual(sub["points"], 5)
+
+    # -- 60 <= p < 90 ------------------------------------------------------
+    def test_p60_7d_is_4(self):
+        sub = sr.score_event_risk({"days_to_event": 5,
+                                   "implied_move_vs_own_history_pctile": 74})
+        self.assertEqual(sub["points"], 4)
+
+    def test_p60_14d_is_6(self):
+        sub = sr.score_event_risk({"days_to_event": 12,
+                                   "implied_move_vs_own_history_pctile": 74})
+        self.assertEqual(sub["points"], 6)
+
+    def test_p60_30d_is_8(self):
+        sub = sr.score_event_risk({"days_to_event": 25,
+                                   "implied_move_vs_own_history_pctile": 60})
+        self.assertEqual(sub["points"], 8)
+
+    # -- p < 60 ------------------------------------------------------------
+    def test_p_low_7d_is_6(self):
+        sub = sr.score_event_risk({"days_to_event": 5,
+                                   "implied_move_vs_own_history_pctile": 40})
+        self.assertEqual(sub["points"], 6)
+
+    def test_p_low_14d_is_8(self):
+        sub = sr.score_event_risk({"days_to_event": 12,
+                                   "implied_move_vs_own_history_pctile": 40})
+        self.assertEqual(sub["points"], 8)
+
+    def test_p_low_30d_is_10(self):
+        sub = sr.score_event_risk({"days_to_event": 25,
+                                   "implied_move_vs_own_history_pctile": 40})
+        self.assertEqual(sub["points"], 10)
+
+    # -- boundaries (inclusive proximity buckets; band edges) --------------
+    def test_boundary_d7_inclusive(self):
+        # d == 7 lands in the <=7d bucket.
+        sub = sr.score_event_risk({"days_to_event": 7,
+                                   "implied_move_vs_own_history_pctile": 95})
+        self.assertEqual(sub["points"], 2)
+
+    def test_boundary_d30_inclusive(self):
+        # d == 30 lands in the <=30d bucket (not > 30 -> not the full-12 path).
+        sub = sr.score_event_risk({"days_to_event": 30,
+                                   "implied_move_vs_own_history_pctile": 95})
+        self.assertEqual(sub["points"], 5)
+
+    def test_boundary_p90_inclusive(self):
+        # p == 90 lands in the >= 90 band.
+        sub = sr.score_event_risk({"days_to_event": 5,
+                                   "implied_move_vs_own_history_pctile": 90})
+        self.assertEqual(sub["points"], 2)
+
+    def test_boundary_p60_inclusive(self):
+        # p == 60 lands in the [60, 90) band (not the < 60 band).
+        sub = sr.score_event_risk({"days_to_event": 5,
+                                   "implied_move_vs_own_history_pctile": 60})
+        self.assertEqual(sub["points"], 4)
+
+
+# --------------------------------------------------------------------------- #
+# 6. Tail risk (max 8) -- NEW risk-v1.1.0. overnight-gap kurtosis + p95.
+# --------------------------------------------------------------------------- #
+
+class TestTailRisk(unittest.TestCase):
+    """risk-v1.1.0 tail_risk factor: calm/moderate/violent bands + the
+    not-evaluable (renormalize, never zero) path when kurtosis is null."""
+
+    def test_calm_is_8(self):
+        # kurtosis < 8 AND p95_abs < 0.04 -> 8.
+        sub = sr.score_tail_risk({"excess_kurtosis": 1.5, "p95_abs": 0.03})
+        self.assertEqual(sub["points"], 8)
+        self.assertEqual(sub["max"], 8)
+        self.assertTrue(sub["evaluable"])
+
+    def test_moderate_is_5(self):
+        # kurtosis < 20 AND p95_abs < 0.06 (but not calm) -> 5.
+        sub = sr.score_tail_risk({"excess_kurtosis": 12.0, "p95_abs": 0.05})
+        self.assertEqual(sub["points"], 5)
+        self.assertTrue(sub["evaluable"])
+
+    def test_violent_is_2(self):
+        # neither calm nor moderate -> 2.
+        sub = sr.score_tail_risk({"excess_kurtosis": 30.0, "p95_abs": 0.10})
+        self.assertEqual(sub["points"], 2)
+        self.assertTrue(sub["evaluable"])
+
+    def test_high_kurt_low_p95_is_violent(self):
+        # kurtosis 25 >= 20 fails the moderate band even with a small p95 -> 2.
+        sub = sr.score_tail_risk({"excess_kurtosis": 25.0, "p95_abs": 0.03})
+        self.assertEqual(sub["points"], 2)
+
+    def test_low_kurt_high_p95_is_moderate(self):
+        # kurtosis 5 (< 8) but p95 0.05 (>= 0.04) fails calm; passes moderate -> 5.
+        sub = sr.score_tail_risk({"excess_kurtosis": 5.0, "p95_abs": 0.05})
+        self.assertEqual(sub["points"], 5)
+
+    def test_null_kurtosis_not_evaluable_renormalize(self):
+        # excess_kurtosis null (n<4) -> NOT evaluable (renormalize; not zeroed).
+        sub = sr.score_tail_risk({"excess_kurtosis": None, "p95_abs": None})
+        self.assertFalse(sub["evaluable"])
+        self.assertIn("n/a", sub["arithmetic"])
+        # max stays 8 on the sub itself; score() zeroes it when excluded.
+        self.assertEqual(sub["max"], 8)
+
+    def test_no_gap_block_not_evaluable(self):
+        # overnight_gap absent entirely (None) -> NOT evaluable.
+        sub = sr.score_tail_risk(None)
+        self.assertFalse(sub["evaluable"])
+        self.assertIn("no overnight_gap block", sub["arithmetic"])
+
+    def test_boundary_kurt_8_not_calm(self):
+        # kurtosis == 8 fails "< 8" -> not calm; with p95 0.03 (< 0.06) -> moderate.
+        sub = sr.score_tail_risk({"excess_kurtosis": 8.0, "p95_abs": 0.03})
+        self.assertEqual(sub["points"], 5)
+
+    def test_boundary_p95_004_not_calm(self):
+        # p95 == 0.04 fails "< 0.04" -> not calm; kurt 1 < 20 & p95 < 0.06 -> moderate.
+        sub = sr.score_tail_risk({"excess_kurtosis": 1.0, "p95_abs": 0.04})
+        self.assertEqual(sub["points"], 5)
 
 
 # --------------------------------------------------------------------------- #
@@ -593,27 +799,68 @@ class TestVolProfile(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 class TestRenormalization(unittest.TestCase):
-    def test_liquidity_dimension_null_renormalizes(self):
-        # adv, net, mktcap ALL null -> liquidity dimension excluded (max 20).
-        # Score rescaled 0-100 over remaining max (100-20=80).
+    # risk-v1.1.0: six factors sum to 100 (20+20+25+15+12+8). When the score()
+    # call omits events/overnight_gap, event_risk defaults to 12 (no near-term
+    # event, evaluable) and tail_risk is NOT evaluable (no gap block) -> the
+    # denominator is 100 - 8 (tail) = 92 before any other exclusion.
+
+    def test_tail_absent_alone_renormalizes_over_92(self):
+        # A full snapshot fixture EXCEPT overnight_gap absent -> tail excluded ->
+        # renormalize over 92 (100 - tail 8).
         tech = _tech()
         ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
         result = sr.score(tech=tech, beta=1.0, ladder=ladder, last=100.0,
-                          adv=None, net=None, mktcap=None)
+                          adv=600e6, net=10.0, mktcap=100.0,
+                          events={"days_to_event": None}, overnight_gap=None)
         self.assertTrue(result["renormalized"])
         maxes = sum(s["max"] for s in result["subscores"])
-        self.assertEqual(maxes, 80)
+        self.assertEqual(maxes, 92)
+
+    def test_liquidity_and_tail_null_renormalizes(self):
+        # adv, net, mktcap ALL null -> liquidity excluded (max 15); no overnight_gap
+        # -> tail excluded (max 8). Remaining max 100 - 15 - 8 = 77.
+        tech = _tech()
+        ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
+        result = sr.score(tech=tech, beta=1.0, ladder=ladder, last=100.0,
+                          adv=None, net=None, mktcap=None,
+                          events={"days_to_event": None}, overnight_gap=None)
+        self.assertTrue(result["renormalized"])
+        maxes = sum(s["max"] for s in result["subscores"])
+        self.assertEqual(maxes, 77)
         self.assertLessEqual(result["score"], 100)
         self.assertGreaterEqual(result["score"], 0)
 
-    def test_no_renormalization_when_all_dimensions_have_inputs(self):
+    def test_no_renormalization_when_all_six_dimensions_have_inputs(self):
         tech = _tech()
         ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
+        og = {"excess_kurtosis": 1.5, "p95_abs": 0.03, "n": 300}
         result = sr.score(tech=tech, beta=1.0, ladder=ladder, last=100.0,
-                          adv=600e6, net=10.0, mktcap=100.0)
+                          adv=600e6, net=10.0, mktcap=100.0,
+                          events={"days_to_event": None}, overnight_gap=og)
         self.assertFalse(result["renormalized"])
         maxes = sum(s["max"] for s in result["subscores"])
         self.assertEqual(maxes, 100)
+        # The full six factors sum to 100; a calm/no-event fixture scores 100.
+        self.assertEqual(result["score"], 100)
+
+    def test_weight_sum_is_100(self):
+        # THE new-weight-sum invariant: the six factor maxes, taken at their
+        # declared ceilings (all evaluable), sum to exactly 100.
+        tech = _tech()
+        ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
+        og = {"excess_kurtosis": 1.5, "p95_abs": 0.03, "n": 300}
+        result = sr.score(tech=tech, beta=1.0, ladder=ladder, last=100.0,
+                          adv=600e6, net=10.0, mktcap=100.0,
+                          events={"days_to_event": 40}, overnight_gap=og)
+        by_name = {s["name"]: s["max"] for s in result["subscores"]}
+        self.assertEqual(by_name["volatility_state"], 20)
+        self.assertEqual(by_name["drawdown_profile"], 20)
+        self.assertEqual(by_name["margin_of_safety"], 25)
+        self.assertEqual(by_name["liquidity_solvency"], 15)
+        self.assertEqual(by_name["event_risk"], 12)
+        self.assertEqual(by_name["tail_risk"], 8)
+        self.assertEqual(sum(by_name.values()), 100)
+        self.assertEqual(len(result["subscores"]), 6)
 
 
 # --------------------------------------------------------------------------- #
@@ -631,22 +878,35 @@ class TestInputFields(unittest.TestCase):
             # confidence-gating inputs (short-history bug): the beta component is
             # gated on the return-day count, the rv-percentile on the ohlcv rows.
             "benchmark.beta_n_days", "technicals.ohlcv_rows",
+            # risk-v1.1.0 SCORED event/tail fields (PROMOTED from CONTEXT_FIELDS):
+            # days_to_event x implied_move_vs_own_history_pctile -> event_risk;
+            # overnight_gap -> tail_risk.
+            "events.days_to_event",
+            "events.implied_move_vs_own_history_pctile",
+            "technicals.overnight_gap",
         })
 
     def test_shared_reference_fields_not_listed(self):
         self.assertNotIn("price.last", sr.INPUT_FIELDS)
 
     def test_context_fields_exact(self):
-        # A2: CONTEXT_FIELDS are separate from INPUT_FIELDS (unscored, carry no
-        # points) so the single-mapping governance test is not confused into
-        # treating them as scored. Pinned here for the same reason INPUT_FIELDS is.
+        # CONTEXT_FIELDS are separate from INPUT_FIELDS (unscored, carry no points)
+        # so the single-mapping governance test is not confused into treating them
+        # as scored. risk-v1.1.0 PROMOTED three A2 context fields to SCORED; the
+        # two that remain are pure disclosure context (the raw implied_move
+        # fraction and the earnings_move_history list).
         self.assertEqual(sr.CONTEXT_FIELDS, {
-            "events.days_to_event",
             "events.implied_move",
-            "events.implied_move_vs_own_history_pctile",
             "events.earnings_move_history",
-            "technicals.overnight_gap",
         })
+
+    def test_scored_event_tail_fields_promoted_out_of_context(self):
+        # The three fields risk-v1.1.0 scores must NOT still be context-only.
+        for f in ("events.days_to_event",
+                  "events.implied_move_vs_own_history_pctile",
+                  "technicals.overnight_gap"):
+            self.assertIn(f, sr.INPUT_FIELDS)
+            self.assertNotIn(f, sr.CONTEXT_FIELDS)
 
     def test_context_fields_disjoint_from_input_fields(self):
         # CONTEXT_FIELDS must not overlap with INPUT_FIELDS: they carry no points
@@ -733,14 +993,19 @@ class TestEventContext(unittest.TestCase):
         tc = tables["tail_context"]
         self.assertEqual(tc, snap["technicals"]["overnight_gap"])
 
-    def test_module_note_present(self):
-        # The module carries the A2 disclosure note.
+    def test_module_note_is_provisional_disclosure(self):
+        # risk-v1.1.0: the module carries the PROVISIONAL disclosure note verbatim
+        # (event/tail are now scored, unratified pending B9; falsifier registered).
         snap = self._snap()
         ladder = _ladder([(88.0, "ma50"), (105.0, "swing_high")])
         doc = sr.build_module(snap, ladder, stress_pct=None, top_risk=None)
         self.assertIn("note", doc)
-        self.assertIn("event-context v1 (unscored)", doc["note"])
-        self.assertIn("Part B", doc["note"])
+        self.assertEqual(doc["note"], sr._PROVISIONAL_NOTE)
+        self.assertIn("PROVISIONAL", doc["note"])
+        self.assertIn("B9", doc["note"])
+        self.assertIn("falsifier", doc["note"])
+        # rubric_version now travels as 1.1.0.
+        self.assertEqual(doc["rubric_version"], "1.1.0")
 
     def test_tail_context_none_when_absent(self):
         # When overnight_gap is absent from technicals, tail_context is None.
@@ -803,92 +1068,108 @@ class TestValuationFloorRelabel(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# A2 regression: byte-identical scored outputs after A2/A3 additions
+# risk-v1.1.0 full-module scoring: the six factors sum correctly, event/tail are
+# SCORED off the snapshot, and renormalization works when tail_risk is n/a.
+#
+# (This REPLACES the retired Part-A TestByteIdenticalScoreRegression: that
+# contract -- "scores are byte-identical after event/tail additions" -- is
+# INTENTIONALLY VIOLATED by Part B, which moves the scores by design. The
+# invariant now is that the six factors sum to 100 and the event/tail data flows
+# from the snapshot into the scored subscores.)
 # --------------------------------------------------------------------------- #
 
-class TestByteIdenticalScoreRegression(unittest.TestCase):
-    """Verifies that adding A2 (event_context/tail_context) and A3
-    (valuation_floor relabel) does NOT change the scored score or any subscore
-    points/max. The four factors, bands, and weights are untouched."""
-
-    # Hand-computed "before" values for the standard _tech() / 600M ADV /
-    # 10/100 net fixture (same inputs used in TestRenormalization):
-    #   volatility_state: pctile=25 -> 20, beta=1.0 -> 5, total=25/25
-    #   drawdown_profile: maxdd=-0.30 -> 12, dd30=1 -> 8, spread=dd20-dd30=2 -> 5, total=25/25
-    #   margin_of_safety: dist=-0.20 -> 12; ladder=(96,110): d_sup=4% d_res=10% ratio=0.4 -> 18, total=30/30
-    #   liquidity_solvency: adv=600e6 -> 10, net=10/100=10% -> 10, total=20/20
-    #   score = 100/100 -> 100.0
-    _EXPECTED_SCORE = 100.0
-    _EXPECTED_SUBSCORES = [
-        {"name": "volatility_state", "points": 25, "max": 25},
-        {"name": "drawdown_profile", "points": 25, "max": 25},
-        {"name": "margin_of_safety", "points": 30, "max": 30},
-        {"name": "liquidity_solvency", "points": 20, "max": 20},
-    ]
-
-    def _run_score(self, tech, beta, ladder, last, adv, net, mktcap):
-        return sr.score(tech=tech, beta=beta, ladder=ladder, last=last,
-                        adv=adv, net=net, mktcap=mktcap)
-
-    def test_score_unchanged(self):
-        tech = _tech()
-        ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
-        result = self._run_score(tech, beta=1.0, ladder=ladder, last=100.0,
-                                 adv=600e6, net=10.0, mktcap=100.0)
-        self.assertEqual(result["score"], self._EXPECTED_SCORE,
-                         "score changed after A2/A3 additions")
-
-    def test_subscores_points_and_max_unchanged(self):
-        tech = _tech()
-        ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
-        result = self._run_score(tech, beta=1.0, ladder=ladder, last=100.0,
-                                 adv=600e6, net=10.0, mktcap=100.0)
-        for expected in self._EXPECTED_SUBSCORES:
-            actual = next(s for s in result["subscores"]
-                          if s["name"] == expected["name"])
-            self.assertEqual(actual["points"], expected["points"],
-                             f"{expected['name']} points changed")
-            self.assertEqual(actual["max"], expected["max"],
-                             f"{expected['name']} max changed")
-
-    def test_build_module_scores_unchanged_with_event_context(self):
-        # Even when a full snapshot with events + overnight_gap is provided,
-        # the scored dimensions are byte-identical (context fields carry no points).
-        snap = {
-            "events": {
-                "days_to_event": 12, "implied_move": 0.082,
-                "implied_move_vs_own_history_pctile": 74.0,
-                "earnings_move_history": [],
-            },
-            "technicals": {
-                "rv30_vs_10yr_pctile": 25.0, "max_dd_10yr": -0.30,
-                "dd_episodes_20pct_10yr": 3, "dd_episodes_30pct_10yr": 1,
-                "dist_from_ath_pct": -0.20, "ohlcv_rows": 800,
-                "overnight_gap": {"mean_abs": 0.01, "p95_abs": 0.03,
-                                  "max_abs": 0.07, "excess_kurtosis": 1.5,
-                                  "jump_count_2sigma": 3, "n": 250},
-            },
+class TestFullModuleV110(unittest.TestCase):
+    def _full_snap(self, ev_over=None, og=_UNSET, tech_over=None):
+        """A full snapshot fixture that scores all six factors. Calm/no-event by
+        default -> every factor near its ceiling."""
+        events = {"days_to_event": None, "implied_move": None,
+                  "implied_move_vs_own_history_pctile": None,
+                  "earnings_move_history": []}
+        if ev_over is not None:
+            events.update(ev_over)
+        tech = {
+            "rv30_vs_10yr_pctile": 25.0, "max_dd_10yr": -0.30,
+            "dd_episodes_20pct_10yr": 3, "dd_episodes_30pct_10yr": 1,
+            "dist_from_ath_pct": -0.20, "ohlcv_rows": 800,
+            "overnight_gap": ({"mean_abs": 0.01, "p95_abs": 0.03,
+                               "max_abs": 0.07, "excess_kurtosis": 1.5,
+                               "jump_count_2sigma": 3, "n": 250}
+                              if og is _UNSET else og),
+        }
+        if tech_over is not None:
+            tech.update(tech_over)
+        return {
+            "events": events,
+            "technicals": tech,
             "benchmark": {"beta": 1.0, "beta_n_days": 300},
             "price": {"last": 100.0, "adv_dollar_3m": 600e6,
                       "mktcap_computed": 100.0},
-            "fundamentals": {
-                "net_cash_defined": {"net": 10.0},
-                "eps_ntm_consensus": 6.0,
-            },
+            "fundamentals": {"net_cash_defined": {"net": 10.0},
+                             "eps_ntm_consensus": 6.0},
             "valuation": {"pe_5yr_median": 12.0, "pe_fwd": 10.0},
             "meta": {"ticker": "TST", "as_of_utc": "2026-07-20T16:00:00Z"},
         }
+
+    def test_six_factors_sum_100_and_calm_scores_100(self):
+        # All six factors evaluable, all at their ceilings -> maxes sum 100,
+        # score 100, not renormalized.
+        snap = self._full_snap()
         ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
         doc = sr.build_module(snap, ladder, stress_pct=None, top_risk=None)
-        self.assertEqual(doc["score"], self._EXPECTED_SCORE,
-                         "build_module score changed")
-        for expected in self._EXPECTED_SUBSCORES:
-            actual = next(s for s in doc["subscores"]
-                          if s["name"] == expected["name"])
-            self.assertEqual(actual["points"], expected["points"],
-                             f"build_module {expected['name']} points changed")
-            self.assertEqual(actual["max"], expected["max"],
-                             f"build_module {expected['name']} max changed")
+        self.assertEqual(len(doc["subscores"]), 6)
+        self.assertEqual(sum(s["max"] for s in doc["subscores"]), 100)
+        self.assertEqual(doc["score"], 100)
+        self.assertFalse(doc["renormalized"])
+        by_name = {s["name"]: s for s in doc["subscores"]}
+        self.assertEqual(by_name["event_risk"]["points"], 12)  # no near-term event
+        self.assertEqual(by_name["tail_risk"]["points"], 8)    # calm tails
+
+    def test_event_and_tail_scored_from_snapshot(self):
+        # A BE-like near-term binary (9d out, p=100) + violent tails: event_risk 3,
+        # tail_risk 2 -- confirming both factors READ the snapshot event/gap fields
+        # and score them (not merely surface them as context).
+        snap = self._full_snap(
+            ev_over={"days_to_event": 9,
+                     "implied_move_vs_own_history_pctile": 100},
+            og={"mean_abs": 0.05, "p95_abs": 0.12, "max_abs": 0.3,
+                "excess_kurtosis": 30.0, "jump_count_2sigma": 20, "n": 250})
+        ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
+        doc = sr.build_module(snap, ladder, stress_pct=None, top_risk=None)
+        by_name = {s["name"]: s for s in doc["subscores"]}
+        self.assertEqual(by_name["event_risk"]["points"], 3)
+        self.assertEqual(by_name["tail_risk"]["points"], 2)
+        # The other four factors are unchanged (still at ceilings for this fixture).
+        self.assertEqual(by_name["volatility_state"]["points"], 20)
+        self.assertEqual(by_name["margin_of_safety"]["points"], 25)
+        # Full evaluable -> no renormalization; score is the weighted sum / 100.
+        self.assertFalse(doc["renormalized"])
+        # 20+20+25+15+3+2 = 85 over max 100 -> 85.0.
+        self.assertEqual(doc["score"], 85.0)
+
+    def test_tail_na_renormalizes_in_build_module(self):
+        # overnight_gap absent -> tail_risk NOT evaluable -> renormalize over 92.
+        # The five present factors at ceilings (event no-event 12) -> 92/92 -> 100.
+        snap = self._full_snap(og=None)
+        ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
+        doc = sr.build_module(snap, ladder, stress_pct=None, top_risk=None)
+        self.assertTrue(doc["renormalized"])
+        # tail_risk row present but zeroed/excluded from the denominator.
+        by_name = {s["name"]: s for s in doc["subscores"]}
+        self.assertEqual(by_name["tail_risk"]["max"], 0)
+        self.assertTrue(by_name["tail_risk"].get("excluded"))
+        self.assertEqual(sum(s["max"] for s in doc["subscores"]), 92)
+        self.assertEqual(doc["score"], 100)
+        self.assertIn("tail_risk", doc.get("renormalization_note", ""))
+
+    def test_tail_na_kurtosis_null_renormalizes(self):
+        # overnight_gap present but excess_kurtosis null (n<4) -> tail NOT evaluable.
+        snap = self._full_snap(
+            og={"mean_abs": 0.01, "p95_abs": 0.03, "max_abs": 0.05,
+                "excess_kurtosis": None, "jump_count_2sigma": 0, "n": 3})
+        ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
+        doc = sr.build_module(snap, ladder, stress_pct=None, top_risk=None)
+        self.assertTrue(doc["renormalized"])
+        self.assertEqual(sum(s["max"] for s in doc["subscores"]), 92)
 
 
 # --------------------------------------------------------------------------- #
@@ -940,31 +1221,39 @@ class TestCLI(unittest.TestCase):
         with open(out) as fh:
             doc = json.load(fh)
         self.assertEqual(doc["skill"], "risk-analytics")
-        self.assertEqual(doc["rubric_version"], "1.0.0")
+        # risk-v1.1.0: rubric bumped; six factors; provisional note.
+        self.assertEqual(doc["rubric_version"], "1.1.0")
         self.assertEqual(doc["ticker"], "MU")
         self.assertIn("as_of", doc)
         self.assertIsInstance(doc["score"], (int, float))
         self.assertGreaterEqual(doc["score"], 0)
         self.assertLessEqual(doc["score"], 100)
         self.assertIsInstance(doc["subscores"], list)
-        self.assertEqual(len(doc["subscores"]), 4)
+        self.assertEqual(len(doc["subscores"]), 6)
+        # The six factor names are present (event_risk/tail_risk are v1.1.0 new).
+        names = {s["name"] for s in doc["subscores"]}
+        self.assertEqual(names, {"volatility_state", "drawdown_profile",
+                                 "margin_of_safety", "liquidity_solvency",
+                                 "event_risk", "tail_risk"})
         self.assertIn("downside_map", doc["tables"])
         self.assertIn("vol_profile", doc["tables"])
-        # A2: event_context and tail_context present in the module JSON.
+        # event_context and tail_context still surfaced verbatim in the JSON.
         self.assertIn("event_context", doc["tables"])
         self.assertIn("tail_context", doc["tables"])
-        # A2: module note present.
+        # risk-v1.1.0: the PROVISIONAL disclosure note travels in the module.
         self.assertIn("note", doc)
-        self.assertIn("event-context v1 (unscored)", doc["note"])
+        self.assertIn("PROVISIONAL", doc["note"])
+        self.assertIn("B9", doc["note"])
         self.assertIsNone(doc["signal"])
-        # confidence-v1.0.0: well-formed block; depth MEDIUM at rubric 1.0.0.
+        # confidence-v1.0.0: well-formed block; depth stays MEDIUM at rubric
+        # 1.1.0 (PROVISIONAL -- event-aware but unratified, does NOT auto-promote).
         conf = doc["confidence"]
         self.assertEqual(set(conf),
                          {"level", "source", "depth", "staleness", "rule",
                           "version"})
         self.assertIn(conf["level"], ("LOW", "MEDIUM", "HIGH"))
         self.assertEqual(conf["version"], "1.0.0")
-        self.assertIn(conf["depth"]["level"], ("MEDIUM", "HIGH"))
+        self.assertEqual(conf["depth"]["level"], "MEDIUM")
         for s in doc["subscores"]:
             self.assertIn("arithmetic", s)
             self.assertIn("inputs", s)

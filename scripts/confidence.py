@@ -133,8 +133,17 @@ DEPTH_TABLE = {
         "1.0.0": (MEDIUM, "pre-positioning-dynamics"),
     },
     "risk": {
-        # keyed on rubric_version; promotes to HIGH at rubric 1.1.0 (R1/B24)
+        # keyed on rubric_version.
+        # v1.0.0: pre-event-aware mechanical scorer -> MEDIUM.
+        # v1.1.0: event-aware BUT PROVISIONAL (unratified pending B9 calibration;
+        #   falsifier pre-registered). risk 1.1.0 stays MEDIUM while provisional;
+        #   promote to HIGH only on B9 ratification. An event-aware score that
+        #   reads HIGH before its calibration set has confirmed the weights/bands
+        #   would be exactly the dishonesty the confidence layer exists to prevent.
+        #   (The generic "rubric past 1.0.0 -> HIGH" fallthrough is DELIBERATELY
+        #   overridden by this explicit row so 1.1.0 does not auto-promote.)
         "1.0.0": (MEDIUM, "pre-event-aware"),
+        "1.1.0": (MEDIUM, "provisional event-aware"),
     },
 }
 
