@@ -39,7 +39,7 @@ if _REPO_ROOT not in sys.path:
 
 from scripts import chain, indicators
 
-SCHEMA_VERSION = "0.3.1"
+SCHEMA_VERSION = "0.3.2"
 
 # Files that MUST be present; their absence aborts the build.
 REQUIRED = ("global_quote", "overview", "daily_adjusted", "spy_daily_adjusted")
@@ -352,13 +352,59 @@ def _rolling_rv30_series(adj):
     return out
 
 
-def build_technicals(rows, series_source=None):
+def _weinstein_stage(last, ma50, ma200, ma50_slope, ma200_slope,
+                     flat_band=0.005):
+    """Weinstein market stage {1 basing | 2 advancing | 3 topping | 4 declining}.
+
+    Derived from ``price.last`` vs ma50 vs ma200 and the two 20-day MA-slope
+    signs (all pre-computed fields). The ``flat_band`` is a Philosophy-A default:
+    a slope whose magnitude is <= ``flat_band`` (0.5% over 20 days) is treated as
+    FLAT, not rising/falling -- so a barely-drifting MA does not manufacture a
+    stage-2 or stage-4 read. Documented threshold, not calibrated.
+
+    Rules (spec):
+      - stage 2 (advancing): last > ma50 > ma200 AND both slopes rising (> band)
+      - stage 4 (declining): last < ma50 < ma200 AND both slopes falling (< -band)
+      - stage 3 (topping):   last < ma50 BUT ma200 still rising (> band)
+      - stage 1 (basing):    everything else (the default)
+    Returns None when any of the four MA inputs is missing (can't classify).
+    """
+    if last is None or ma50 is None or ma200 is None \
+            or ma50_slope is None or ma200_slope is None:
+        return None
+    rising50 = ma50_slope > flat_band
+    rising200 = ma200_slope > flat_band
+    falling50 = ma50_slope < -flat_band
+    falling200 = ma200_slope < -flat_band
+    if last > ma50 > ma200 and rising50 and rising200:
+        return 2
+    if last < ma50 < ma200 and falling50 and falling200:
+        return 4
+    if last < ma50 and rising200:
+        return 3
+    return 1
+
+
+def build_technicals(rows, series_source=None, next_earnings_date=None,
+                     earn_q=None):
     """Technicals block from adjusted-close + volume series (oldest-first).
 
     ``series_source`` (optional) discloses how the series was obtained. When the
     daily series came from a stooq CSV export (close used as adjusted_close) the
     caller passes ``SERIES_SOURCE_STOOQ`` and it is echoed into the block; for the
     default AV path it is None and the key is omitted (unchanged shape).
+
+    Wave 4A additions (all pure-OHLCV, deterministic, additive, null-safe):
+      - adx14: Wilder ADX(14) trend strength (raw high/low/close).
+      - stage: Weinstein 1/2/3/4 regime from price vs ma50/ma200 + slope signs.
+      - ad_line_slope: 20-day slope sign+magnitude of the Chaikin A/D line.
+      - upvol_ratio: up-day volume / total volume over the trailing ~50 bars.
+      - vwap_52wk_high / vwap_earnings: anchored VWAPs (institutional cost basis).
+        The 52wk-high anchor is the date of the max adjusted_close over the
+        trailing 252 rows (derived inline). The earnings anchor is
+        ``next_earnings_date`` when given, else the latest reported quarter date
+        (``earn_q[0].reportedDate``); if that anchor post-dates every row (a
+        future earnings date) the VWAP is honestly None.
     """
     adj = [r["adjusted_close"] for r in rows if r["adjusted_close"] is not None]
     vols = [r["volume"] for r in rows if r["volume"] is not None]
@@ -395,11 +441,54 @@ def build_technicals(rows, series_source=None):
             "n": n_gaps,
         }
 
+    # -- Wave 4A: MA stack + slopes (needed both for the block and the stage) --
+    ma50 = indicators.sma(adj, 50)
+    ma200 = indicators.sma(adj, 200)
+    ma50_slope = indicators.ma_slope(adj, 50, 20)
+    ma200_slope = indicators.ma_slope(adj, 200, 20)
+    last_px = adj[-1] if adj else None
+
+    # Weinstein regime stage (guard field; pure OHLCV, null-safe).
+    stage = _weinstein_stage(last_px, ma50, ma200, ma50_slope, ma200_slope)
+
+    # ADX(14) trend strength on RAW high/low/close (same-scale range measure).
+    adx14 = indicators.adx(rows, 14)
+
+    # Chaikin A/D line 20-day slope (accumulation vs distribution).
+    ad_slope = indicators.ad_line_slope(rows, 20)
+
+    # Up-day volume share over the trailing ~50 bars.
+    upvol = indicators.updown_volume(rows, 50)
+
+    # -- Wave 4A: anchored VWAPs (institutional cost-basis levels) ------------
+    # 52wk-high anchor: date of the max adjusted_close over the trailing 252 rows.
+    trailing = rows[-_W12M:] if rows else []
+    hi_anchor = None
+    hi_val = None
+    for r in trailing:
+        ac = r.get("adjusted_close")
+        if ac is None:
+            continue
+        if hi_val is None or ac > hi_val:
+            hi_val = ac
+            hi_anchor = r.get("date")
+    vwap_52wk_high = indicators.anchored_vwap(rows, hi_anchor) if hi_anchor else None
+
+    # Earnings anchor: next_earnings.date if given, else latest reported quarter.
+    earn_anchor = next_earnings_date
+    if not earn_anchor and isinstance(earn_q, list) and earn_q:
+        first = earn_q[0]
+        if isinstance(first, dict):
+            earn_anchor = first.get("reportedDate")
+    vwap_earnings = indicators.anchored_vwap(rows, earn_anchor) if earn_anchor else None
+
     block = {
-        "ma50": indicators.sma(adj, 50),
-        "ma200": indicators.sma(adj, 200),
-        "ma50_slope_20d": indicators.ma_slope(adj, 50, 20),
-        "ma200_slope_20d": indicators.ma_slope(adj, 200, 20),
+        "ma50": ma50,
+        "ma200": ma200,
+        "ma50_slope_20d": ma50_slope,
+        "ma200_slope_20d": ma200_slope,
+        "adx14": adx14,                      # Wave 4A: Wilder ADX(14) trend strength
+        "stage": stage,                      # Wave 4A: Weinstein regime 1/2/3/4
         "rsi14": indicators.rsi(adj, 14),
         "macd": macd["macd"] if macd else None,
         "macd_signal": macd["signal"] if macd else None,
@@ -413,6 +502,10 @@ def build_technicals(rows, series_source=None):
         "rv30_vs_10yr_pctile": rv30_pctile,
         "dist_from_ath_pct": indicators.dist_from_high(adj),
         "vol_20d_vs_90d": vol_ratio,
+        "ad_line_slope": ad_slope,           # Wave 4A: A/D-line 20d slope
+        "upvol_ratio": upvol,                # Wave 4A: up-day volume share
+        "vwap_52wk_high": vwap_52wk_high,     # Wave 4A: anchored VWAP @ 52wk high
+        "vwap_earnings": vwap_earnings,       # Wave 4A: anchored VWAP @ earnings
         "max_dd_10yr": indicators.max_drawdown(ten_yr),
         "dd_episodes_20pct_10yr": indicators.drawdown_episodes(ten_yr, 0.20),
         "dd_episodes_30pct_10yr": indicators.drawdown_episodes(ten_yr, 0.30),
@@ -1485,12 +1578,24 @@ def build_snapshot(bundle, ticker):
         if os.path.exists(iv_path):
             iv_history = load_raw(iv_path)
 
+    # Parse next-earnings + reported quarters up front so options, sentiment and
+    # the technicals VWAP anchors can key off them; the full events block (which
+    # surfaces the sentiment-computed implied move) is assembled AFTER sentiment
+    # below to reuse that value without re-calling the chain (A1).
+    next_earnings = _parse_earnings_calendar(earnings_calendar)
+    next_earnings_date = next_earnings.get("date") if isinstance(next_earnings, dict) else None
+    # Own-history earnings reactions read reportedDate from quarterlyEarnings;
+    # Wave 4A also uses the latest reportedDate as the vwap_earnings fallback anchor.
+    earn_q = _quarterly(earnings, "quarterlyEarnings")
+
     # -- assemble blocks ---------------------------------------------------
     price = build_price(quote, overview, rows, web_spot)
     # QF2: extract the vendor latest-trading-day stamp from the price block
     # (build_price stores it under a private key) and move it to meta.
     latest_trading_day = price.pop("_latest_trading_day", None)
-    technicals = build_technicals(rows, series_source=series_source)
+    technicals = build_technicals(rows, series_source=series_source,
+                                  next_earnings_date=next_earnings_date,
+                                  earn_q=earn_q)
     benchmark = build_benchmark(rows, spy_rows)
     fundamentals = build_fundamentals(income, balance, cashflow, earnings,
                                       estimates, overview, as_of_date)
@@ -1498,15 +1603,6 @@ def build_snapshot(bundle, ticker):
     # this runs before valuation so a web-supplied eps_ntm/fcf feeds the multiples.
     apply_web_fundamentals(fundamentals, web_fundamentals)
     valuation = build_valuation(price, fundamentals, overview, rows)
-
-    # Parse next-earnings up front so options + sentiment can key off it; the
-    # full events block (which surfaces the sentiment-computed implied move) is
-    # assembled AFTER sentiment below to reuse that value without re-calling the
-    # chain (A1).
-    next_earnings = _parse_earnings_calendar(earnings_calendar)
-    next_earnings_date = next_earnings.get("date") if isinstance(next_earnings, dict) else None
-    # Own-history earnings reactions read reportedDate from quarterlyEarnings.
-    earn_q = _quarterly(earnings, "quarterlyEarnings")
 
     # Options depend on the chain file being present.
     options = None

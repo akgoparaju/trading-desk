@@ -219,10 +219,26 @@ class TestDepthAxis(unittest.TestCase):
             self.assertIn(d["level"], ("MEDIUM", "HIGH"), doc["skill"])
 
     def test_technical_promotes_to_high_at_110(self):
-        # once the R-wave bumps the rubric past 1.0.0 (a one-line table edit or a
-        # version not in the shallow row) the depth pass is considered landed.
+        # v1.1.0 (Wave 4A / R5): technical depth promotes to HIGH via its explicit
+        # DEPTH_TABLE row (regime-conditional pass landed). Unlike sentiment/risk
+        # 1.1.0, this is a real promotion -- technical's source is AV-premium, not
+        # web-capped.
         d = C.compute_module(_tech_doc("1.1.0"), _snap())["depth"]
         self.assertEqual(d["level"], "HIGH")
+        self.assertEqual(d["why"], "regime-conditional depth")
+
+    def test_technical_110_overall_high_on_premium_fresh(self):
+        # The OVERALL badge for technical 1.1.0 on a clean premium fresh-print
+        # snapshot: source HIGH (AV premium, not web-capped) + depth HIGH
+        # (regime-conditional) + staleness HIGH (fresh print) -> min = HIGH. This
+        # is the E2E-gate promotion: technical reads HIGH end-to-end, and there is
+        # NO fall-through bug (the explicit 1.1.0 row, not the generic fallthrough,
+        # drives depth).
+        block = C.compute_module(_tech_doc("1.1.0"), _snap())
+        self.assertEqual(block["source"]["level"], "HIGH")
+        self.assertEqual(block["depth"]["level"], "HIGH")
+        self.assertEqual(block["staleness"]["level"], "HIGH")
+        self.assertEqual(block["level"], "HIGH")
 
     def test_depth_table_rows_present(self):
         # the governed-belief table carries exactly the four modules.
@@ -233,6 +249,10 @@ class TestDepthAxis(unittest.TestCase):
         self.assertEqual(
             C.DEPTH_TABLE["fundamental"]["compressed_snapshot_pass"][0], "MEDIUM")
         self.assertEqual(C.DEPTH_TABLE["technical"]["1.0.0"][0], "MEDIUM")
+        # technical-v1.1.0 is a REAL depth promotion (regime-conditional) -> HIGH.
+        self.assertEqual(C.DEPTH_TABLE["technical"]["1.1.0"][0], "HIGH")
+        self.assertEqual(C.DEPTH_TABLE["technical"]["1.1.0"][1],
+                         "regime-conditional depth")
         self.assertEqual(C.DEPTH_TABLE["sentiment"]["1.0.0"][0], "MEDIUM")
         # sentiment-v1.1.0 is PROVISIONAL -> stays MEDIUM (explicit row).
         self.assertEqual(C.DEPTH_TABLE["sentiment"]["1.1.0"][0], "MEDIUM")

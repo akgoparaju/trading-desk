@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — 2026-07-21 · Wave 4A: technical regime + institutional levels (`technical-v1.1.0`, PROVISIONAL)
+
+R5 — regime-conditional technicals (Philosophy A). **Top-level weights UNCHANGED** (Trend 30 /
+Momentum 25 / Structure 25 / Volume 20); regime enters as a GUARD, not a new factor. Snapshot schema
+**0.3.1 → 0.3.2**. **Technical confidence DEPTH promotes MEDIUM → HIGH** (source is AV-premium, not
+web-capped — the honest promotion). Suite: 1409 passed.
+
+- **New pure-OHLCV snapshot fields:** `technicals.adx14` (Wilder ADX — verified vs reference:
+  trending→100, choppy→3.7), `technicals.stage` (Weinstein 1/2/3/4 from the MA stack + slopes),
+  `technicals.ad_line_slope` (Chaikin accumulation/distribution), `technicals.upvol_ratio`, and
+  anchored VWAPs (`vwap_52wk_high`, `vwap_earnings`) added to the S/R ladder as institutional
+  cost-basis levels.
+- **Regime-conditioned momentum** — ADX < 20 (choppy) halves the MACD sub-component; stage 4
+  (declining) caps the RSI healthy-band bonus. Guard modulates points; band shapes unchanged; null
+  guard → no modulation (a pre-4A snapshot scores identically to v1.0.0).
+- **Volume factor enriched** — re-split to extension 10 / vol-regime 5 / A-D-line 3 / upvol 2
+  (within-factor renormalization when a sub-signal nulls; factor never zeroed).
+- **Deferred (data-blocked, disclosed):** sector-relative RS needs a sector-ETF fetch not in any
+  manifest — noted in the SKILL as the next R5 increment. SPY-relative RS already lives in sentiment.
+- rubric → 1.1.0 PROVISIONAL; falsifier in the SKILL. Real-data BE: stage 3 (topping — price < ma50,
+  ma200 still rising), adx 21, A/D slope −0.14 (distribution), upvol 0.44 — all correctly bearish;
+  technical 54.19 → 51.19; depth badge HIGH, overall MEDIUM (staleness axis honest on the 7/17 print).
+
 ## Unreleased — 2026-07-21 · Wave 3B: composite/trade-plan honesty (`composite-v1.1.0` + `tradeplan-v1.1.0`, PROVISIONAL)
 
 R2 — the orchestration-layer honesty fixes (Philosophy A). **No evidence-module score changes**;

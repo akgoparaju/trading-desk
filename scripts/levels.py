@@ -57,6 +57,7 @@ _EVIDENCE_ORDER = [
     "swing_low", "swing_high",
     "ma50", "ma200",
     "ath",
+    "vwap_52wk_high", "vwap_earnings",
     "max_pain", "call_wall", "put_wall", "oi_cluster",
     "analyst_pt",
     "round_number",
@@ -270,6 +271,20 @@ def build_ladder(snapshot, rows, contracts=None) -> list[dict]:
     if adj_full:
         entries.append({"level": float(max(adj_full)), "type": "ath",
                         "basis": "ohlcv"})
+
+    # -- Wave 4A: anchored VWAPs (institutional cost basis) ----------------
+    # These are minted in build_technicals (Python, deterministic) and surfaced
+    # here as candidate S/R level TYPES so structure scoring can register an
+    # institutional cost-basis line. Positioned by price like every other level;
+    # null when the anchor produced no VWAP (e.g. a future earnings anchor).
+    vwap_hi = tech.get("vwap_52wk_high")
+    if vwap_hi is not None:
+        entries.append({"level": float(vwap_hi), "type": "vwap_52wk_high",
+                        "basis": "anchored-vwap"})
+    vwap_earn = tech.get("vwap_earnings")
+    if vwap_earn is not None:
+        entries.append({"level": float(vwap_earn), "type": "vwap_earnings",
+                        "basis": "anchored-vwap"})
 
     # -- round numbers -----------------------------------------------------
     if spot is not None:

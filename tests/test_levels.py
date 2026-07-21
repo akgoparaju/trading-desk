@@ -225,12 +225,15 @@ class TestOptionsLevels(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 def _snapshot(last, ma50=None, ma200=None, consensus_pt=None,
+              vwap_52wk_high=None, vwap_earnings=None,
               as_of_utc="2026-07-16T20:10:00Z"):
     # meta.as_of_utc is what build_ladder uses to pick the ~30d options expiry.
     return {
         "meta": {"ticker": "MU", "as_of_utc": as_of_utc},
         "price": {"last": last},
-        "technicals": {"ma50": ma50, "ma200": ma200},
+        "technicals": {"ma50": ma50, "ma200": ma200,
+                       "vwap_52wk_high": vwap_52wk_high,
+                       "vwap_earnings": vwap_earnings},
         "sentiment": {"consensus_pt": consensus_pt},
     }
 
@@ -312,6 +315,37 @@ class TestBuildLadder(unittest.TestCase):
         ladder = levels.build_ladder(snap, self.rows, contracts=contracts)
         types = {x["type"] for x in ladder}
         self.assertTrue({"max_pain", "call_wall", "put_wall"} & types)
+
+    # -- Wave 4A: anchored-VWAP levels ------------------------------------
+    def test_vwap_levels_appear_in_ladder(self):
+        # The anchored VWAPs are minted in build_technicals and surfaced as
+        # ladder candidate types so structure scoring can register an
+        # institutional cost-basis line. Place them at prices distinct from
+        # every other level so cross-type dedupe does not absorb them.
+        snap = _snapshot(self.last, ma50=99.0, ma200=98.0,
+                         vwap_52wk_high=100.7, vwap_earnings=100.1)
+        ladder = levels.build_ladder(snap, self.rows)
+        by_type = {x["type"]: x for x in ladder}
+        self.assertIn("vwap_52wk_high", by_type)
+        self.assertIn("vwap_earnings", by_type)
+        self.assertEqual(by_type["vwap_52wk_high"]["level"], 100.7)
+        self.assertEqual(by_type["vwap_earnings"]["level"], 100.1)
+        self.assertEqual(by_type["vwap_52wk_high"]["basis"], "anchored-vwap")
+        self.assertEqual(by_type["vwap_earnings"]["basis"], "anchored-vwap")
+
+    def test_vwap_levels_absent_when_null(self):
+        # No VWAP values in technicals -> no VWAP ladder entries (additive).
+        snap = _snapshot(self.last, ma50=99.0, ma200=98.0)
+        ladder = levels.build_ladder(snap, self.rows)
+        types = {x["type"] for x in ladder}
+        self.assertNotIn("vwap_52wk_high", types)
+        self.assertNotIn("vwap_earnings", types)
+
+    def test_vwap_beyond_60pct_cutoff_dropped(self):
+        # A VWAP far beyond +/-60% of spot is dropped as noise like any level.
+        snap = _snapshot(100.0, vwap_52wk_high=200.0)  # +100% -> dropped
+        ladder = levels.build_ladder(snap, self.rows)
+        self.assertEqual([x for x in ladder if x["type"] == "vwap_52wk_high"], [])
 
 
 class TestNearest(unittest.TestCase):

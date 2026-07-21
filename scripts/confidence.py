@@ -125,8 +125,21 @@ DEPTH_TABLE = {
         "compressed_snapshot_pass": (MEDIUM, "snapshot pass"),
     },
     "technical": {
-        # keyed on rubric_version; promotes to HIGH at rubric 1.1.0 (R5/B28)
+        # keyed on rubric_version.
+        # v1.0.0: pre-regime mechanical band scorer -> MEDIUM.
+        # v1.1.0: regime-conditional (adx/stage guard + A/D + upvol + anchored-VWAP
+        #   levels) -> HIGH. This IS a promotion. Unlike sentiment (source capped at
+        #   MEDIUM by web-transcribed short_interest) and risk (depth held MEDIUM
+        #   while its 1.1.0 is provisional-pending-B9), technical's SOURCE is
+        #   AV-premium and NOT web-dependent, so HIGH is honest: source HIGH + depth
+        #   HIGH + staleness HIGH -> overall HIGH on a fresh premium build. The
+        #   1.1.0 rubric itself is PROVISIONAL (thresholds unratified pending B9),
+        #   but the DEPTH axis here answers "has the regime-depth pass landed?" --
+        #   it has (R5/B28) -- which is a distinct question from threshold
+        #   calibration; the provisional status travels in the module_note + SKILL
+        #   falsifier, not by suppressing the depth badge.
         "1.0.0": (MEDIUM, "pre-regime"),
+        "1.1.0": (HIGH, "regime-conditional depth"),
     },
     "sentiment": {
         # keyed on rubric_version.

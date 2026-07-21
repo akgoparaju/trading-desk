@@ -28,7 +28,14 @@ from scripts import score_technical as st
 # --------------------------------------------------------------------------- #
 
 def _tech(**over):
-    """A fully-populated technicals block; override individual fields per test."""
+    """A fully-populated technicals block; override individual fields per test.
+
+    Defaults describe a TRENDING regime (adx well above the choppy threshold,
+    Weinstein stage-2 advancing), so the v1.1.0 momentum guard is INACTIVE by
+    default -- baseline momentum/trend tests keep their v1.0.0 values unless a test
+    explicitly sets adx14 < 20 or stage == 4. A/D slope + upvol default to the
+    accumulation side so the volume factor is fully populated.
+    """
     base = {
         "ma50": 100.0,
         "ma200": 90.0,
@@ -39,6 +46,11 @@ def _tech(**over):
         "macd_signal": 0.5,
         "vol_20d_vs_90d": 1.2,
         "ret_15d": 0.02,
+        # Wave 4A v1.1.0 fields.
+        "adx14": 30.0,        # trending (>= 20 choppy threshold -> no MACD discount)
+        "stage": 2,           # Weinstein advancing (not 4 -> no RSI cap)
+        "ad_line_slope": 1.5,  # accumulation
+        "upvol_ratio": 0.60,   # up-day volume dominant
     }
     base.update(over)
     return base
@@ -174,6 +186,66 @@ class TestMomentumFlags(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# 2b. Momentum regime GUARD (v1.1.0): adx14 (choppy) + stage (declining).
+#     Band SHAPES unchanged; the guard modulates the earned points. Null
+#     adx/stage -> NO modulation (must equal the no-guard baseline byte-for-byte).
+# --------------------------------------------------------------------------- #
+
+class TestMomentumRegimeGuard(unittest.TestCase):
+    def _mom(self, **over):
+        # rsi 55 -> 15, macd 1>0.5>0 -> 10; baseline momentum 25 before any guard.
+        tech = _tech(rsi14=55.0, macd=1.0, macd_signal=0.5, **over)
+        return st.score_momentum(tech, divergence="none", justification="j")
+
+    def test_null_guard_no_modulation_matches_baseline(self):
+        # adx14 + stage BOTH null -> the guard is inactive; momentum == v1.0.0.
+        sub = self._mom(adx14=None, stage=None)
+        self.assertEqual(sub["points"], 25)  # 15 + 10, unmodulated
+        self.assertNotIn("choppy", sub["arithmetic"])
+        self.assertNotIn("stage-4 cap", sub["arithmetic"])
+        self.assertFalse(sub["inputs"]["regime_choppy"])
+        self.assertFalse(sub["inputs"]["regime_declining"])
+
+    def test_choppy_adx_halves_macd_sub(self):
+        # adx14 15 < 20 -> MACD sub halved: 10 -> 5; rsi 15 unchanged -> 20.
+        sub = self._mom(adx14=15.0, stage=2)
+        self.assertEqual(sub["points"], 20)
+        self.assertTrue(sub["inputs"]["regime_choppy"])
+        self.assertIn("choppy", sub["arithmetic"])
+
+    def test_adx_at_threshold_not_choppy(self):
+        # adx14 == 20 is NOT < 20 -> no discount (boundary).
+        sub = self._mom(adx14=20.0, stage=2)
+        self.assertEqual(sub["points"], 25)
+        self.assertFalse(sub["inputs"]["regime_choppy"])
+
+    def test_stage4_caps_rsi_healthy_bonus(self):
+        # stage == 4 -> RSI healthy-band 15 capped at 12; macd 10 unchanged -> 22.
+        sub = self._mom(adx14=30.0, stage=4)
+        self.assertEqual(sub["points"], 22)
+        self.assertTrue(sub["inputs"]["regime_declining"])
+        self.assertIn("stage-4 cap", sub["arithmetic"])
+
+    def test_stage4_cap_does_not_bite_below_cap(self):
+        # rsi 25 -> 0.75 (already below the cap 12) -> cap does not apply; macd 10.
+        tech = _tech(rsi14=25.0, macd=1.0, macd_signal=0.5, adx14=30.0, stage=4)
+        sub = st.score_momentum(tech, divergence="none", justification="j")
+        self.assertEqual(sub["points"], 10.75)
+        self.assertNotIn("stage-4 cap", sub["arithmetic"])
+
+    def test_both_guards_compose(self):
+        # choppy (macd 10 -> 5) AND stage-4 (rsi 15 -> 12) -> 17.
+        sub = self._mom(adx14=15.0, stage=4)
+        self.assertEqual(sub["points"], 17)
+
+    def test_non_declining_stage_no_rsi_cap(self):
+        # stage 1/2/3 -> no RSI cap.
+        for stg in (1, 2, 3):
+            sub = self._mom(adx14=30.0, stage=stg)
+            self.assertEqual(sub["points"], 25, f"stage {stg}")
+
+
+# --------------------------------------------------------------------------- #
 # 3. Structure & levels (max 25)
 # --------------------------------------------------------------------------- #
 
@@ -241,64 +313,166 @@ class TestStructure(unittest.TestCase):
         self.assertLessEqual(sub["points"], 25)
         self.assertEqual(sub["points"], 25)
 
+    # -- v1.1.0: anchored-VWAP levels register in the existing bands ---------
+    def test_vwap_earnings_registers_as_proven_support(self):
+        # anchored VWAP (institutional cost basis) below last within 5% -> 12,
+        # exactly like an ma/swing proven support. Confirms the structure scorer
+        # accepts the vwap type (the ladder mints it in levels.py).
+        ladder = _ladder([(97.0, "vwap_earnings"), (110.0, "swing_high")])
+        sub = st.score_structure(ladder, last=100.0)
+        self.assertEqual(sub["inputs"]["support_points"], 12)
+
+    def test_vwap_52wk_high_registers_as_resistance(self):
+        # a VWAP above price registers generically as nearest resistance
+        # (nearest_resistance accepts any type). +10% headroom -> 8.
+        ladder = _ladder([(92.0, "ma50"), (110.0, "vwap_52wk_high")])
+        sub = st.score_structure(ladder, last=100.0)
+        self.assertEqual(sub["inputs"]["resistance_points"], 8)
+
+    def test_vwap_types_in_structure_proven_set(self):
+        # the structure-proven set = base proven types + anchored-VWAP types.
+        self.assertIn("vwap_52wk_high", st._STRUCTURE_PROVEN_SUPPORT)
+        self.assertIn("vwap_earnings", st._STRUCTURE_PROVEN_SUPPORT)
+        self.assertIn("ma50", st._STRUCTURE_PROVEN_SUPPORT)
+
 
 # --------------------------------------------------------------------------- #
 # 4. Volume & extension (max 20)
 # --------------------------------------------------------------------------- #
 
 class TestVolumeExtension(unittest.TestCase):
-    def test_extension_120_is_4(self):
-        # last/ma200 = 1.20 -> ext 0.20 -> penalty (0.20-0.12)*100=8 -> 12-8=4
+    """v1.1.0 re-split: extension 10 / vol-regime 5 / A/D 3 / upvol 2 = 20.
+
+    _tech() supplies ad_line_slope + upvol_ratio (added to the fixture) so a
+    fully-populated volume factor is present unless a test nulls a sub-component.
+    Extension + vol-regime keep their v1.0.0 BAND SHAPES, scaled to the new maxes.
+    """
+
+    def test_extension_120_is_scaled(self):
+        # last/ma200 = 1.20 -> ext 0.20 -> penalty (0.20-0.12)*100=8 ->
+        # 10 - 8*(10/12) = 10 - 6.6667 = 3.3333 (v1.0.0 shape, scaled to /10).
         tech = _tech(ma200=100.0, vol_20d_vs_90d=1.2, ret_15d=0.02)
         sub = st.score_volume(last=120.0, tech=tech)
-        self.assertEqual(sub["inputs"]["extension_points"], 4)
+        self.assertEqual(sub["inputs"]["extension_points"], 3.3333)
 
-    def test_extension_not_extended_full_12(self):
-        # last/ma200 = 1.05 -> ext 0.05 < 0.12 -> penalty 0 -> 12
+    def test_extension_not_extended_full_10(self):
+        # last/ma200 = 1.05 -> ext 0.05 < 0.12 -> penalty 0 -> full 10.
         tech = _tech(ma200=100.0, vol_20d_vs_90d=1.2, ret_15d=0.02)
         sub = st.score_volume(last=105.0, tech=tech)
-        self.assertEqual(sub["inputs"]["extension_points"], 12)
+        self.assertEqual(sub["inputs"]["extension_points"], 10)
 
     def test_extension_floor_zero(self):
-        # last/ma200 = 1.30 -> ext 0.30 -> penalty 18 -> max(0,12-18)=0
+        # last/ma200 = 1.30 -> ext 0.30 -> penalty 18 -> max(0, 10 - 18*10/12) = 0.
         tech = _tech(ma200=100.0, vol_20d_vs_90d=1.2, ret_15d=0.02)
         sub = st.score_volume(last=130.0, tech=tech)
         self.assertEqual(sub["inputs"]["extension_points"], 0)
 
-    def test_volume_ratio_12_is_8(self):
-        # 0.8 <= 1.2 <= 1.5 -> 8
+    def test_volume_ratio_12_is_5(self):
+        # 0.8 <= 1.2 <= 1.5 -> full vol-regime 5 (v1.0.0 in-band, scaled).
         tech = _tech(ma200=100.0, vol_20d_vs_90d=1.2, ret_15d=0.02)
-        sub = st.score_volume(last=105.0, tech=tech)
-        self.assertEqual(sub["inputs"]["volume_points"], 8)
-
-    def test_volume_ratio_high_is_5(self):
-        tech = _tech(ma200=100.0, vol_20d_vs_90d=2.0, ret_15d=0.02)
         sub = st.score_volume(last=105.0, tech=tech)
         self.assertEqual(sub["inputs"]["volume_points"], 5)
 
-    def test_volume_ratio_low_is_4(self):
+    def test_volume_ratio_high_is_scaled(self):
+        # >1.5 -> 5*(5/8) = 3.125 (v1.0.0 high band scaled).
+        tech = _tech(ma200=100.0, vol_20d_vs_90d=2.0, ret_15d=0.02)
+        sub = st.score_volume(last=105.0, tech=tech)
+        self.assertEqual(sub["inputs"]["volume_points"], 3.125)
+
+    def test_volume_ratio_low_is_scaled(self):
+        # <0.8 -> 4*(5/8) = 2.5 (v1.0.0 low band scaled).
         tech = _tech(ma200=100.0, vol_20d_vs_90d=0.5, ret_15d=0.02)
         sub = st.score_volume(last=105.0, tech=tech)
-        self.assertEqual(sub["inputs"]["volume_points"], 4)
+        self.assertEqual(sub["inputs"]["volume_points"], 2.5)
 
-    def test_volume_null_is_0_na(self):
+    def test_volume_null_is_na_renormalizes(self):
+        # vol null -> vol-regime EXCLUDED; the factor is renormalized over the
+        # present sub-maxes (NOT zeroed).
         tech = _tech(ma200=100.0, vol_20d_vs_90d=None, ret_15d=0.02)
         sub = st.score_volume(last=105.0, tech=tech)
-        self.assertEqual(sub["inputs"]["volume_points"], 0)
+        self.assertIsNone(sub["inputs"]["volume_points"])
         self.assertIn("n/a", sub["arithmetic"])
+        self.assertTrue(sub["inputs"]["renormalized"])
+
+    # -- A/D-line slope band (max 3) --------------------------------------
+    def test_ad_line_positive_is_3(self):
+        tech = _tech(ma200=100.0, ad_line_slope=2.5)
+        sub = st.score_volume(last=105.0, tech=tech)
+        self.assertEqual(sub["inputs"]["ad_line_points"], 3)
+
+    def test_ad_line_flat_is_2(self):
+        tech = _tech(ma200=100.0, ad_line_slope=0.0)
+        sub = st.score_volume(last=105.0, tech=tech)
+        self.assertEqual(sub["inputs"]["ad_line_points"], 2)
+
+    def test_ad_line_negative_is_0(self):
+        tech = _tech(ma200=100.0, ad_line_slope=-3.0)
+        sub = st.score_volume(last=105.0, tech=tech)
+        self.assertEqual(sub["inputs"]["ad_line_points"], 0)
+
+    # -- up/down volume band (max 2) --------------------------------------
+    def test_upvol_over_055_is_2(self):
+        tech = _tech(ma200=100.0, upvol_ratio=0.60)
+        sub = st.score_volume(last=105.0, tech=tech)
+        self.assertEqual(sub["inputs"]["upvol_points"], 2)
+
+    def test_upvol_mid_band_is_1(self):
+        # [0.45, 0.55] inclusive -> 1. 0.55 itself is in the mid band (> 0.55
+        # is strict for the top band).
+        for uv in (0.45, 0.50, 0.55):
+            tech = _tech(ma200=100.0, upvol_ratio=uv)
+            sub = st.score_volume(last=105.0, tech=tech)
+            self.assertEqual(sub["inputs"]["upvol_points"], 1, uv)
+
+    def test_upvol_under_045_is_0(self):
+        tech = _tech(ma200=100.0, upvol_ratio=0.40)
+        sub = st.score_volume(last=105.0, tech=tech)
+        self.assertEqual(sub["inputs"]["upvol_points"], 0)
+
+    # -- factor sums to 20 with all four sub-components present ------------
+    def test_factor_full_marks_sums_to_20(self):
+        # ext 10 (1.05) + vol 5 (1.2) + A/D 3 (>0) + upvol 2 (>0.55) = 20.
+        tech = _tech(ma200=100.0, vol_20d_vs_90d=1.2, ret_15d=0.02,
+                     ad_line_slope=1.0, upvol_ratio=0.60)
+        sub = st.score_volume(last=105.0, tech=tech)
+        self.assertEqual(sub["points"], 20)
+        self.assertEqual(sub["max"], 20)
+        self.assertFalse(sub["inputs"]["renormalized"])
+
+    # -- renormalization when A/D + upvol are both null -------------------
+    def test_ad_upvol_null_renormalizes_to_20(self):
+        # A/D + upvol null -> present = ext(10) + vol(5) = 15 max; earned 15 ->
+        # renormalized back to the 20 factor max (NOT zeroed).
+        tech = _tech(ma200=100.0, vol_20d_vs_90d=1.2, ret_15d=0.02,
+                     ad_line_slope=None, upvol_ratio=None)
+        sub = st.score_volume(last=105.0, tech=tech)
+        self.assertTrue(sub["inputs"]["renormalized"])
+        self.assertEqual(sub["points"], 20)
+
+    def test_ad_upvol_null_partial_renormalizes(self):
+        # ext 3.3333 (@1.20) + vol 5 = 8.3333 over present max 15 ->
+        # *20/15 = 11.1111.
+        tech = _tech(ma200=100.0, vol_20d_vs_90d=1.2, ret_15d=0.02,
+                     ad_line_slope=None, upvol_ratio=None)
+        sub = st.score_volume(last=120.0, tech=tech)
+        self.assertTrue(sub["inputs"]["renormalized"])
+        self.assertEqual(sub["points"], 11.1111)
 
     def test_vertical_rally_penalty_minus4(self):
-        # ret_15d 0.15 > 0.12 -> -4 off dimension total.
-        # ext(1.05)=12, vol(1.2)=8 -> 20; -4 -> 16
-        tech = _tech(ma200=100.0, vol_20d_vs_90d=1.2, ret_15d=0.15)
+        # ret_15d 0.15 > 0.12 -> -4 off the factor total.
+        # full 20 -> 16.
+        tech = _tech(ma200=100.0, vol_20d_vs_90d=1.2, ret_15d=0.15,
+                     ad_line_slope=1.0, upvol_ratio=0.60)
         sub = st.score_volume(last=105.0, tech=tech)
         self.assertEqual(sub["points"], 16)
         self.assertEqual(sub["inputs"]["vertical_rally_penalty"], -4)
 
     def test_dimension_floor_zero(self):
-        # push both components to 0 then apply penalty -> floored at 0
-        # ext 1.30 -> 0; vol null -> 0; ret_15d 0.15 -> -4 -> floor 0
-        tech = _tech(ma200=100.0, vol_20d_vs_90d=None, ret_15d=0.15)
+        # push all present components to their floor then apply penalty -> 0.
+        # ext 1.30 -> 0; vol null; A/D negative -> 0; upvol <0.45 -> 0;
+        # ret_15d 0.15 -> -4 -> floor 0.
+        tech = _tech(ma200=100.0, vol_20d_vs_90d=None, ret_15d=0.15,
+                     ad_line_slope=-1.0, upvol_ratio=0.30)
         sub = st.score_volume(last=130.0, tech=tech)
         self.assertEqual(sub["points"], 0)
 
@@ -390,7 +564,8 @@ class TestCLI(unittest.TestCase):
         with open(out) as fh:
             doc = json.load(fh)
         self.assertEqual(doc["skill"], "technical-analysis")
-        self.assertEqual(doc["rubric_version"], "1.0.0")
+        self.assertEqual(doc["rubric_version"], "1.1.0")
+        self.assertIn("PROVISIONAL", doc["module_note"])
         self.assertEqual(doc["ticker"], "MU")
         self.assertIn("as_of", doc)
         self.assertIsInstance(doc["score"], (int, float))
@@ -411,8 +586,17 @@ class TestCLI(unittest.TestCase):
         self.assertIn(conf["level"], ("LOW", "MEDIUM", "HIGH"))
         self.assertEqual(conf["version"], "1.0.0")
         self.assertEqual(conf["rule"], "min(source, depth, staleness)")
-        # depth is MEDIUM at rubric 1.0.0 (governed belief), so overall <= MEDIUM.
-        self.assertIn(conf["depth"]["level"], ("MEDIUM", "HIGH"))
+        # v1.1.0: technical DEPTH promotes to HIGH (regime-conditional pass
+        # landed) and SOURCE is HIGH on this premium (alpha_vantage) build -- both
+        # promotions the E2E gate looks for. The OVERALL badge here is pinned by
+        # STALENESS only: the build_snapshot fixture stamps as_of one day past the
+        # last row (a deliberately stale/weekend print), so staleness is MEDIUM and
+        # overall is MEDIUM. On a genuinely fresh print (latest == as_of) all three
+        # axes are HIGH -> overall HIGH; test_confidence pins that end-to-end.
+        self.assertEqual(conf["depth"]["level"], "HIGH")
+        self.assertEqual(conf["source"]["level"], "HIGH")
+        self.assertEqual(conf["staleness"]["level"], "MEDIUM")
+        self.assertEqual(conf["level"], "MEDIUM")
         # every subscore carries arithmetic + inputs
         for s in doc["subscores"]:
             self.assertIn("arithmetic", s)
@@ -462,17 +646,50 @@ class TestCLI(unittest.TestCase):
 
 class TestInputFields(unittest.TestCase):
     def test_input_fields_exact(self):
+        # v1.1.0 adds the two SCORED volume-quality fields (ad_line_slope,
+        # upvol_ratio). adx14 + stage are GUARDS, not here (see GUARD_FIELDS).
         self.assertEqual(st.INPUT_FIELDS, {
             "technicals.ma50", "technicals.ma200",
             "technicals.ma50_slope_20d", "technicals.ma200_slope_20d",
             "technicals.rsi14", "technicals.macd", "technicals.macd_signal",
             "technicals.vol_20d_vs_90d", "technicals.ret_15d",
+            "technicals.ad_line_slope", "technicals.upvol_ratio",
         })
+
+    def test_guard_fields_exact(self):
+        # adx14 + stage MODULATE momentum but earn no points -> guard fields.
+        self.assertEqual(st.GUARD_FIELDS, {
+            "technicals.adx14", "technicals.stage",
+        })
+
+    def test_guard_and_input_fields_disjoint(self):
+        # a field is scored xor a pure guard -- never both (governance rule,
+        # mirrored in test_single_mapping).
+        self.assertFalse(st.GUARD_FIELDS & st.INPUT_FIELDS)
+
+    def test_vwap_fields_not_in_input_fields(self):
+        # anchored-VWAP fields feed the LADDER, not a scored branch directly.
+        self.assertNotIn("technicals.vwap_52wk_high", st.INPUT_FIELDS)
+        self.assertNotIn("technicals.vwap_earnings", st.INPUT_FIELDS)
 
     def test_shared_reference_fields_not_listed(self):
         # price.last and ladder are shared reference infrastructure, NOT scored
         # inputs -> must not appear in INPUT_FIELDS.
         self.assertNotIn("price.last", st.INPUT_FIELDS)
+
+
+# --------------------------------------------------------------------------- #
+# Rubric version + provisional module note (v1.1.0).
+# --------------------------------------------------------------------------- #
+
+class TestRubricAndNote(unittest.TestCase):
+    def test_rubric_version_is_110(self):
+        self.assertEqual(st.RUBRIC_VERSION, "1.1.0")
+
+    def test_module_note_is_provisional(self):
+        self.assertIn("PROVISIONAL", st.MODULE_NOTE)
+        self.assertIn("B9", st.MODULE_NOTE)
+        self.assertIn("falsifier", st.MODULE_NOTE)
 
 
 if __name__ == "__main__":

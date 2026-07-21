@@ -1,11 +1,17 @@
 ---
 name: technical-analysis
-description: Score a ticker's technical setup (trend, momentum, structure, volume/extension) against a versioned rubric, off an existing market-snapshot bundle. Use when the user says "technical analysis [ticker]", "chart check", "support and resistance", "is it overbought", or when a report needs the technical evidence module. Consumes an existing snapshot bundle in the CWD (runs market-snapshot first if none exists). Rubric v1.0.0.
+description: Score a ticker's technical setup (trend, momentum, structure, volume/extension) against a versioned rubric, off an existing market-snapshot bundle. Use when the user says "technical analysis [ticker]", "chart check", "support and resistance", "is it overbought", or when a report needs the technical evidence module. Consumes an existing snapshot bundle in the CWD (runs market-snapshot first if none exists). Rubric v1.1.0 (PROVISIONAL).
 ---
 
 # Technical Analysis (Evidence Module)
 
 Score the technical dimension for one ticker from an already-built snapshot bundle. **All arithmetic is done by `scripts/score_technical.py`** — you run the script, read its small JSON, and write prose. You never compute a score, a percentage, or a level in text.
+
+> **Rubric v1.1.0 is PROVISIONAL (Wave 4A · R5 / B28).** Top-level weights are UNCHANGED (Trend 30 / Momentum 25 / Structure 25 / Volume 20). v1.1.0 adds a **regime GUARD** on momentum (ADX + Weinstein stage: a choppy `adx14 < 20` halves the MACD sub-component; a declining `stage == 4` caps the RSI healthy-band bonus at 12) — the guard MODULATES existing sub-scores, it is not a new scored factor and its band shapes are unchanged. It also **re-splits the volume factor** (extension 10 / vol-regime 5 / A/D-line slope 3 / up-day volume 2, summing to the same 20) and adds **anchored-VWAP levels** (`vwap_52wk_high`, `vwap_earnings`) to the S/R ladder as institutional cost-basis support candidates. The guard thresholds and the A/D + upvol volume-quality bands are **documented Philosophy-A defaults, unratified pending B9 calibration** — the module JSON carries a `module_note` saying so, and the falsifier below is pre-registered. The confidence DEPTH badge reads HIGH at v1.1.0 (the regime-depth pass has landed; technical's source is AV-premium, not web-capped) — this answers "has the depth pass landed?", distinct from "are the thresholds calibrated?" (which the module_note discloses is still provisional). Null `adx14`/`stage` → no modulation (graceful; a pre-4A snapshot scores as before).
+>
+> **Falsifier (pre-registered).** *If across the B9 set the regime guard (ADX/stage) flips a technical grade in a way that contradicts realized trend continuation, or the A/D + upvol signals don't separate accumulation from distribution names, refuted and re-set.*
+>
+> **Deferred (data-blocked, NOT built): sector-relative RS.** A sector-relative relative-strength read is the next R5 increment but is **data-blocked** — it needs a sector-ETF series fetch (`sector_daily_adjusted`) plus a sector map and validation, none of which any manifest carries today. It is honestly deferred, not guessed. (SPY-relative RS already lives in the sentiment module — the single-mapping rule keeps benchmark-relative bars out of technical.)
 
 **Non-negotiables:**
 - **Never do arithmetic in prose.** Every number you cite must already appear in `module_technical.json` or the snapshot. A number you would have to compute is a script change, not a prose change.
@@ -89,6 +95,6 @@ Report to the user (and to any calling skill):
 - **Single-snapshot rule.** No fetching. A missing figure (e.g. `null` RSI) contributes 0 to its component and is named "n/a" in the arithmetic; if an entire dimension is null, the script renormalizes the score over the remaining max and sets `renormalized: true` — disclose that, never hide it.
 - **Options sentiment out of scope (single-mapping).** Only options-derived LEVELS enter this module, and only through the ladder. IV, put/call, skew, and flow are other modules' evidence — do not read or narrate them here.
 - **Ladder is the only legal source of levels.** No level may appear in the brief that is not in `module_technical.json`'s `ladder`. The LLM selects and narrates levels; `scripts/levels.py` mints them.
-- **Rubric version travels with the numbers.** The rubric version (`1.0.0`) is printed in the module JSON and MUST appear in the brief footer, so any reader can tell which scoring rule produced the score.
+- **Rubric version travels with the numbers.** The rubric version (`1.1.0`) is printed in the module JSON and MUST appear in the brief footer, so any reader can tell which scoring rule produced the score. When `module_note` is present (v1.1.0 PROVISIONAL), surface it near the footer so the reader knows the regime guard + volume-quality bands are unratified.
 - **`trend_claim` is mechanical and report-level.** It is computed from the price/MA stack for later cross-module QC; do not override it in prose.
 - **Snapshot is read-only.** This module never edits `snapshot.json`.

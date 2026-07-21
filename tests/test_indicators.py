@@ -207,6 +207,131 @@ class TestIndicators(unittest.TestCase):
         self.assertIsNone(I.zscore(1.0, [1.0, 2.0, 3.0, 4.0]))  # < 5 points
         self.assertIsNone(I.zscore(5.0, [5.0] * 6))             # zero stdev
 
+    # --- Wave 4A: ADX (Wilder trend strength) ------------------------------
+    def _bar(self, high, low, close, volume=1_000_000):
+        return {"high": high, "low": low, "close": close, "volume": volume}
+
+    def test_adx_high_on_strong_trend(self):
+        # A clean one-directional uptrend (every bar strictly higher, tight
+        # symmetric range) is a maximally trending series: ALL directional
+        # movement is +DM, -DM is 0, so +DI dominates and DX == 100 every bar.
+        # ADX must be well above the cited no-trend threshold (>25).
+        trend = []
+        p = 100.0
+        for _ in range(60):
+            p += 1.0
+            trend.append(self._bar(p + 0.5, p - 0.5, p))
+        adx = I.adx(trend, 14)
+        self.assertIsNotNone(adx)
+        self.assertGreater(adx, 25.0)
+        # Monotone perfect trend -> DX == 100 each bar -> ADX == 100.
+        self.assertAlmostEqual(adx, 100.0, places=6)
+
+    def test_adx_low_on_choppy_range(self):
+        # A rangebound saw-tooth (alternating up/down with no net direction) has
+        # +DM and -DM roughly cancelling: the DIs are close, DX is small, ADX
+        # stays well below the cited trend threshold (<20).
+        chop = []
+        base = 100.0
+        for i in range(60):
+            c = base + (2.0 if i % 2 == 0 else -2.0)
+            chop.append(self._bar(c + 0.5, c - 0.5, c))
+        adx = I.adx(chop, 14)
+        self.assertIsNotNone(adx)
+        self.assertLess(adx, 20.0)
+
+    def test_adx_hand_fixture_monotone_uptrend(self):
+        # Hand-checkable n=2 fixture (needs 2n+1 = 5 rows). Every bar rises by 1
+        # with an identical unit range, so:
+        #   +DM = high_t - high_{t-1} = 1 (> down=0) every bar; -DM = 0.
+        #   TR  = max(1, |high-prev_close|, |low-prev_close|) each bar.
+        #   +DI = 100 (all smoothed movement is up), -DI = 0
+        #   DX  = 100 * |100-0| / (100+0) = 100 every bar -> ADX = 100.
+        rows = [self._bar(10 + i, 9 + i, 9.5 + i) for i in range(7)]
+        self.assertAlmostEqual(I.adx(rows, 2), 100.0, places=9)
+
+    def test_adx_requires_2n_plus_1_rows(self):
+        rows = [self._bar(10 + i, 9 + i, 9.5 + i) for i in range(40)]
+        # n=14 needs 2*14+1 = 29 rows.
+        self.assertIsNone(I.adx(rows[:28], 14))
+        self.assertIsNotNone(I.adx(rows[:29], 14))
+
+    def test_adx_null_on_missing_ohlc(self):
+        rows = [self._bar(10 + i, 9 + i, 9.5 + i) for i in range(30)]
+        rows[5]["high"] = None   # a hole makes the whole computation None
+        self.assertIsNone(I.adx(rows, 14))
+
+    # --- Wave 4A: Chaikin A/D line + slope ---------------------------------
+    def test_ad_line_hand_computed(self):
+        # MFM = ((close-low)-(high-close))/(high-low); MFV = MFM*vol; cumsum.
+        rows = [
+            self._bar(10.0, 8.0, 9.0, 100),    # MFM = ((1)-(1))/2 = 0  -> +0
+            self._bar(12.0, 10.0, 12.0, 200),  # close==high: MFM = +1  -> +200
+            self._bar(14.0, 12.0, 12.0, 300),  # close==low:  MFM = -1  -> -300
+        ]
+        self.assertEqual(I.ad_line(rows), [0.0, 200.0, -100.0])
+
+    def test_ad_line_flat_bar_zero_mfm(self):
+        # high == low -> MFM defined as 0 (no divide-by-zero).
+        self.assertEqual(I.ad_line([self._bar(5.0, 5.0, 5.0, 100)]), [0.0])
+        self.assertEqual(I.ad_line([]), [])
+
+    def test_ad_line_slope_sign_accumulation_vs_distribution(self):
+        # Accumulation: close near the high every bar -> A/D rises -> slope > 0.
+        acc = [self._bar(100 + i, 99 + i, 99.9 + i) for i in range(30)]
+        self.assertGreater(I.ad_line_slope(acc, 20), 0)
+        # Distribution: close near the low -> A/D falls -> slope < 0.
+        dist = [self._bar(100 + i, 99 + i, 99.1 + i) for i in range(30)]
+        self.assertLess(I.ad_line_slope(dist, 20), 0)
+        # Too short -> None.
+        self.assertIsNone(I.ad_line_slope(acc[:10], 20))
+
+    # --- Wave 4A: up/down volume ratio -------------------------------------
+    def test_updown_volume_hand_computed(self):
+        rows = [
+            self._bar(0, 0, 10.0, 100),   # anchor bar (no prior close)
+            self._bar(0, 0, 11.0, 200),   # up (11 > 10) -> up-vol 200
+            self._bar(0, 0, 10.5, 300),   # down -> not counted
+            self._bar(0, 0, 12.0, 400),   # up -> up-vol 400
+        ]
+        # Over the last n=3 comparison bars: up = 200+400 = 600, total = 900.
+        self.assertAlmostEqual(I.updown_volume(rows, 3), 600.0 / 900.0)
+
+    def test_updown_volume_guards(self):
+        rows = [self._bar(0, 0, 10.0 + i, 100) for i in range(4)]
+        self.assertIsNone(I.updown_volume(rows, 4))   # need n+1 = 5 rows
+        self.assertIsNotNone(I.updown_volume(rows, 3))
+        # A hole in the window nulls the ratio (must be a clean n-bar window).
+        holed = [self._bar(0, 0, 10.0 + i, 100) for i in range(6)]
+        holed[-1]["volume"] = None
+        self.assertIsNone(I.updown_volume(holed, 5))
+
+    # --- Wave 4A: anchored VWAP --------------------------------------------
+    def test_anchored_vwap_hand_computed(self):
+        rows = [
+            {"date": "2026-01-01", "high": 10, "low": 8, "close": 9, "volume": 100},
+            {"date": "2026-01-02", "high": 12, "low": 10, "close": 11, "volume": 200},
+            {"date": "2026-01-03", "high": 14, "low": 12, "close": 13, "volume": 300},
+        ]
+        # Anchor 2026-01-02: typical prices (12+10+11)/3=11 and (14+12+13)/3=13.
+        # vwap = (11*200 + 13*300) / (200+300) = 6100/500 = 12.2.
+        self.assertAlmostEqual(I.anchored_vwap(rows, "2026-01-02"), 12.2)
+        # Anchor on the first bar spans all three bars.
+        # typicals: 9, 11, 13; vwap = (9*100+11*200+13*300)/600 = 7000/600.
+        self.assertAlmostEqual(I.anchored_vwap(rows, "2026-01-01"), 7000.0 / 600.0)
+
+    def test_anchored_vwap_guards(self):
+        rows = [
+            {"date": "2026-01-01", "high": 10, "low": 8, "close": 9, "volume": 100},
+        ]
+        # A future anchor (no row on/after it) -> None.
+        self.assertIsNone(I.anchored_vwap(rows, "2026-02-01"))
+        # No anchor -> None.
+        self.assertIsNone(I.anchored_vwap(rows, None))
+        # Zero total volume -> None.
+        zero = [{"date": "2026-01-01", "high": 10, "low": 8, "close": 9, "volume": 0}]
+        self.assertIsNone(I.anchored_vwap(zero, "2026-01-01"))
+
 
 if __name__ == "__main__":
     unittest.main()

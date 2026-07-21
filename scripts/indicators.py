@@ -402,3 +402,209 @@ def jump_count_2sigma(values: list[float]) -> int:
     std = math.sqrt(var)
     threshold = 2 * std
     return sum(1 for x in values if abs(x) > threshold)
+
+
+# --------------------------------------------------------------------------- #
+# Wave 4A: regime + institutional-level indicators (pure OHLCV, deterministic).
+#
+# These consume the FULL OHLCV ``rows`` (dicts with high/low/close/volume/date),
+# not just the adjusted-close series, because trend-strength and money-flow are
+# intraday-range measures. ADX in particular is a same-scale range measure and so
+# uses the RAW ``close`` (not ``adjusted_close``): +DM/-DM and True Range must all
+# live in the same price space, and mixing a raw high/low with an adjusted close
+# would corrupt the ranges around any split/dividend event.
+# --------------------------------------------------------------------------- #
+
+def adx(rows: list[dict], n: int = 14) -> float | None:
+    """Wilder's Average Directional Index (ADX) over OHLCV ``rows``.
+
+    Standard Wilder construction on RAW high/low/close (a same-scale intraday
+    range measure -- see module note):
+      1. True Range  TR_t   = max(high-low, |high-prev_close|, |low-prev_close|)
+      2. Directional movement (only the larger of the two moves counts; ties/neg
+         -> 0):
+            up   = high_t - high_{t-1};  down = low_{t-1} - low_t
+            +DM_t = up   if (up > down and up > 0)   else 0
+            -DM_t = down if (down > up and down > 0) else 0
+      3. Wilder-smooth TR, +DM, -DM with the standard recursion
+            sm_t = sm_{t-1} - sm_{t-1}/n + raw_t   (seed = sum of first n raws)
+      4. +DI = 100 * sm(+DM)/sm(TR);  -DI = 100 * sm(-DM)/sm(TR)
+         DX  = 100 * |+DI - -DI| / (+DI + -DI)   (0 when the DI sum is 0)
+      5. ADX = Wilder-smoothed mean of DX: seed = mean of the first n DX values,
+         then ADX_t = (ADX_{t-1}*(n-1) + DX_t)/n.
+
+    Returns the latest ADX as a float, or None when there are fewer than
+    ``2n + 1`` rows (n for the first smoothed DI, another n DX values to seed the
+    ADX average, plus the extra prior-close bar). Rows must carry numeric
+    high/low/close; a row missing any of them makes the whole computation None
+    (ADX is only meaningful on a clean contiguous series).
+    """
+    if n <= 0 or len(rows) < 2 * n + 1:
+        return None
+
+    highs, lows, closes = [], [], []
+    for r in rows:
+        h, low, c = r.get("high"), r.get("low"), r.get("close")
+        if h is None or low is None or c is None:
+            return None
+        highs.append(float(h))
+        lows.append(float(low))
+        closes.append(float(c))
+
+    tr, plus_dm, minus_dm = [], [], []
+    for i in range(1, len(rows)):
+        hi_lo = highs[i] - lows[i]
+        hi_pc = abs(highs[i] - closes[i - 1])
+        lo_pc = abs(lows[i] - closes[i - 1])
+        tr.append(max(hi_lo, hi_pc, lo_pc))
+        up = highs[i] - highs[i - 1]
+        down = lows[i - 1] - lows[i]
+        plus_dm.append(up if (up > down and up > 0) else 0.0)
+        minus_dm.append(down if (down > up and down > 0) else 0.0)
+
+    # len(tr) == len(rows) - 1 >= 2n. Wilder-smooth TR/+DM/-DM.
+    def _wilder(series):
+        smoothed = [sum(series[:n])]
+        for i in range(n, len(series)):
+            smoothed.append(smoothed[-1] - smoothed[-1] / n + series[i])
+        return smoothed
+
+    sm_tr = _wilder(tr)
+    sm_plus = _wilder(plus_dm)
+    sm_minus = _wilder(minus_dm)
+
+    dx = []
+    for i in range(len(sm_tr)):
+        if sm_tr[i] == 0:
+            dx.append(0.0)
+            continue
+        plus_di = 100 * sm_plus[i] / sm_tr[i]
+        minus_di = 100 * sm_minus[i] / sm_tr[i]
+        di_sum = plus_di + minus_di
+        dx.append(100 * abs(plus_di - minus_di) / di_sum if di_sum != 0 else 0.0)
+
+    if len(dx) < n:
+        return None  # not enough DX values to seed the ADX average
+    adx_val = sum(dx[:n]) / n
+    for i in range(n, len(dx)):
+        adx_val = (adx_val * (n - 1) + dx[i]) / n
+    return adx_val
+
+
+def ad_line(rows: list[dict]) -> list[float]:
+    """Chaikin Accumulation/Distribution line (cumulative money-flow volume).
+
+    Per bar:
+        MFM = ((close - low) - (high - close)) / (high - low)   (0 when high==low)
+        MFV = MFM * volume
+    The A/D line is the running cumulative sum of MFV. Returns the FULL series
+    (one point per usable row), OLDEST-first. Rows missing high/low/close/volume
+    are skipped (they contribute no money-flow point). Empty input -> [].
+    """
+    out = []
+    running = 0.0
+    for r in rows:
+        h, low, c, v = r.get("high"), r.get("low"), r.get("close"), r.get("volume")
+        if h is None or low is None or c is None or v is None:
+            continue
+        h, low, c, v = float(h), float(low), float(c), float(v)
+        if h == low:
+            mfm = 0.0
+        else:
+            mfm = ((c - low) - (h - c)) / (h - low)
+        running += mfm * v
+        out.append(running)
+    return out
+
+
+def ad_line_slope(rows: list[dict], lookback: int = 20) -> float | None:
+    """20-day slope of the Chaikin A/D line, VOLUME-normalized.
+
+    The raw A/D line's magnitude scales with the ticker's share volume, so a bare
+    ``ad[-1] - ad[-1-lookback]`` difference is not comparable across names. We
+    normalize by the mean absolute per-bar money-flow volume proxy -- here the
+    mean bar volume over the same window -- to express the slope in "average bars
+    of one-sided accumulation" units. The SIGN (accumulation vs distribution) is
+    the load-bearing signal; the magnitude is a comparable secondary read.
+
+    Formula: (ad[-1] - ad[-1-lookback]) / (lookback * mean_bar_volume).
+    Returns None when the A/D series is shorter than ``lookback + 1`` points or
+    the volume normalizer is zero. Kept simple and documented (spec: "keep it
+    simple + documented").
+    """
+    line = ad_line(rows)
+    if lookback <= 0 or len(line) < lookback + 1:
+        return None
+    delta = line[-1] - line[-1 - lookback]
+    vols = [float(r["volume"]) for r in rows
+            if r.get("volume") is not None]
+    if len(vols) < lookback:
+        return None
+    mean_vol = sum(vols[-lookback:]) / lookback
+    denom = lookback * mean_vol
+    if denom == 0:
+        return None
+    return delta / denom
+
+
+def updown_volume(rows: list[dict], n: int = 50) -> float | None:
+    """Up-day volume as a fraction of total volume over the last ``n`` bars.
+
+    A bar is an "up day" when its close exceeds the PRIOR bar's close. Over the
+    last ``n`` bars (each needing a prior bar for the comparison):
+        ratio = sum(volume on up days) / sum(volume over all n days).
+    Returns None when there are fewer than ``n + 1`` usable rows (need a prior
+    close for the first of the n bars) or when total volume is zero. Rows missing
+    close or volume break the contiguous window and yield None (the ratio must be
+    over a clean n-bar window). Range is [0, 1].
+    """
+    if n <= 0 or len(rows) < n + 1:
+        return None
+    window = rows[-(n + 1):]  # n comparison bars + 1 prior-close anchor
+    up_vol = 0.0
+    total_vol = 0.0
+    for i in range(1, len(window)):
+        c = window[i].get("close")
+        pc = window[i - 1].get("close")
+        v = window[i].get("volume")
+        if c is None or pc is None or v is None:
+            return None
+        v = float(v)
+        total_vol += v
+        if float(c) > float(pc):
+            up_vol += v
+    if total_vol == 0:
+        return None
+    return up_vol / total_vol
+
+
+def anchored_vwap(rows: list[dict], anchor_date: str) -> float | None:
+    """Anchored Volume-Weighted Average Price from ``anchor_date`` forward.
+
+    Over all rows whose ``date`` is >= ``anchor_date`` (ISO ``YYYY-MM-DD``, so
+    string comparison is chronological):
+        typical_price = (high + low + close) / 3
+        VWAP = sum(typical_price * volume) / sum(volume).
+    Returns None when ``anchor_date`` is absent, no row falls on/after it, or the
+    summed volume is zero. Rows missing high/low/close/volume are skipped. Uses
+    RAW OHLC (an anchored cost-basis level lives in traded-price space, matching
+    the raw close used elsewhere for same-scale range measures).
+    """
+    if not anchor_date:
+        return None
+    num = 0.0
+    den = 0.0
+    for r in rows:
+        d = r.get("date")
+        if d is None or d < anchor_date:
+            continue
+        h, low, c, v = r.get("high"), r.get("low"), r.get("close"), r.get("volume")
+        if h is None or low is None or c is None or v is None:
+            continue
+        v = float(v)
+        typical = (float(h) + float(low) + float(c)) / 3
+        num += typical * v
+        den += v
+    if den == 0:
+        return None
+    return num / den

@@ -7,20 +7,52 @@ report can never silently drift: the numbers a brief cites all originate here, i
 Python, and the version string travels with them into the module JSON and the
 brief footer. The LLM layer narrates; it does no scoring arithmetic.
 
-Scoring is over four dimensions (max 100 total):
+Scoring is over four dimensions (max 100 total). TOP-LEVEL WEIGHTS ARE UNCHANGED
+from v1.0.0 (Trend 30 / Momentum 25 / Structure 25 / Volume 20); rubric v1.1.0
+(Wave 4A, R5/B28) enriches the SUB-splits and adds a regime GUARD -- it does NOT
+re-weight the four dimensions:
     1. Trend structure    (30)  -- price/MA stack + MA slopes
-    2. Momentum           (25)  -- RSI band (+ optional divergence adj) + MACD state
+    2. Momentum           (25)  -- RSI band (+ optional divergence adj) + MACD
+                                   state, REGIME-CONDITIONED by adx14 + stage
+                                   (v1.1.0): choppy regime (adx<20) halves the
+                                   MACD sub; a declining stage-4 caps the RSI
+                                   healthy-band bonus. Band SHAPES unchanged --
+                                   the guard modulates the points.
     3. Structure & levels (25)  -- proven support proximity + resistance headroom
-                                   + confluence, all read off the shared S/R ladder
-    4. Volume & extension (20)  -- distance above MA200 + volume regime, minus a
-                                   vertical-rally penalty
+                                   + confluence, all read off the shared S/R
+                                   ladder. v1.1.0: the ladder now carries
+                                   anchored-VWAP level candidates (institutional
+                                   cost basis); support proximity accepts them as
+                                   defended levels. No new points -- more level
+                                   candidates.
+    4. Volume & extension (20)  -- v1.1.0 RE-SPLIT: extension (10) + volume regime
+                                   (5) + A/D-line slope (3) + up/down volume (2),
+                                   minus a vertical-rally penalty. Band SHAPES of
+                                   the retained extension + vol-regime sub-scores
+                                   are unchanged, only scaled; A/D + upvol add
+                                   accumulation/distribution quality. Null sub-
+                                   components renormalize WITHIN the factor (the
+                                   factor is NOT zeroed).
+
+REGIME AS GUARD (v1.1.0, PROVISIONAL): adx14 + stage are GUARD/modulator fields
+(``GUARD_FIELDS``) -- they change how many points an existing momentum sub-score
+earns, they do NOT add a new scored factor and they earn no points themselves. The
+thresholds (ADX<20 = no-trend; stage-4 = declining) are documented Philosophy-A
+defaults, unratified pending B9 calibration; a falsifier is pre-registered in the
+SKILL. Null adx/stage -> NO modulation (graceful): a v1.0.0 snapshot scores
+byte-for-byte as before on the momentum guard.
 
 Design contract (project-wide):
 - The snapshot is READ-ONLY; this module never edits snapshot.json.
-- ``INPUT_FIELDS`` lists exactly the snapshot fields this rubric SCORES on
-  (dotted paths). ``price.last`` and the ladder are SHARED reference
-  infrastructure and are deliberately excluded (a Task-13 cross-skill test
-  imports INPUT_FIELDS to assert dimensions do not double-count a field).
+- ``INPUT_FIELDS`` lists exactly the snapshot fields this rubric SCORES on (earns
+  points from) as dotted paths. ``GUARD_FIELDS`` lists fields that only MODULATE a
+  scoring branch (adx14/stage) and earn no points -- they must be DISJOINT from
+  ``INPUT_FIELDS`` (a governance test asserts this) and mirror the sentiment
+  scorer's rsi14-guard precedent. ``price.last`` and the ladder are SHARED
+  reference infrastructure and are deliberately excluded from both. A Task-13
+  cross-skill test imports INPUT_FIELDS to assert dimensions do not double-count a
+  field. The anchored-VWAP fields feed the LADDER (built in levels.py), not
+  INPUT_FIELDS directly.
 - ``trend_claim`` is a mechanical label emitted for later report-level QC.
 - If a WHOLE dimension has zero evaluable inputs, it is excluded and the score is
   renormalized to 0-100 over the remaining max.
@@ -47,11 +79,22 @@ if _REPO_ROOT not in sys.path:
 
 from scripts import build_snapshot, chain, confidence, levels
 
-RUBRIC_VERSION = "1.0.0"
+RUBRIC_VERSION = "1.1.0"
 SKILL_NAME = "technical-analysis"
 
-# The snapshot fields this rubric SCORES on. price.last and the ladder are shared
-# reference infrastructure and are intentionally NOT listed (see module docstring).
+# Module note stamped on every doc: rubric v1.1.0 is PROVISIONAL (Wave 4A / R5 /
+# B28) -- the regime guard thresholds (adx/stage) and the A/D + upvol volume-
+# quality bands are unratified pending B9 calibration; a falsifier is pre-
+# registered in the SKILL.
+MODULE_NOTE = ("technical-v1.1.0 PROVISIONAL -- regime guard + volume-quality "
+               "bands unratified pending B9; falsifier pre-registered")
+
+# The snapshot fields this rubric SCORES on (earns points from). price.last and
+# the ladder are shared reference infrastructure and are intentionally NOT listed
+# (see module docstring). v1.1.0 adds ad_line_slope + upvol_ratio (the new SCORED
+# volume-quality sub-components). The anchored-VWAP fields (vwap_52wk_high /
+# vwap_earnings) are NOT here: they feed the shared ladder (levels.py), not a
+# scored branch directly.
 INPUT_FIELDS = {
     "technicals.ma50",
     "technicals.ma200",
@@ -62,11 +105,44 @@ INPUT_FIELDS = {
     "technicals.macd_signal",
     "technicals.vol_20d_vs_90d",
     "technicals.ret_15d",
+    "technicals.ad_line_slope",
+    "technicals.upvol_ratio",
 }
 
-# Types the market has actually defended -> eligible as proven support (mirrors
-# levels._PROVEN_SUPPORT_TYPES; nearest_support(proven_only=True) enforces this).
+# Fields that only MODULATE (guard/cap) a scoring branch -- they earn NO points
+# themselves, so they are NOT scored inputs. v1.1.0's momentum guard reads
+# ``adx14`` (choppy-regime MACD discount) and ``stage`` (stage-4 RSI cap). A
+# governance test (test_single_mapping) asserts GUARD_FIELDS is DISJOINT from
+# INPUT_FIELDS (a field is either scored xor a pure guard, never both here). This
+# mirrors the sentiment scorer's ``GUARD_FIELDS = {"technicals.rsi14"}``.
+GUARD_FIELDS = {
+    "technicals.adx14",
+    "technicals.stage",
+}
+
+# Regime-guard thresholds (v1.1.0, PROVISIONAL -- documented Philosophy-A
+# defaults, unratified pending B9). ADX below this reads as no-trend/choppy (the
+# widely-cited ADX<20 = no-trend default); the declining Weinstein stage.
+_ADX_CHOPPY = 20.0
+_STAGE_DECLINING = 4
+# In a choppy regime the MACD sub-component is DISCOUNTED (multiplied) by this.
+_MACD_CHOPPY_FACTOR = 0.5
+# In a declining stage-4 regime the RSI sub-component is CAPPED at this (the
+# healthy-band bonus is not rewarded in a downtrend; the full 15 falls to 12,
+# readings already <=12 are unaffected).
+_RSI_STAGE4_CAP = 12.0
+
 _DIVERGENCE_CHOICES = ("none", "bullish", "bearish")
+
+# Anchored-VWAP level types (v1.1.0): institutional cost-basis lines the market has
+# transacted at -> eligible as DEFENDED support alongside levels._PROVEN_SUPPORT_TYPES.
+# The ladder (levels.build_ladder) already MINTS these when the snapshot carries
+# vwap_52wk_high / vwap_earnings; the structure scorer just accepts them as proven
+# support candidates. Resistance + confluence already read the ladder generically,
+# so a VWAP above price registers as resistance with no change.
+_VWAP_SUPPORT_TYPES = {"vwap_52wk_high", "vwap_earnings"}
+# The proven-support set the STRUCTURE scorer accepts (base proven + anchored VWAP).
+_STRUCTURE_PROVEN_SUPPORT = set(levels._PROVEN_SUPPORT_TYPES) | _VWAP_SUPPORT_TYPES
 
 
 def _fmt(x):
@@ -207,7 +283,17 @@ def _macd_component(macd, signal) -> float:
 
 
 def score_momentum(tech, divergence, justification) -> dict:
-    """Momentum dimension (max 25): RSI band + MACD state.
+    """Momentum dimension (max 25): RSI band + MACD state, REGIME-CONDITIONED.
+
+    Band SHAPES are unchanged from v1.0.0; a v1.1.0 GUARD (adx14 + stage) modulates
+    how many points the sub-scores earn:
+      - ``adx14`` < 20 (choppy / no-trend): the MACD sub-component is DISCOUNTED
+        BY HALF (momentum signals are noise in a rangebound regime).
+      - ``stage`` == 4 (Weinstein declining): the RSI sub-component is CAPPED at 12
+        (a "healthy" RSI is not rewarded in a downtrend; the full-band 15 falls to
+        12, readings already <=12 are unaffected).
+    Both guards are PROVISIONAL (documented thresholds, unratified pending B9).
+    Null adx14 / null stage -> NO modulation (graceful): identical to v1.0.0.
 
     Null RSI or null MACD inputs contribute 0 and are named "n/a". The divergence
     flag + justification are recorded in the subscore inputs (also surfaced at the
@@ -216,6 +302,12 @@ def score_momentum(tech, divergence, justification) -> dict:
     rsi = tech.get("rsi14")
     macd = tech.get("macd")
     signal = tech.get("macd_signal")
+    adx = tech.get("adx14")
+    stage = tech.get("stage")
+
+    # Regime-guard predicates (null -> guard inactive -> no modulation).
+    choppy = adx is not None and adx < _ADX_CHOPPY
+    declining = stage == _STAGE_DECLINING
 
     parts = []
     pts = 0.0
@@ -224,22 +316,35 @@ def score_momentum(tech, divergence, justification) -> dict:
     if rsi is not None:
         evaluable += 1
         rsi_pts = _rsi_component(rsi, divergence)
-        pts += rsi_pts
         div_note = ""
         if divergence == "bearish" and rsi > 65:
             div_note = " (bearish divergence -3)"
         elif divergence == "bullish" and rsi < 45:
             div_note = " (bullish divergence +3)"
-        parts.append(f"rsi {_fmt(rsi)} -> {_fmt(rsi_pts)}/15{div_note}")
+        # stage-4 guard: cap the RSI healthy-band bonus (does not reward a healthy
+        # RSI in a downtrend). Only bites when the earned points exceed the cap.
+        stage_note = ""
+        if declining and rsi_pts > _RSI_STAGE4_CAP:
+            rsi_pts = _clean(_RSI_STAGE4_CAP)
+            stage_note = f" (stage-4 cap -> {_fmt(_RSI_STAGE4_CAP)})"
+        pts += rsi_pts
+        parts.append(f"rsi {_fmt(rsi)} -> {_fmt(rsi_pts)}/15{div_note}{stage_note}")
     else:
         parts.append("rsi: n/a (+0)")
 
     if macd is not None and signal is not None:
         evaluable += 1
         macd_pts = _macd_component(macd, signal)
+        # choppy guard: discount the MACD sub-component by half (unreliable in a
+        # rangebound, no-trend regime -- cited ADX<20 = no-trend default).
+        chop_note = ""
+        if choppy:
+            macd_pts = _clean(macd_pts * _MACD_CHOPPY_FACTOR)
+            chop_note = f" (adx {_fmt(adx)} < {_fmt(_ADX_CHOPPY)} choppy: x{_fmt(_MACD_CHOPPY_FACTOR)})"
         pts += macd_pts
         parts.append(
-            f"macd {_fmt(macd)} vs signal {_fmt(signal)} -> {_fmt(macd_pts)}/10")
+            f"macd {_fmt(macd)} vs signal {_fmt(signal)} -> {_fmt(macd_pts)}/10"
+            f"{chop_note}")
     else:
         parts.append("macd: n/a (+0)")
 
@@ -249,6 +354,8 @@ def score_momentum(tech, divergence, justification) -> dict:
         "max": 25,
         "arithmetic": "; ".join(parts),
         "inputs": {"rsi14": rsi, "macd": macd, "macd_signal": signal,
+                   "adx14": adx, "stage": stage,
+                   "regime_choppy": choppy, "regime_declining": declining,
                    "divergence": divergence,
                    "divergence_justification": justification},
         "evaluable": evaluable > 0,
@@ -259,15 +366,36 @@ def score_momentum(tech, divergence, justification) -> dict:
 # 3. Structure & levels (max 25)
 # --------------------------------------------------------------------------- #
 
+def _nearest_structure_support(ladder, last):
+    """Highest ladder entry strictly BELOW ``last`` whose type is a
+    STRUCTURE-proven support (base proven types + anchored-VWAP cost-basis lines).
+
+    v1.1.0 widens levels.nearest_support's proven set to accept anchored VWAPs as
+    defended support without editing levels.py (institutional cost basis is a
+    genuinely-transacted level, not a merely-projected one). No new points -- it
+    just lets a VWAP register in the SAME support-proximity band the ma/swing
+    levels already use.
+    """
+    if last is None:
+        return None
+    candidates = [e for e in ladder
+                  if e["level"] < last and e["type"] in _STRUCTURE_PROVEN_SUPPORT]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda e: e["level"])
+
+
 def score_structure(ladder, last) -> dict:
     """Support proximity (12) + resistance headroom (8) + confluence (5).
 
-    Support: nearest PROVEN support below ``last`` (levels.nearest_support,
-    proven_only=True). |pct|<=5% -> 12; 5-10% -> 8; else/none -> 0.
-    Resistance: nearest resistance above (levels.nearest_resistance). headroom
-    >=5% -> 8; 2-5% -> 4; <2% -> 0; NONE above (ATH blue sky) -> 8.
+    Support: nearest STRUCTURE-proven support below ``last`` -- the base proven
+    types PLUS anchored-VWAP cost-basis lines (v1.1.0). |pct|<=5% -> 12; 5-10% ->
+    8; else/none -> 0.
+    Resistance: nearest resistance above (levels.nearest_resistance, any type --
+    so a VWAP above price registers). headroom >=5% -> 8; 2-5% -> 4; <2% -> 0;
+    NONE above (ATH blue sky) -> 8.
     Confluence: >=2 ladder entries below ``last`` within 2% (relative) of each
-    other -> +5.
+    other -> +5 (reads the whole ladder generically -- VWAP levels can contribute).
 
     The ladder is always available (it is built even from a bare price series),
     so this dimension is always evaluable.
@@ -275,7 +403,7 @@ def score_structure(ladder, last) -> dict:
     parts = []
 
     # -- support -----------------------------------------------------------
-    sup = levels.nearest_support(ladder, last, proven_only=True)
+    sup = _nearest_structure_support(ladder, last)
     if sup is not None and last:
         pct = abs(sup["level"] / last - 1)
         if pct <= 0.05:
@@ -344,51 +472,120 @@ def score_structure(ladder, last) -> dict:
 # 4. Volume & extension (max 20)
 # --------------------------------------------------------------------------- #
 
-def score_volume(last, tech) -> dict:
-    """Extension (12) + volume regime (8) minus a vertical-rally penalty.
+# v1.1.0 volume-factor sub-splits (sum to 20). Extension + vol-regime keep their
+# v1.0.0 BAND SHAPES, scaled to the new maxes; A/D-line + upvol are new quality
+# bands. The full-mark maxes:
+_EXT_MAX = 10.0        # was 12; scaled band shape
+_VOLREG_MAX = 5.0      # was 8;  scaled band shape
+_AD_MAX = 3.0          # new: accumulation/distribution from A/D-line slope
+_UPVOL_MAX = 2.0       # new: up-day volume share
 
-    Extension: ext = last/ma200 - 1; penalty = max(0, (ext-0.12)*100) points
-    (1 pt / 1% above 12%); component = max(0, 12-penalty). Volume:
-    0.8<=vol_20d_vs_90d<=1.5 -> 8; >1.5 -> 5; <0.8 -> 4; null -> 0 ("n/a").
-    Vertical-rally: ret_15d > 0.12 -> -4 off this dimension's total (floor 0).
+
+def score_volume(last, tech) -> dict:
+    """v1.1.0 re-split (extension 10 + vol-regime 5 + A/D 3 + upvol 2 = 20), minus a
+    vertical-rally penalty.
+
+    - Extension (10): ext = last/ma200 - 1; penalty = max(0, (ext-0.12)*100) points
+      (1 pt / 1% above 12%, v1.0.0 shape); component = max(0, 10 - penalty*10/12)
+      (the v1.0.0 0-12 band scaled to 0-10).
+    - Vol-regime (5): 0.8<=vol<=1.5 -> 5; >1.5 -> 3.125; <0.8 -> 2.5 (the v1.0.0
+      8/5/4 bands scaled by 5/8, same ordering/shape).
+    - A/D-line (3): ad_line_slope > 0 -> 3 (accumulation); == 0 (flat) -> 2;
+      < 0 -> 0 (distribution).
+    - Upvol (2): upvol_ratio > 0.55 -> 2; in [0.45, 0.55] -> 1; < 0.45 -> 0.
+    - Null sub-component -> "n/a", EXCLUDED and the factor is RENORMALIZED over the
+      present sub-maxes back to 20 (the factor is NOT zeroed -- a missing A/D slope
+      does not blank the whole volume read).
+    - Vertical-rally: ret_15d > 0.12 -> -4 off the (renormalized) factor (floor 0).
     """
     ma200 = tech.get("ma200")
     vol = tech.get("vol_20d_vs_90d")
     ret15 = tech.get("ret_15d")
+    ad_slope = tech.get("ad_line_slope")
+    upvol = tech.get("upvol_ratio")
 
     parts = []
     evaluable = 0
+    present_pts = 0.0   # points earned over PRESENT sub-components
+    present_max = 0.0   # summed max over PRESENT sub-components
 
-    # -- extension ---------------------------------------------------------
+    # -- extension (max 10) ------------------------------------------------
     if last is not None and ma200 not in (None, 0):
         evaluable += 1
         ext = last / ma200 - 1
         penalty = max(0.0, (ext - 0.12) * 100)
-        extension_pts = _clean(max(0.0, 12 - penalty))
+        extension_pts = _clean(max(0.0, _EXT_MAX - penalty * (_EXT_MAX / 12.0)))
+        present_pts += extension_pts
+        present_max += _EXT_MAX
         parts.append(
             f"ext {ext*100:.1f}% (last/ma200 {_fmt(last / ma200)}) "
-            f"-> {_fmt(extension_pts)}/12")
+            f"-> {_fmt(extension_pts)}/{_fmt(_EXT_MAX)}")
     else:
-        extension_pts = 0
-        parts.append("extension: n/a (+0)")
+        extension_pts = None
+        parts.append("extension: n/a")
 
-    # -- volume ------------------------------------------------------------
+    # -- volume regime (max 5) ---------------------------------------------
     if vol is not None:
         evaluable += 1
         if 0.8 <= vol <= 1.5:
-            volume_pts = 8
+            volume_pts = _clean(_VOLREG_MAX)
         elif vol > 1.5:
-            volume_pts = 5
+            volume_pts = _clean(5.0 * (_VOLREG_MAX / 8.0))   # was 5/8 band
         else:  # < 0.8
-            volume_pts = 4
-        parts.append(f"vol_20d_vs_90d {_fmt(vol)} -> {volume_pts}/8")
+            volume_pts = _clean(4.0 * (_VOLREG_MAX / 8.0))   # was 4/8 band
+        present_pts += volume_pts
+        present_max += _VOLREG_MAX
+        parts.append(f"vol_20d_vs_90d {_fmt(vol)} -> {_fmt(volume_pts)}/{_fmt(_VOLREG_MAX)}")
     else:
-        volume_pts = 0
-        parts.append("volume: n/a (+0)")
+        volume_pts = None
+        parts.append("volume: n/a")
 
-    total = extension_pts + volume_pts
+    # -- A/D-line slope (max 3): accumulation vs distribution --------------
+    if ad_slope is not None:
+        evaluable += 1
+        if ad_slope > 0:
+            ad_pts = 3
+        elif ad_slope == 0:
+            ad_pts = 2
+        else:  # < 0
+            ad_pts = 0
+        present_pts += ad_pts
+        present_max += _AD_MAX
+        parts.append(f"ad_line_slope {_fmt(ad_slope)} -> {ad_pts}/{_fmt(_AD_MAX)}")
+    else:
+        ad_pts = None
+        parts.append("ad_line: n/a")
 
-    # -- vertical-rally penalty (off the dimension total) ------------------
+    # -- up/down volume (max 2) --------------------------------------------
+    if upvol is not None:
+        evaluable += 1
+        if upvol > 0.55:
+            upvol_pts = 2
+        elif upvol >= 0.45:   # [0.45, 0.55]
+            upvol_pts = 1
+        else:  # < 0.45
+            upvol_pts = 0
+        present_pts += upvol_pts
+        present_max += _UPVOL_MAX
+        parts.append(f"upvol_ratio {_fmt(upvol)} -> {upvol_pts}/{_fmt(_UPVOL_MAX)}")
+    else:
+        upvol_pts = None
+        parts.append("upvol: n/a")
+
+    # -- renormalize present sub-components back to the factor max (20) -----
+    factor_max = _EXT_MAX + _VOLREG_MAX + _AD_MAX + _UPVOL_MAX  # 20
+    renorm = present_max not in (0.0, factor_max)
+    if present_max <= 0:
+        total = 0.0
+    elif renorm:
+        total = _clean(present_pts / present_max * factor_max)
+        parts.append(
+            f"renormalized over present max {_fmt(present_max)} -> "
+            f"{_fmt(total)}/{_fmt(factor_max)}")
+    else:
+        total = _clean(present_pts)
+
+    # -- vertical-rally penalty (off the factor total) ---------------------
     vertical_penalty = 0
     if ret15 is not None and ret15 > 0.12:
         vertical_penalty = -4
@@ -402,8 +599,12 @@ def score_volume(last, tech) -> dict:
         "arithmetic": "; ".join(parts),
         "inputs": {"extension_points": extension_pts,
                    "volume_points": volume_pts,
+                   "ad_line_points": ad_pts,
+                   "upvol_points": upvol_pts,
                    "vertical_rally_penalty": vertical_penalty,
-                   "ma200": ma200, "vol_20d_vs_90d": vol, "ret_15d": ret15},
+                   "renormalized": renorm,
+                   "ma200": ma200, "vol_20d_vs_90d": vol, "ret_15d": ret15,
+                   "ad_line_slope": ad_slope, "upvol_ratio": upvol},
         "evaluable": evaluable > 0,
     }
 
@@ -524,6 +725,7 @@ def build_module(snapshot, rows, contracts, divergence, justification,
     doc = {
         "skill": SKILL_NAME,
         "rubric_version": RUBRIC_VERSION,
+        "module_note": MODULE_NOTE,
         "ticker": meta.get("ticker"),
         "as_of": build_snapshot._as_of_date(meta.get("as_of_utc")),
         "score": scored["score"],

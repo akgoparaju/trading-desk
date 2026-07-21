@@ -453,7 +453,7 @@ class TestBuildSnapshotFull(unittest.TestCase):
         m = self.snap["meta"]
         self.assertEqual(m["ticker"], "MU")
         self.assertEqual(m["as_of_utc"], AS_OF)
-        self.assertEqual(m["schema_version"], "0.3.1")  # Wave 3A: 0.3.0 -> 0.3.1
+        self.assertEqual(m["schema_version"], "0.3.2")  # Wave 4A: 0.3.1 -> 0.3.2
         self.assertEqual(m["missing"], [])
         self.assertIn("qc", m)
         self.assertTrue(len(m["sources"]) >= 4)
@@ -1333,10 +1333,10 @@ class TestA1EventAwareFields(unittest.TestCase):
         self.assertEqual(og["jump_count_2sigma"],
                          indicators.jump_count_2sigma(gaps))
 
-    def test_schema_version_is_0_3_1(self):
+    def test_schema_version_is_0_3_2(self):
         b = BundleBuilder(self.dir).build_full()
         snap = self._build(b)
-        self.assertEqual(snap["meta"]["schema_version"], "0.3.1")
+        self.assertEqual(snap["meta"]["schema_version"], "0.3.2")
 
 
 # --------------------------------------------------------------------------- #
@@ -1556,6 +1556,180 @@ class TestWave3AInsiderClassification(unittest.TestCase):
         self.assertIsNotNone(ic)
         self.assertFalse(ic["classifier_active"])
         self.assertIsNone(ic["opportunistic_net_usd"])
+
+
+# --------------------------------------------------------------------------- #
+# Wave 4A: technical regime + institutional levels (build_technicals fields)
+# --------------------------------------------------------------------------- #
+
+def _ohlcv(closes, dates=None, vol=1_000_000, range_pct=0.01):
+    """OHLCV rows from a close series (oldest-first). high/low bracket close by
+    ``range_pct``; adjusted_close == close (a clean unadjusted fixture)."""
+    import datetime as _dt
+    if dates is None:
+        day = _dt.date(2026, 7, 15)
+        dates = []
+        while len(dates) < len(closes):
+            if day.weekday() < 5:
+                dates.append(day.isoformat())
+            day -= _dt.timedelta(days=1)
+        dates.reverse()
+    rows = []
+    for i, c in enumerate(closes):
+        rows.append({
+            "date": dates[i], "open": c, "high": c * (1 + range_pct),
+            "low": c * (1 - range_pct), "close": c,
+            "adjusted_close": float(c), "volume": vol,
+        })
+    return rows
+
+
+class TestWave4ATechnicals(unittest.TestCase):
+    """Wave 4A additive fields on build_technicals: adx14, stage, ad_line_slope,
+    upvol_ratio, vwap_52wk_high, vwap_earnings. All pure-OHLCV + null-safe."""
+
+    def test_new_fields_present_and_typed(self):
+        from scripts import build_snapshot as bs
+        # A 300-row uptrend -> every new field computes.
+        closes = [100.0 * (1.003 ** i) for i in range(300)]
+        rows = _ohlcv(closes)
+        block = bs.build_technicals(rows)
+        for key in ("adx14", "stage", "ad_line_slope", "upvol_ratio",
+                    "vwap_52wk_high", "vwap_earnings"):
+            self.assertIn(key, block)
+        self.assertIsInstance(block["adx14"], float)
+        self.assertIn(block["stage"], (1, 2, 3, 4))
+        self.assertIsInstance(block["ad_line_slope"], float)
+        self.assertTrue(0.0 <= block["upvol_ratio"] <= 1.0)
+        self.assertIsInstance(block["vwap_52wk_high"], float)
+
+    def test_adx14_matches_indicator(self):
+        from scripts import build_snapshot as bs
+        from scripts import indicators
+        closes = [100.0 * (1.003 ** i) for i in range(300)]
+        rows = _ohlcv(closes)
+        block = bs.build_technicals(rows)
+        self.assertAlmostEqual(block["adx14"], indicators.adx(rows, 14), places=9)
+
+    def test_upvol_and_ad_slope_match_indicators(self):
+        from scripts import build_snapshot as bs
+        from scripts import indicators
+        closes = [100.0 + 0.05 * i for i in range(120)]
+        rows = _ohlcv(closes)
+        block = bs.build_technicals(rows)
+        self.assertAlmostEqual(block["upvol_ratio"],
+                               indicators.updown_volume(rows, 50), places=9)
+        self.assertAlmostEqual(block["ad_line_slope"],
+                               indicators.ad_line_slope(rows, 20), places=9)
+
+    def test_stage_2_advancing(self):
+        from scripts import build_snapshot as bs
+        # last > ma50 > ma200 with both slopes rising: a clean uptrend.
+        rows = _ohlcv([100.0 * (1.004 ** i) for i in range(300)])
+        self.assertEqual(bs.build_technicals(rows)["stage"], 2)
+
+    def test_stage_4_declining(self):
+        from scripts import build_snapshot as bs
+        # last < ma50 < ma200 with both slopes falling: a clean downtrend.
+        rows = _ohlcv([300.0 * (0.996 ** i) for i in range(300)])
+        self.assertEqual(bs.build_technicals(rows)["stage"], 4)
+
+    def test_stage_3_topping(self):
+        from scripts import build_snapshot as bs
+        from scripts import indicators
+        # Long rise (so ma200 is still rising) then a recent roll-over so price
+        # drops below ma50: stage 3 (topping).
+        closes = [100.0 * (1.004 ** i) for i in range(280)]
+        top = closes[-1]
+        closes += [top * (0.985 ** j) for j in range(1, 21)]  # 20-bar rollover
+        rows = _ohlcv(closes)
+        block = bs.build_technicals(rows)
+        # Preconditions for stage 3: price below ma50, ma200 slope still rising.
+        self.assertLess(closes[-1], block["ma50"])
+        self.assertGreater(block["ma200_slope_20d"], 0)
+        self.assertEqual(block["stage"], 3)
+
+    def test_stage_1_basing_default(self):
+        from scripts import build_snapshot as bs
+        # A flat series: no MA stack ordering + flat slopes -> stage 1 default.
+        rows = _ohlcv([100.0] * 300)
+        self.assertEqual(bs.build_technicals(rows)["stage"], 1)
+
+    def test_vwap_52wk_high_anchored_to_argmax(self):
+        from scripts import build_snapshot as bs
+        from scripts import indicators
+        # Plant the max adjusted_close 30 bars from the end; the VWAP must anchor
+        # to THAT date and equal the indicator over rows on/after it.
+        closes = [100.0 + 0.01 * i for i in range(300)]
+        closes[270] = 500.0  # unambiguous max, inside trailing 252
+        rows = _ohlcv(closes)
+        block = bs.build_technicals(rows)
+        anchor = rows[270]["date"]
+        self.assertAlmostEqual(block["vwap_52wk_high"],
+                               indicators.anchored_vwap(rows, anchor), places=6)
+
+    def test_vwap_earnings_uses_next_earnings_date(self):
+        from scripts import build_snapshot as bs
+        from scripts import indicators
+        closes = [100.0 + 0.05 * i for i in range(300)]
+        rows = _ohlcv(closes)
+        anchor = rows[250]["date"]  # a date that exists in the series
+        block = bs.build_technicals(rows, next_earnings_date=anchor)
+        self.assertAlmostEqual(block["vwap_earnings"],
+                               indicators.anchored_vwap(rows, anchor), places=6)
+
+    def test_vwap_earnings_falls_back_to_reported_quarter(self):
+        from scripts import build_snapshot as bs
+        from scripts import indicators
+        closes = [100.0 + 0.05 * i for i in range(300)]
+        rows = _ohlcv(closes)
+        anchor = rows[240]["date"]
+        earn_q = [{"reportedDate": anchor, "reportedEPS": "1.0"}]
+        # No next_earnings_date -> fall back to the latest reported quarter date.
+        block = bs.build_technicals(rows, next_earnings_date=None, earn_q=earn_q)
+        self.assertAlmostEqual(block["vwap_earnings"],
+                               indicators.anchored_vwap(rows, anchor), places=6)
+
+    def test_vwap_earnings_null_on_future_anchor(self):
+        from scripts import build_snapshot as bs
+        # A future earnings date (after every row) -> honest None, no crash.
+        rows = _ohlcv([100.0 + 0.05 * i for i in range(300)])
+        block = bs.build_technicals(rows, next_earnings_date="2099-01-01")
+        self.assertIsNone(block["vwap_earnings"])
+
+    def test_null_safety_short_series(self):
+        from scripts import build_snapshot as bs
+        # A very short series: fields that need more data are None, no exception.
+        rows = _ohlcv([100.0, 101.0, 102.0])
+        block = bs.build_technicals(rows)
+        self.assertIsNone(block["adx14"])        # < 2n+1 rows
+        self.assertIsNone(block["ad_line_slope"])  # < lookback+1
+        self.assertIsNone(block["upvol_ratio"])    # < n+1
+        self.assertIsNone(block["stage"])          # no ma50/ma200
+        # vwap_52wk_high still computes over the tiny window (has volume).
+        self.assertIsNotNone(block["vwap_52wk_high"])
+
+    def test_full_bundle_carries_wave4a_fields(self):
+        # End-to-end: the standard build_full bundle surfaces the new fields.
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        BundleBuilder(d).build_full()
+        proc = _run_build(d)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        snap = json.load(open(os.path.join(d, f"snapshot_MU_{AS_OF_DATE}.json")))
+        t = snap["technicals"]
+        for key in ("adx14", "stage", "ad_line_slope", "upvol_ratio",
+                    "vwap_52wk_high", "vwap_earnings"):
+            self.assertIn(key, t)
+        self.assertIsNotNone(t["adx14"])
+        self.assertIn(t["stage"], (1, 2, 3, 4))
+        # The fixture's next earnings (2026-09-25) post-dates every row
+        # (last 2026-07-15), so vwap_earnings honestly falls back... but the
+        # earnings-calendar anchor is future AND earn_q latest reportedDate
+        # (2026-07-01) is IN-range -> fallback would apply only if next date is
+        # absent. Here next_earnings_date is present+future -> None is correct.
+        self.assertIsNone(t["vwap_earnings"])
+        self.assertIsNotNone(t["vwap_52wk_high"])
 
 
 if __name__ == "__main__":
