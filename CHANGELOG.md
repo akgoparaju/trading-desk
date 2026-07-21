@@ -1,6 +1,36 @@
 # Changelog
 
-## Unreleased — 2026-07-21 · Wave 4C: C-ID referential-integrity gate on judgment flags (B29)
+## 0.14.0 — 2026-07-21 · Analysis-depth waves (R1–R5, B29) + confidence layer + efficiency hardening
+
+The quality-review roadmap, shipped. Every evidence module gained its institutional-depth pass and a
+scored **confidence badge**, and the efficiency audit's top levers landed. Snapshot schema **0.2.1 →
+0.3.3**; rubrics **technical/sentiment/risk/composite → 1.1.0**, **fundamental 1.2.0**, **options
+1.1.0**, **confidence-v1.0.0**. Nine waves + a code-review pass, each validated on real data (BE
+throughout, plus a fresh GOOG end-to-end).
+
+**⚠ Every score-moving rubric is PROVISIONAL** (Philosophy A): shipped with a versioned default + a
+pre-registered falsifier, to be **ratified after the B9 calibration set (5–10 anchored names)** runs.
+Module notes stamp PROVISIONAL and now render in the report footer. The confidence layer keeps a
+provisional/shallow/degraded module from over-claiming (weakest-link `min` of source/depth/staleness).
+
+**What landed:** R1 event-aware risk (event-proximity + tail scoring), R2 composite/trade-plan honesty
+(base-rate-anchored probabilities, auto-tension, bull triangulation, honest Kelly + expression), R3
+sentiment dynamics (25Δ skew, DTC, news-heat, insider routine-vs-opportunistic — validated activating
+on GOOG's 42-mo history), R4 event-vol-aware options (verified Black-Scholes pricer, event-vol
+extraction, ex-earnings RV wired into the vol gate, IV-crush simulation, skew routing, candidate
+breadth), R5 technical regime (ADX/Weinstein-stage guards, anchored VWAP, A/D + up/down volume), B29
+C-ID referential-integrity gate on all judgment flags, the confidence/provenance layer, and Wave-0
+efficiency + correctness fixes (IV-history batch, model-tier pin, QF2–QF5). A code-review pass fixed
+three integration gaps (ex-earnings-RV wiring, provisional-note rendering, invalidation C-ID
+alignment) and a real render_report crash on the `weight_set` sensitivity key.
+
+**Deferred (data/heuristic-blocked, disclosed):** short-campaign scoring (needs a short-seller entity
+list), sector-relative RS (needs a sector-ETF feed), the T3 brief-transclusion efficiency win. See
+`docs/reviews/2026-07-21-outstanding-tasks.md`.
+
+### Per-wave detail
+
+### 2026-07-21 · Wave 4C: C-ID referential-integrity gate on judgment flags (B29)
 
 The cross-cutting governance close-out. The review's "judgments must cite context, not narrate
 alongside it" becomes a **checking artifact**, not prose. **Moves no score** — a report-time validator.
@@ -20,7 +50,7 @@ Suite: 1469 passed.
   judgment cited no context finding. That ungrounded judgment is exactly what the 2026-07-19 review
   flagged; the gate would now force it grounded. Orphan-C-ID and valid-C-ID paths both confirmed.
 
-## Unreleased — 2026-07-21 · Wave 4B: event-vol-aware options (`options-v1.1.0`, PROVISIONAL)
+### 2026-07-21 · Wave 4B: event-vol-aware options (`options-v1.1.0`, PROVISIONAL)
 
 R4 — the options module goes event-vol-aware (Philosophy A). The options module is the expression
 layer (feeds `trade_plan.expression`), so no composite score moves. Snapshot schema **0.3.2 → 0.3.3**.
@@ -47,7 +77,7 @@ Suite: 1446 passed.
   stand-aside on a genuinely illiquid chain.
 - Expired-expiry drop was already shipped (QF3). rubric → 1.1.0 PROVISIONAL; falsifier in the SKILL.
 
-## Unreleased — 2026-07-21 · Wave 4A: technical regime + institutional levels (`technical-v1.1.0`, PROVISIONAL)
+### 2026-07-21 · Wave 4A: technical regime + institutional levels (`technical-v1.1.0`, PROVISIONAL)
 
 R5 — regime-conditional technicals (Philosophy A). **Top-level weights UNCHANGED** (Trend 30 /
 Momentum 25 / Structure 25 / Volume 20); regime enters as a GUARD, not a new factor. Snapshot schema
@@ -70,7 +100,7 @@ web-capped — the honest promotion). Suite: 1409 passed.
   ma200 still rising), adx 21, A/D slope −0.14 (distribution), upvol 0.44 — all correctly bearish;
   technical 54.19 → 51.19; depth badge HIGH, overall MEDIUM (staleness axis honest on the 7/17 print).
 
-## Unreleased — 2026-07-21 · Wave 3B: composite/trade-plan honesty (`composite-v1.1.0` + `tradeplan-v1.1.0`, PROVISIONAL)
+### 2026-07-21 · Wave 3B: composite/trade-plan honesty (`composite-v1.1.0` + `tradeplan-v1.1.0`, PROVISIONAL)
 
 R2 — the orchestration-layer honesty fixes (Philosophy A). **No evidence-module score changes**;
 these are disclosure flags + presentation. Both rubrics → 1.1.0. Suite: 1356 passed.
@@ -93,7 +123,7 @@ these are disclosure flags + presentation. Both rubrics → 1.1.0. Suite: 1356 p
   (base-rate/tension thresholds; the min-triangulation formula). Provisional defaults: ±5% bins,
   25pp deviation, N≥4, 25-pt tension spread, min(PT, comps_high).
 
-## Unreleased — 2026-07-21 · Wave 3A: sentiment positioning dynamics (`sentiment-v1.1.0`, PROVISIONAL)
+### 2026-07-21 · Wave 3A: sentiment positioning dynamics (`sentiment-v1.1.0`, PROVISIONAL)
 
 R3 — the positioning/flow/news signals a desk reads, scored (Philosophy A: provisional versioned
 defaults + pre-registered falsifier, ratify after B9). **Top-level weights UNCHANGED** (Street 25 /
@@ -119,7 +149,7 @@ score movement is small on a provisional wave. Snapshot schema **0.3.0 → 0.3.1
 - Real-data BE: sentiment 55 → 58.75, composite 45.28 → 45.88, **grade C held**; skew 0.22 (fear),
   dtc 1.96 (liquid, not crowded), insider classifier gracefully inactive (63-day AV window).
 
-## Unreleased — 2026-07-20 · Wave 2 Part A: event-aware risk DATA + disclosure (R1, scoring gated)
+### 2026-07-20 · Wave 2 Part A: event-aware risk DATA + disclosure (R1, scoring gated)
 
 The deterministic half of R1. The event/tail signals a desk actually uses are now COMPUTED and
 SURFACED in the risk module — closing the "collected then discarded" gap for the deterministic
@@ -154,7 +184,7 @@ Snapshot schema **0.2.2 → 0.3.0**. Suite: 1220 passed, 26 skipped.
   (short-seller entity list + detection heuristic — a risk gate acting on a false positive needs
   sign-off). Confidence DEPTH for risk stays MEDIUM until the scored re-weight lands.
 
-## Unreleased — 2026-07-20 · Wave 1: confidence / provenance layer (`confidence-v1.0.0`)
+### 2026-07-20 · Wave 1: confidence / provenance layer (`confidence-v1.0.0`)
 
 Every report now ships a **per-module confidence badge + a composite roll-up**, computed
 DETERMINISTICALLY (never LLM judgment) as `min(source, depth, staleness)` — the weakest link.
@@ -183,7 +213,7 @@ event fields deferred to Wave 2 with R1. Suite: 1187 passed, 26 skipped.
   appendix. `confidence-v1.0.0` travels in the footer. `report_qc` unchanged (verified badges pass
   number_provenance); a regression test pins that.
 
-## Unreleased — 2026-07-20 · Wave 0: efficiency & correctness hardening
+### 2026-07-20 · Wave 0: efficiency & correctness hardening
 
 Version TBD (release gated with the user). The efficiency audit + quality review's quick
 fixes, executed as Wave 0 — cheap, pure-win speed and honesty fixes that move NO score,
