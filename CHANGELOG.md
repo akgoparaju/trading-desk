@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased — 2026-07-20 · Wave 1: confidence / provenance layer (`confidence-v1.0.0`)
+
+Every report now ships a **per-module confidence badge + a composite roll-up**, computed
+DETERMINISTICALLY (never LLM judgment) as `min(source, depth, staleness)` — the weakest link.
+This makes "no MCP → medium/low" a first-class, versioned artifact and turns rubric maturity
+into a visible honesty signal. **Disclosure only — no score, weight, EV, or size changes.**
+No snapshot schema change (reads existing fields incl. QF2's `meta.latest_trading_day`); R1's
+event fields deferred to Wave 2 with R1. Suite: 1187 passed, 26 skipped.
+
+- **New `scripts/confidence.py`** (`CONFIDENCE_VERSION = "1.0.0"`): `compute_module()` + `rollup()`,
+  pure/ordinal (the only arithmetic is a level `min`). Three axes:
+  - **SOURCE** — AV-premium/script → HIGH; degraded, a web-by-design scored input (sentiment's
+    `short_interest`), fundamental web-transcribed fields, or stooq series → MEDIUM; `web_fallback`
+    or absent core inputs → LOW.
+  - **DEPTH** (a governed, cited belief — the reviewable one) — fundamental anchored = HIGH,
+    compressed = MEDIUM; technical/sentiment/risk at rubric 1.0.0 = MEDIUM (promote to HIGH at 1.1.0
+    when their R-wave lands: R5 technical / R3 sentiment / R1 risk). Cites the 2026-07-19 quality review.
+  - **STALENESS** — `as_of == latest_trading_day` → HIGH; weekend/stale print or in-window refresh
+    reuse → MEDIUM; freshness unverifiable (null `latest_trading_day`) or over-window reuse → LOW.
+- **Wired into all four evidence scorers + the composite.** Each `module_*.json` now carries a
+  `confidence` block; `score_composite` reads them, carries them into the dimension rows, and rolls
+  up `min` over the four evidence dimensions (thesis-conviction excluded; a renormalized-away
+  dimension skipped). 51-test `tests/test_confidence.py` + extended scorer/composite tests.
+- **Rendered as badges** (`● HIGH` / `◐ MEDIUM` / `○ LOW`, digit-free tags to stay QC-clean):
+  per-dimension in `render_report._score_headline` + the roll-up on the call line; same in the
+  docket (`render_pdf`) with a scripted `confidence-v1.0.0` note + depth table in the METHODOLOGY
+  appendix. `confidence-v1.0.0` travels in the footer. `report_qc` unchanged (verified badges pass
+  number_provenance); a regression test pins that.
+
 ## Unreleased — 2026-07-20 · Wave 0: efficiency & correctness hardening
 
 Version TBD (release gated with the user). The efficiency audit + quality review's quick

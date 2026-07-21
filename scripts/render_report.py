@@ -203,13 +203,27 @@ def build_header_block(snapshot):
 
 
 def build_the_call(composite):
-    """The call line + a tension slot."""
+    """The call line + a tension slot.
+
+    Appends the composite confidence roll-up badge when the composite carries a
+    ``confidence`` block.  Badge text is word-only (digit-free) to pass QC.
+    """
     grade = composite.get("grade", "?")
     action = composite.get("action", "?")
     score = composite.get("score")
     profile = composite.get("profile", "?")
     line = (f"**{grade} — {action}** (composite {_fmt(score)}/100, "
             f"{profile} profile)")
+    # Roll-up confidence badge (word-only).
+    conf = composite.get("confidence") if isinstance(composite, dict) else None
+    if isinstance(conf, dict) and conf.get("level"):
+        glyph = _confidence_glyph(conf.get("level"))
+        # The composite rollup block carries a top-level 'why' (not per-axis).
+        why = conf.get("why", "")
+        if why:
+            line += f" · Confidence: {glyph} ({why})"
+        else:
+            line += f" · Confidence: {glyph}"
     return line + "\n\n<!-- SLOT:tension -->"
 
 
@@ -345,11 +359,51 @@ def build_page1(snapshot, composite, tradeplan):
 # Page 2 -- Evidence.
 # --------------------------------------------------------------------------- #
 
+def _confidence_glyph(level):
+    """Unicode glyph + level text for a confidence level string (digit-free)."""
+    return {"HIGH": "● HIGH", "MEDIUM": "◐ MEDIUM", "LOW": "○ LOW"}.get(
+        str(level).upper(), "○ UNKNOWN")
+
+
+def _confidence_badge(module):
+    """Per-dimension confidence badge string from module.get('confidence').
+
+    Returns a space-prefixed '· <glyph> <LEVEL> (<why>)' string, or '' when
+    the confidence block is absent (graceful for older bundles). The why tag is
+    the weakest-axis why from the block (already digit-free by confidence.py contract).
+    """
+    if not isinstance(module, dict):
+        return ""
+    conf = module.get("confidence")
+    if not isinstance(conf, dict):
+        return ""
+    level = conf.get("level")
+    if level is None:
+        return ""
+    # The weakest-axis why: the axis whose level == the module level.
+    why = None
+    for axis in ("source", "depth", "staleness"):
+        ax = conf.get(axis)
+        if isinstance(ax, dict) and ax.get("level") == level:
+            why = ax.get("why")
+            break
+    glyph = _confidence_glyph(level)
+    if why:
+        return f" · {glyph} ({why})"
+    return f" · {glyph}"
+
+
 def _score_headline(label, module, slot_suffix):
-    """A scripted score-headline line for an evidence dimension."""
+    """A scripted score-headline line for an evidence dimension.
+
+    Appends a per-dimension confidence badge when the module carries a
+    ``confidence`` block (graceful for older bundles without one).
+    Badge text is word-only (digit-free) so report_qc number_provenance passes.
+    """
     score = module.get("score") if isinstance(module, dict) else None
     ver = module.get("rubric_version", "?") if isinstance(module, dict) else "?"
-    return f"### {label} — {_fmt(score)}/100 (rubric v{ver})"
+    badge = _confidence_badge(module)
+    return f"### {label} — {_fmt(score)}/100 (rubric v{ver}){badge}"
 
 
 def build_technical_evidence(technical):
@@ -656,6 +710,25 @@ def build_integrity_footer(snapshot, modules):
     schema = meta.get("schema_version")
     if schema:
         ver_bits.append(f"snapshot schema {schema}")
+    # confidence-version travels in the footer (rubric-version-travels contract).
+    # Read from any module's confidence block; fall back to the module constant.
+    conf_ver = None
+    for key in ("module_technical", "module_risk", "module_sentiment",
+                "module_fundamental", "module_composite"):
+        m = modules.get(key)
+        if isinstance(m, dict):
+            c = m.get("confidence")
+            if isinstance(c, dict) and c.get("version"):
+                conf_ver = c["version"]
+                break
+    if conf_ver is None:
+        try:
+            from scripts import confidence as _conf_mod
+            conf_ver = _conf_mod.CONFIDENCE_VERSION
+        except ImportError:
+            pass
+    if conf_ver:
+        ver_bits.append(f"confidence-v{conf_ver}")
     ver_line = "; ".join(ver_bits)
 
     plugin_ver = _plugin_version()

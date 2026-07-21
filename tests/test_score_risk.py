@@ -692,6 +692,14 @@ class TestCLI(unittest.TestCase):
         self.assertIn("downside_map", doc["tables"])
         self.assertIn("vol_profile", doc["tables"])
         self.assertIsNone(doc["signal"])
+        # confidence-v1.0.0: well-formed block; depth MEDIUM at rubric 1.0.0.
+        conf = doc["confidence"]
+        self.assertEqual(set(conf),
+                         {"level", "source", "depth", "staleness", "rule",
+                          "version"})
+        self.assertIn(conf["level"], ("LOW", "MEDIUM", "HIGH"))
+        self.assertEqual(conf["version"], "1.0.0")
+        self.assertIn(conf["depth"]["level"], ("MEDIUM", "HIGH"))
         for s in doc["subscores"]:
             self.assertIn("arithmetic", s)
             self.assertIn("inputs", s)

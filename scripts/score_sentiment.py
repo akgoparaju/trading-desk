@@ -59,7 +59,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from scripts import build_snapshot
+from scripts import build_snapshot, confidence
 
 RUBRIC_VERSION = "1.0.0"
 SKILL_NAME = "sentiment-positioning"
@@ -661,8 +661,13 @@ def _days_to_earnings(snapshot):
 
 def build_module(snapshot, rating_actions, rating_actions_justification,
                  inst_flow, inst_flow_justification,
-                 insider_baseline, insider_baseline_justification) -> dict:
-    """Build the full module_sentiment.json document from parsed inputs."""
+                 insider_baseline, insider_baseline_justification,
+                 bundle_dir=None) -> dict:
+    """Build the full module_sentiment.json document from parsed inputs.
+
+    ``bundle_dir`` is threaded to the confidence layer so the staleness axis can
+    read a ``refresh_plan.json`` reuse signal when present (absent on fresh runs).
+    """
     sentiment = snapshot.get("sentiment", {}) if isinstance(snapshot, dict) else {}
     tech = snapshot.get("technicals", {}) if isinstance(snapshot, dict) else {}
     bench = snapshot.get("benchmark", {}) if isinstance(snapshot, dict) else {}
@@ -727,6 +732,10 @@ def build_module(snapshot, rating_actions, rating_actions_justification,
             pre_earnings_revisions_warning
             + (" | " + existing if existing else "")
         )
+    # Confidence / provenance layer (confidence-v1.0.0): deterministic, disclosure-
+    # only. Sentiment scores short_interest (a by-design web input) so its SOURCE
+    # axis is MEDIUM at best -- the confidence layer encodes that honestly.
+    doc["confidence"] = confidence.compute_module(doc, snapshot, bundle_dir)
     return doc
 
 
@@ -788,7 +797,8 @@ def main(argv=None):
     doc = build_module(snapshot, args.rating_actions,
                        args.rating_actions_justification,
                        args.inst_flow, args.inst_flow_justification,
-                       args.insider_baseline, args.insider_baseline_justification)
+                       args.insider_baseline, args.insider_baseline_justification,
+                       bundle_dir=args.bundle)
 
     out = args.out or os.path.join(args.bundle, "module_sentiment.json")
     with open(out, "w") as fh:

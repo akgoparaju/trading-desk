@@ -1093,6 +1093,9 @@ class TestModeDisclosure(unittest.TestCase):
         self.assertEqual(doc["fundamental_mode"], "coverage_anchored_pass")
         self.assertIn("coverage-anchored", doc["mode_note"])
         self.assertNotIn("not applied", doc["mode_note"])
+        # confidence-v1.0.0: anchored coverage -> depth HIGH -> overall HIGH.
+        self.assertEqual(doc["confidence"]["depth"]["level"], "HIGH")
+        self.assertEqual(doc["confidence"]["level"], "HIGH")
 
 
 # --------------------------------------------------------------------------- #
@@ -1172,6 +1175,14 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(doc["flags"],
                          {"moat": None, "moat_justification": None})
         self.assertIsNone(doc["signal"])
+        # confidence-v1.0.0: well-formed block. Compressed pass -> depth MEDIUM.
+        conf = doc["confidence"]
+        self.assertEqual(set(conf),
+                         {"level", "source", "depth", "staleness", "rule",
+                          "version"})
+        self.assertIn(conf["level"], ("LOW", "MEDIUM", "HIGH"))
+        self.assertEqual(conf["version"], "1.0.0")
+        self.assertEqual(conf["depth"]["level"], "MEDIUM")
         for s in doc["subscores"]:
             self.assertIn("arithmetic", s)
             self.assertIn("inputs", s)

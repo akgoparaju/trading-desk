@@ -45,7 +45,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from scripts import build_snapshot, chain, levels
+from scripts import build_snapshot, chain, confidence, levels
 
 RUBRIC_VERSION = "1.0.0"
 SKILL_NAME = "technical-analysis"
@@ -506,8 +506,13 @@ def _find_snapshot(bundle):
     return max(matches, key=os.path.getmtime)
 
 
-def build_module(snapshot, rows, contracts, divergence, justification) -> dict:
-    """Build the full module_technical.json document from parsed inputs."""
+def build_module(snapshot, rows, contracts, divergence, justification,
+                 bundle_dir=None) -> dict:
+    """Build the full module_technical.json document from parsed inputs.
+
+    ``bundle_dir`` is threaded to the confidence layer so the staleness axis can
+    read a ``refresh_plan.json`` reuse signal when present (absent on fresh runs).
+    """
     price = snapshot.get("price", {}) if isinstance(snapshot, dict) else {}
     tech = snapshot.get("technicals", {}) if isinstance(snapshot, dict) else {}
     meta = snapshot.get("meta", {}) if isinstance(snapshot, dict) else {}
@@ -534,6 +539,9 @@ def build_module(snapshot, rows, contracts, divergence, justification) -> dict:
     }
     if scored["renormalization_note"]:
         doc["renormalization_note"] = scored["renormalization_note"]
+    # Confidence / provenance layer (confidence-v1.0.0): deterministic, disclosure-
+    # only, computed from source/depth/staleness of THIS module's own doc + snapshot.
+    doc["confidence"] = confidence.compute_module(doc, snapshot, bundle_dir)
     return doc
 
 
@@ -578,7 +586,8 @@ def main(argv=None):
         return 2
 
     doc = build_module(snapshot, rows, contracts,
-                       args.divergence, args.divergence_justification)
+                       args.divergence, args.divergence_justification,
+                       bundle_dir=args.bundle)
 
     out = args.out or os.path.join(args.bundle, "module_technical.json")
     with open(out, "w") as fh:

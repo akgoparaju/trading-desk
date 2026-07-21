@@ -783,7 +783,8 @@ class TestAssembleMethodology(unittest.TestCase):
         kinds = [b["kind"] for b in blocks]
         self.assertEqual(kinds, ["rubric_versions", "composite_weights",
                                  "valuation_formula", "sector_scale",
-                                 "conventions", "governance"])
+                                 "conventions", "governance",
+                                 "confidence_layer"])
 
     def test_snapshot_mode_maxima_and_peg_scored(self):
         # snapshot mode -> 20/15/15 maxima with PEG SCORED (no display line).
@@ -931,6 +932,28 @@ class TestAssembleMethodology(unittest.TestCase):
         self.assertIn("pre-registered", joined)
         self.assertIn("ratification", joined)
         self.assertIn("append-only", joined)
+
+    def test_confidence_layer_block_present_and_pinned(self):
+        """Wave 1: assemble_methodology emits a confidence_layer block pinned from
+        _confidence_mod constants so the METHODOLOGY appendix cannot drift from the
+        rubric of record."""
+        from scripts import confidence as _conf_mod
+        blocks = rp.assemble_methodology(
+            self._docs(_fundamental_doc(), _composite_doc()), None)
+        cl = self._block(blocks, "confidence_layer")
+        # Version and rule are pinned from the module.
+        self.assertEqual(cl["version"], _conf_mod.CONFIDENCE_VERSION)
+        self.assertEqual(cl["rule"], _conf_mod.RULE)
+        # Depth table rows are populated.
+        self.assertGreater(len(cl["depth_rows"]), 0)
+        # Every why tag in the depth table is digit-free (QC contract).
+        import re
+        _NUM_RE = re.compile(r"\$?-?\d[\d,]*\.?\d*%?")
+        for module_name, discriminator, level, why in cl["depth_rows"]:
+            self.assertFalse(_NUM_RE.search(why),
+                             "digit found in depth why tag %r" % why)
+        # The block title carries the version string.
+        self.assertIn(_conf_mod.CONFIDENCE_VERSION, cl["title"])
 
 
 # --------------------------------------------------------------------------- #

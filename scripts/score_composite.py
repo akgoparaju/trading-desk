@@ -55,7 +55,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from scripts import build_snapshot, ev_kelly
+from scripts import build_snapshot, confidence, ev_kelly
 
 RUBRIC_VERSION = "1.0.0"
 SKILL_NAME = "composite-score"
@@ -323,41 +323,60 @@ def score_composite(module_scores, thesis_conviction_score, profile,
     Renormalization on missing dimensions works IDENTICALLY under custom weights:
     the same drop-and-rescale-to-1 runs whatever the weight column is.
 
-    Returns {"score", "dimensions": [...rows...], "renormalization_note"}.
+    Returns {"score", "dimensions": [...rows...], "renormalization_note",
+    "confidence"}. ``confidence`` is the roll-up (min over the PRESENT evidence
+    dimensions' per-module confidence blocks -- confidence-v1.0.0); a
+    renormalized-away evidence dimension contributes None and thesis-conviction is
+    excluded (no data provenance).
     """
     weights = weights if weights is not None else WEIGHTS[profile]
 
-    # Assemble (name, raw_score, weight, source) for present dimensions.
+    # Assemble (name, raw_score, weight, source, module_confidence) for present dims.
     present = []
     for name, source in _EVIDENCE_DIMENSIONS:
         if name in module_scores and module_scores[name] is not None:
             raw = module_scores[name].get("score")
             if raw is not None:
-                present.append((name, raw, weights[name], source))
-    # thesis conviction is always present.
+                mod_conf = module_scores[name].get("confidence")
+                present.append((name, raw, weights[name], source, mod_conf))
+    # thesis conviction is always present (no data provenance -> confidence n/a).
     present.append(("thesis_conviction", thesis_conviction_score,
-                    weights["thesis_conviction"], "computed"))
+                    weights["thesis_conviction"], "computed", None))
 
     excluded = [name for name, _ in _EVIDENCE_DIMENSIONS
                 if name not in module_scores or module_scores[name] is None
                 or module_scores[name].get("score") is None]
 
-    weight_sum = sum(w for _, _, w, _ in present)
+    weight_sum = sum(w for _, _, w, _, _ in present)
 
     dimensions = []
     composite = 0.0
-    for name, raw, weight, source in present:
+    # Per-evidence-dimension confidence blocks for the roll-up, stamped with the
+    # dimension name so the driver names the weakest dimension(s).
+    dim_confidences = []
+    for name, raw, weight, source, mod_conf in present:
         w_renorm = weight / weight_sum if weight_sum else 0.0
         contribution = w_renorm * raw
         composite += contribution
-        dimensions.append({
+        row = {
             "name": name,
             "score": _clean(raw),
             "weight": _clean(weight),
             "weight_renormalized": _clean(w_renorm),
             "contribution": _clean(contribution),
             "source": source,
-        })
+            # carry the per-module confidence block onto the row (n/a for
+            # thesis_conviction, which carries no data provenance).
+            "confidence": mod_conf if mod_conf is not None else "n/a",
+        }
+        dimensions.append(row)
+        # thesis-conviction is EXCLUDED from the roll-up (no data provenance);
+        # a renormalized-away evidence dim is simply absent from ``present`` so it
+        # contributes None to the min (renormalization contract).
+        if name != "thesis_conviction" and isinstance(mod_conf, dict):
+            stamped = dict(mod_conf)
+            stamped["dimension"] = name
+            dim_confidences.append(stamped)
 
     note = None
     if excluded:
@@ -368,6 +387,7 @@ def score_composite(module_scores, thesis_conviction_score, profile,
         "score": _clean(composite),
         "dimensions": dimensions,
         "renormalization_note": note,
+        "confidence": confidence.rollup(dim_confidences),
     }
 
 
@@ -536,6 +556,10 @@ def build_module(snapshot, module_scores, scenarios, scenario_reasoning, profile
         "weight_set": weight_set,
         "score": composite["score"],
         "grade": grade,
+        # Roll-up confidence (confidence-v1.0.0): min over the PRESENT evidence
+        # dimensions' per-module confidence; renormalized-away dims + thesis-
+        # conviction are excluded. Disclosure-only -- does not move any number.
+        "confidence": composite["confidence"],
         "action": action,
         "dimensions": composite["dimensions"],
         "thesis_conviction": {

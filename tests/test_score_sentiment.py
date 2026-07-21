@@ -600,6 +600,15 @@ class TestCLI(unittest.TestCase):
         self.assertIn("momentum_vs_spy", doc["tables"])
         self.assertIn("hedging_cost_note", doc["tables"])
         self.assertIsNone(doc["signal"])
+        # confidence-v1.0.0: well-formed block. Sentiment SOURCE is MEDIUM at best
+        # (short_interest is a by-design web input), so overall <= MEDIUM.
+        conf = doc["confidence"]
+        self.assertEqual(set(conf),
+                         {"level", "source", "depth", "staleness", "rule",
+                          "version"})
+        self.assertIn(conf["level"], ("LOW", "MEDIUM"))
+        self.assertEqual(conf["version"], "1.0.0")
+        self.assertIn(conf["source"]["level"], ("LOW", "MEDIUM"))
         for s in doc["subscores"]:
             self.assertIn("arithmetic", s)
             self.assertIn("inputs", s)

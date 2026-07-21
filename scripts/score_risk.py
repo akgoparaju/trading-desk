@@ -84,7 +84,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from scripts import build_snapshot, levels
+from scripts import build_snapshot, confidence, levels
 
 RUBRIC_VERSION = "1.0.0"
 SKILL_NAME = "risk-analytics"
@@ -689,12 +689,16 @@ def _find_snapshot(bundle):
     return max(matches, key=os.path.getmtime)
 
 
-def build_module(snapshot, ladder, stress_pct, top_risk, anchors=None) -> dict:
+def build_module(snapshot, ladder, stress_pct, top_risk, anchors=None,
+                 bundle_dir=None) -> dict:
     """Build the full module_risk.json document from parsed inputs + ladder.
 
     ``anchors`` (a validated valuation_anchors dict) switches the downside floor
     to ANCHORED mode (dcf_bear); absent, the snapshot pe-median floor is used. The
     active mode is disclosed at the top level as ``downside_floor_mode``.
+
+    ``bundle_dir`` is threaded to the confidence layer so the staleness axis can
+    read a ``refresh_plan.json`` reuse signal when present (absent on fresh runs).
     """
     price = snapshot.get("price", {}) if isinstance(snapshot, dict) else {}
     tech = snapshot.get("technicals", {}) if isinstance(snapshot, dict) else {}
@@ -744,6 +748,9 @@ def build_module(snapshot, ladder, stress_pct, top_risk, anchors=None) -> dict:
     }
     if scored["renormalization_note"]:
         doc["renormalization_note"] = scored["renormalization_note"]
+    # Confidence / provenance layer (confidence-v1.0.0): deterministic, disclosure-
+    # only, computed from source/depth/staleness of THIS module's own doc + snapshot.
+    doc["confidence"] = confidence.compute_module(doc, snapshot, bundle_dir)
     return doc
 
 
@@ -827,7 +834,7 @@ def main(argv=None):
     ladder = module_tech.get("ladder") or []
 
     doc = build_module(snapshot, ladder, args.stress_pct, args.top_risk,
-                       anchors=anchors)
+                       anchors=anchors, bundle_dir=args.bundle)
 
     out = args.out or os.path.join(args.bundle, "module_risk.json")
     with open(out, "w") as fh:

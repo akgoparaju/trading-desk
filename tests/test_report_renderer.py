@@ -1370,5 +1370,215 @@ class TestQF5SentimentPreEarningsWarning(unittest.TestCase):
         self.assertIsNotNone(doc["flags"]["revisions_null_pre_earnings_warning"])
 
 
+# --------------------------------------------------------------------------- #
+# Wave 1: Confidence badge render + QC regression tests (Step 6).
+# --------------------------------------------------------------------------- #
+
+def _confidence_block(level, source_level, source_why,
+                      depth_level, depth_why,
+                      staleness_level, staleness_why):
+    """Helper: a well-formed per-module confidence block (mirrors confidence.py output).
+
+    ``level`` is the min(source, depth, staleness); each axis carries its own level
+    and why tag so the weakest-axis resolution in _confidence_badge works correctly.
+    """
+    return {
+        "level": level,
+        "source": {"level": source_level, "why": source_why},
+        "depth": {"level": depth_level, "why": depth_why},
+        "staleness": {"level": staleness_level, "why": staleness_why},
+        "rule": "min(source, depth, staleness)",
+        "version": "1.0.0",
+    }
+
+
+def _composite_confidence_block(level, why):
+    """Helper: a well-formed composite roll-up confidence block."""
+    return {
+        "level": level,
+        "why": why,
+        "rule": "min over evidence dimensions",
+        "version": "1.0.0",
+    }
+
+
+def _inject_confidence_blocks(dir_):
+    """Inject well-formed confidence blocks into all module JSONs in a bundle dir.
+
+    Uses MEDIUM for all evidence dimensions (realistic for a premium-AV run at
+    rubric 1.0.0 with standard depth).  The why tags are verbatim from
+    confidence.py — word-only (digit-free).
+    """
+    # Per-module confidence blocks (matching confidence.py output for a fresh
+    # alpha_vantage premium run at rubric 1.0.0 with standard depth).
+    # Axis levels mirror real compute_module() output: source=HIGH for technical/risk,
+    # depth=MEDIUM for all (rubric 1.0.0, pre-R-wave), staleness=HIGH (fresh print),
+    # sentiment source=MEDIUM (web short-interest by design).
+    module_confs = {
+        "module_technical.json": _confidence_block(
+            "MEDIUM",
+            "HIGH", "AV premium",
+            "MEDIUM", "pre-regime",
+            "HIGH", "fresh print"),
+        "module_risk.json": _confidence_block(
+            "MEDIUM",
+            "HIGH", "AV premium",
+            "MEDIUM", "pre-event-aware",
+            "HIGH", "fresh print"),
+        "module_sentiment.json": _confidence_block(
+            "MEDIUM",
+            "MEDIUM", "AV premium; web short-interest",
+            "MEDIUM", "pre-positioning-dynamics",
+            "HIGH", "fresh print"),
+        "module_fundamental.json": _confidence_block(
+            "MEDIUM",
+            "HIGH", "coverage + AV",
+            "MEDIUM", "snapshot pass",
+            "MEDIUM", "snapshot pass"),
+    }
+    # Roll-up for composite: MEDIUM (all evidence dims are MEDIUM here).
+    comp_conf = _composite_confidence_block(
+        "MEDIUM",
+        "MEDIUM -- technical pre-regime; sentiment web short-interest",
+    )
+    for fname, conf in module_confs.items():
+        path = os.path.join(dir_, fname)
+        if os.path.isfile(path):
+            with open(path) as fh:
+                doc = json.load(fh)
+            doc["confidence"] = conf
+            with open(path, "w") as fh:
+                json.dump(doc, fh)
+    comp_path = os.path.join(dir_, "module_composite.json")
+    if os.path.isfile(comp_path):
+        with open(comp_path) as fh:
+            doc = json.load(fh)
+        doc["confidence"] = comp_conf
+        with open(comp_path, "w") as fh:
+            json.dump(doc, fh)
+
+
+class TestConfidenceBadgeRender(unittest.TestCase):
+    """Step 6 — render/QC integration tests for the Wave 1 confidence badge layer.
+
+    Asserts:
+    - per-dimension badge text appears on each evidence dimension headline;
+    - the roll-up badge appears on the call line;
+    - a rendered report carrying badges passes report_qc exit 0
+      (number_provenance clean — all badge tags are digit-free).
+    """
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        _mk_bundle(self.d)
+        _inject_confidence_blocks(self.d)
+        _render(self.d)
+        report = _find_report(self.d)
+        self.assertIsNotNone(report, "report not written")
+        with open(report) as fh:
+            self.text = fh.read()
+        self.report = report
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    # -- Per-dimension headlines carry a badge --------------------------------
+
+    def test_technical_headline_has_badge(self):
+        # The technical headline must carry the MEDIUM badge with the depth why-tag
+        # (depth = MEDIUM pre-regime is the weakest for a premium AV run).
+        self.assertIn("◐ MEDIUM", self.text)
+        # The technical-specific depth why must appear on a line starting with ###
+        # Technical.
+        for line in self.text.splitlines():
+            if line.startswith("### Technical"):
+                self.assertIn("◐ MEDIUM", line, "no badge on Technical headline")
+                self.assertIn("pre-regime", line, "why tag missing on Technical headline")
+                break
+        else:
+            self.fail("### Technical headline not found")
+
+    def test_risk_headline_has_badge(self):
+        for line in self.text.splitlines():
+            if line.startswith("### Risk"):
+                self.assertIn("◐ MEDIUM", line, "no badge on Risk headline")
+                self.assertIn("pre-event-aware", line,
+                              "why tag missing on Risk headline")
+                break
+        else:
+            self.fail("### Risk headline not found")
+
+    def test_sentiment_headline_has_badge(self):
+        for line in self.text.splitlines():
+            if "Sentiment" in line and line.startswith("### "):
+                self.assertIn("◐ MEDIUM", line, "no badge on Sentiment headline")
+                # Sentiment why resolves to 'AV premium; web short-interest'
+                # (source is the first axis at MEDIUM level for sentiment).
+                self.assertIn("web short-interest", line,
+                              "sentiment why tag missing")
+                break
+        else:
+            self.fail("### Sentiment headline not found")
+
+    def test_fundamental_headline_has_badge(self):
+        for line in self.text.splitlines():
+            if line.startswith("### Fundamental"):
+                self.assertIn("◐ MEDIUM", line, "no badge on Fundamental headline")
+                break
+        else:
+            self.fail("### Fundamental headline not found")
+
+    # -- The call line carries the roll-up badge ------------------------------
+
+    def test_call_line_has_rollup_badge(self):
+        # The call line starts with '**<grade> — ...' and must contain the roll-up.
+        found = False
+        for line in self.text.splitlines():
+            if line.startswith("**") and "Confidence:" in line:
+                self.assertIn("◐ MEDIUM", line, "roll-up glyph missing")
+                found = True
+                break
+        self.assertTrue(found, "call line with Confidence roll-up not found")
+
+    # -- QC regression: badges must pass number_provenance -------------------
+
+    def test_badges_pass_report_qc_number_provenance(self):
+        """Rendered report with badges must pass report_qc exit 0.
+
+        This guards against a future why-tag that accidentally contains a digit:
+        confidence.py's contract is word-only tags, and if that ever breaks, this
+        test will catch the regression before the report ships.
+        """
+        _fill_slots(self.report)
+        rc, out, err = _qc(self.d, self.report)
+        self.assertEqual(rc, 0,
+                         "report_qc failed with badges present:\n" + out + err)
+        self.assertIn("PASS", out)
+
+    # -- Footer carries confidence-version -----------------------------------
+
+    def test_footer_carries_confidence_version(self):
+        self.assertIn("confidence-v1.0.0", self.text)
+
+    # -- Older bundles without confidence blocks render gracefully -----------
+
+    def test_no_badge_without_confidence_block(self):
+        """Older bundle (no confidence block in modules) still renders without error."""
+        with tempfile.TemporaryDirectory() as d:
+            _mk_bundle(d)  # no confidence blocks injected
+            rc, out, err = _render(d)
+            self.assertEqual(rc, 0, err)
+            report = _find_report(d)
+            text = ""
+            with open(report) as fh:
+                text = fh.read()
+            # Badge glyphs should NOT appear (no confidence block in modules).
+            # The report should still render correctly.
+            # (The footer may still carry confidence-v1.0.0 from the fallback import.)
+            self.assertIn("### Technical", text)
+            self.assertIn("### Risk", text)
+
+
 if __name__ == "__main__":
     unittest.main()

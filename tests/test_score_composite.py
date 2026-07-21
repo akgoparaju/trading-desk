@@ -207,6 +207,60 @@ class TestComposite(unittest.TestCase):
         names = [d["name"] for d in result["dimensions"]]
         self.assertNotIn("risk", names)
 
+    def test_rollup_min_over_evidence_confidence(self):
+        # per-module confidence carried on the module docs -> composite rolls up min.
+        mods = _modules(
+            technical={"skill": "technical-analysis", "score": 70,
+                       "confidence": _conf("HIGH")},
+            fundamental={"skill": "fundamental", "score": 60,
+                         "confidence": _conf("HIGH")},
+            sentiment={"skill": "sentiment-positioning", "score": 50,
+                       "confidence": _conf("MEDIUM")},
+            risk={"skill": "risk-analytics", "score": 40,
+                  "confidence": _conf("HIGH")},
+        )
+        result = sc.score_composite(mods, 76.0, "balanced")
+        self.assertEqual(result["confidence"]["level"], "MEDIUM")
+        self.assertIn("sentiment", result["confidence"]["why"])
+
+    def test_rollup_excludes_thesis_conviction(self):
+        # thesis-conviction (score 76) never contributes to the roll-up min even
+        # though it is a dimension row -- only the four evidence dims do.
+        mods = _modules(
+            technical={"skill": "technical-analysis", "score": 70,
+                       "confidence": _conf("HIGH")},
+            fundamental={"skill": "fundamental", "score": 60,
+                         "confidence": _conf("HIGH")},
+            sentiment={"skill": "sentiment-positioning", "score": 50,
+                       "confidence": _conf("HIGH")},
+            risk={"skill": "risk-analytics", "score": 40,
+                  "confidence": _conf("HIGH")},
+        )
+        result = sc.score_composite(mods, 76.0, "balanced")
+        self.assertEqual(result["confidence"]["level"], "HIGH")
+        # thesis_conviction row carries confidence "n/a", not a real block.
+        by = {d["name"]: d for d in result["dimensions"]}
+        self.assertEqual(by["thesis_conviction"]["confidence"], "n/a")
+
+    def test_rollup_renormalized_dim_contributes_none(self):
+        # missing risk (renormalized away) -> roll-up over the remaining three.
+        mods = _modules(
+            technical={"skill": "technical-analysis", "score": 70,
+                       "confidence": _conf("HIGH")},
+            fundamental={"skill": "fundamental", "score": 60,
+                         "confidence": _conf("HIGH")},
+            sentiment={"skill": "sentiment-positioning", "score": 50,
+                       "confidence": _conf("LOW")},
+        )
+        del mods["risk"]
+        result = sc.score_composite(mods, 76.0, "balanced")
+        self.assertEqual(result["confidence"]["level"], "LOW")
+
+    def test_rollup_none_when_no_module_confidence(self):
+        # minimal module docs (no confidence blocks) -> roll-up level None.
+        result = sc.score_composite(_modules(), 76.0, "balanced")
+        self.assertIsNone(result["confidence"]["level"])
+
 
 # --------------------------------------------------------------------------- #
 # Grade bands (fixed): A >=80, B 60-79, C 45-59, D <45.
@@ -303,9 +357,24 @@ class TestInputFields(unittest.TestCase):
 # CLI end-to-end.
 # --------------------------------------------------------------------------- #
 
-def _write_module(dir_, name, score):
+def _write_module(dir_, name, score, confidence=None):
+    doc = {"skill": name, "score": score}
+    if confidence is not None:
+        doc["confidence"] = confidence
     with open(os.path.join(dir_, f"module_{name}.json"), "w") as fh:
-        json.dump({"skill": name, "score": score}, fh)
+        json.dump(doc, fh)
+
+
+def _conf(level):
+    """A minimal per-module confidence block (all axes at ``level``)."""
+    return {
+        "level": level,
+        "source": {"level": level, "why": "tag"},
+        "depth": {"level": level, "why": "tag"},
+        "staleness": {"level": level, "why": "tag"},
+        "rule": "min(source, depth, staleness)",
+        "version": "1.0.0",
+    }
 
 
 def _write_snapshot(dir_):
@@ -442,6 +511,16 @@ class TestCLI(unittest.TestCase):
         names = {d["name"] for d in doc["dimensions"]}
         self.assertEqual(names, {"technical", "fundamental", "sentiment",
                                  "risk", "thesis_conviction"})
+        # confidence-v1.0.0: every dimension row carries a confidence key; the doc
+        # carries a top-level roll-up. The minimal fixture modules carry no
+        # confidence block, so the roll-up level is None (no evidence provenance).
+        for d in doc["dimensions"]:
+            self.assertIn("confidence", d)
+        by = {d["name"]: d for d in doc["dimensions"]}
+        # thesis-conviction has no data provenance -> confidence n/a on its row.
+        self.assertEqual(by["thesis_conviction"]["confidence"], "n/a")
+        self.assertIn("confidence", doc)
+        self.assertEqual(doc["confidence"]["version"], "1.0.0")
         # thesis conviction block
         self.assertEqual(doc["thesis_conviction"]["score"], 76)
         # ev block
@@ -453,6 +532,41 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(doc["sensitivity"]["balanced"]["grade"], "C")
         self.assertEqual(doc["sensitivity"]["trader"]["grade"], "B")
         self.assertEqual(doc["sensitivity"]["long-term"]["grade"], "C")
+
+    def test_rollup_min_over_evidence_dimensions(self):
+        # Inject per-module confidence: technical HIGH, fundamental HIGH, sentiment
+        # MEDIUM, risk MEDIUM -> roll-up MEDIUM (weakest evidence dimension).
+        _write_module(self.dir, "technical", 70, confidence=_conf("HIGH"))
+        _write_module(self.dir, "fundamental", 60, confidence=_conf("HIGH"))
+        _write_module(self.dir, "sentiment", 50, confidence=_conf("MEDIUM"))
+        _write_module(self.dir, "risk", 40, confidence=_conf("MEDIUM"))
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(self.dir, "module_composite.json")) as fh:
+            doc = json.load(fh)
+        self.assertEqual(doc["confidence"]["level"], "MEDIUM")
+        # the driver names a weakest (MEDIUM) dimension.
+        self.assertTrue(any(name in doc["confidence"]["why"]
+                            for name in ("sentiment", "risk")))
+        # rows carry the confidence blocks; thesis-conviction stays n/a.
+        by = {d["name"]: d for d in doc["dimensions"]}
+        self.assertEqual(by["technical"]["confidence"]["level"], "HIGH")
+        self.assertEqual(by["thesis_conviction"]["confidence"], "n/a")
+
+    def test_rollup_over_three_when_one_evidence_module_renormalized(self):
+        # Remove risk (renormalized away): roll-up min over the remaining THREE.
+        _write_module(self.dir, "technical", 70, confidence=_conf("HIGH"))
+        _write_module(self.dir, "fundamental", 60, confidence=_conf("HIGH"))
+        _write_module(self.dir, "sentiment", 50, confidence=_conf("LOW"))
+        os.remove(os.path.join(self.dir, "module_risk.json"))
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(self.dir, "module_composite.json")) as fh:
+            doc = json.load(fh)
+        # sentiment LOW dominates the surviving three.
+        self.assertEqual(doc["confidence"]["level"], "LOW")
+        names = {d["name"] for d in doc["dimensions"]}
+        self.assertNotIn("risk", names)
 
     def test_profile_trader(self):
         proc = self._run(extra=["--profile", "trader"])

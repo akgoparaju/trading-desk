@@ -403,6 +403,16 @@ class TestCLI(unittest.TestCase):
         self.assertIn("divergence", doc["flags"])
         # signal is ALWAYS null in the JSON (the LLM writes it in prose)
         self.assertIsNone(doc["signal"])
+        # confidence-v1.0.0: the module carries a well-formed confidence block.
+        conf = doc["confidence"]
+        self.assertEqual(set(conf),
+                         {"level", "source", "depth", "staleness", "rule",
+                          "version"})
+        self.assertIn(conf["level"], ("LOW", "MEDIUM", "HIGH"))
+        self.assertEqual(conf["version"], "1.0.0")
+        self.assertEqual(conf["rule"], "min(source, depth, staleness)")
+        # depth is MEDIUM at rubric 1.0.0 (governed belief), so overall <= MEDIUM.
+        self.assertIn(conf["depth"]["level"], ("MEDIUM", "HIGH"))
         # every subscore carries arithmetic + inputs
         for s in doc["subscores"]:
             self.assertIn("arithmetic", s)

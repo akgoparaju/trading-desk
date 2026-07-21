@@ -118,6 +118,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from scripts import build_snapshot
+from scripts import confidence
 from scripts import sector_scales
 
 RUBRIC_VERSION = "1.2.0"
@@ -934,7 +935,7 @@ def _find_snapshot(bundle):
 
 
 def build_module(snapshot, moat=None, moat_justification=None,
-                 anchors=None, scale=None) -> dict:
+                 anchors=None, scale=None, bundle_dir=None) -> dict:
     """Build the full module_fundamental.json document from a parsed snapshot.
 
     The moat judgment flag (v1.1.0) is threaded into the quality scoring and
@@ -993,6 +994,10 @@ def build_module(snapshot, moat=None, moat_justification=None,
         }
     if scored["renormalization_note"]:
         doc["renormalization_note"] = scored["renormalization_note"]
+    # Confidence / provenance layer (confidence-v1.0.0): deterministic, disclosure-
+    # only. DEPTH reads doc["fundamental_mode"] (anchored -> HIGH, compressed ->
+    # MEDIUM). Computed from THIS module's own doc + snapshot.
+    doc["confidence"] = confidence.compute_module(doc, snapshot, bundle_dir)
     return doc
 
 
@@ -1093,7 +1098,7 @@ def main(argv=None):
         return 2
 
     doc = build_module(snapshot, args.moat, args.moat_justification,
-                       anchors=anchors, scale=scale)
+                       anchors=anchors, scale=scale, bundle_dir=args.bundle)
 
     out = args.out or os.path.join(args.bundle, "module_fundamental.json")
     with open(out, "w") as fh:

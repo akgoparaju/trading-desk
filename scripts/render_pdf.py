@@ -61,6 +61,9 @@ from scripts import render_report, tdstyle
 # the rubric of record, so the appendix can never drift from the arithmetic it
 # documents. sector_scales is likewise pure (used to locate + read the active scale).
 from scripts import score_composite, score_fundamental, sector_scales
+# confidence: imported at module level so the METHODOLOGY appendix can render the
+# DEPTH_TABLE and CONFIDENCE_VERSION as a pinned, drift-free constant block.
+from scripts import confidence as _confidence_mod
 
 _DISCLAIMER_SHORT = "educational research, not investment advice"
 
@@ -1190,7 +1193,20 @@ def _draw_exec_page1(doc, bundle, docs, slots, diff, prev_date, plan=None):
     doc.text(side_x, cap_y, "contribution-weighted composite %s" % _fmt(
         comp.get("score")), font=doc.FONT_I, size=6.6, rgb=doc.GRAY_MD)
 
-    rv_top = cap_y - 16
+    # Composite roll-up confidence badge (word-only, digit-free for consistency).
+    conf_line_y = cap_y - 9
+    comp_conf = comp.get("confidence") if isinstance(comp, dict) else None
+    if isinstance(comp_conf, dict) and comp_conf.get("level"):
+        level = comp_conf.get("level", "")
+        glyph = render_report._confidence_glyph(level)
+        why = comp_conf.get("why", "")
+        conf_txt = "Confidence: %s%s" % (glyph, " (%s)" % why if why else "")
+        doc.text(side_x, conf_line_y, doc.truncate(conf_txt, doc.FONT_I, 6.4, side_w),
+                 font=doc.FONT_I, size=6.4, rgb=doc.GRAY_MD)
+        rv_top = conf_line_y - 10
+    else:
+        rv_top = conf_line_y
+
     _desk_read(doc, side_x, rv_top, side_w, slots.get("desk_read") or {})
 
     doc.end_page()
@@ -1282,8 +1298,22 @@ def _draw_dimension_section(doc, bundle, docs, dim, module_key, chart_names,
     M = doc.MARGIN
     label = _DIM_LABELS.get(dim, dim.title())
     module = docs.get(module_key) or {}
-    doc.section_head(M, y_top, "EVIDENCE — %s (score %s)" % (
-        label, _fmt(module.get("score"))), w=doc.CONTENT_W)
+    # Per-dimension confidence badge (word-only, digit-free for QC consistency).
+    conf = module.get("confidence") if isinstance(module, dict) else None
+    conf_badge = ""
+    if isinstance(conf, dict) and conf.get("level"):
+        level = conf.get("level", "")
+        glyph = render_report._confidence_glyph(level)
+        # Weakest-axis why tag from the block.
+        why = None
+        for axis in ("source", "depth", "staleness"):
+            ax = conf.get(axis)
+            if isinstance(ax, dict) and ax.get("level") == level:
+                why = ax.get("why")
+                break
+        conf_badge = " · %s%s" % (glyph, " (%s)" % why if why else "")
+    doc.section_head(M, y_top, "EVIDENCE — %s (score %s)%s" % (
+        label, _fmt(module.get("score")), conf_badge), w=doc.CONTENT_W)
 
     y = y_top - 16
     text_w = doc.CONTENT_W * 0.58
@@ -1928,6 +1958,21 @@ def assemble_methodology(bundle_modules, scale_json):
     blocks.append({"kind": "governance", "title": "Governance",
                    "sentences": list(_GOVERNANCE_SENTENCES)})
 
+    # -- 7. Confidence layer (confidence-v1.0.0) ----------------------------
+    # Rendered from _confidence_mod constants (pinned, cannot drift from the rubric).
+    # DEPTH_TABLE rows: module -> current key -> (level, why).
+    depth_rows = []
+    for module_name, sub in _confidence_mod.DEPTH_TABLE.items():
+        for discriminator, (level, why) in sub.items():
+            depth_rows.append((module_name, discriminator, level, why))
+    blocks.append({
+        "kind": "confidence_layer",
+        "title": "Confidence layer (confidence-v%s)" % _confidence_mod.CONFIDENCE_VERSION,
+        "version": _confidence_mod.CONFIDENCE_VERSION,
+        "rule": _confidence_mod.RULE,
+        "depth_rows": depth_rows,
+    })
+
     return blocks
 
 
@@ -2230,6 +2275,38 @@ def _draw_methodology(doc, bundle, docs, y_top):
                              rgb=doc.GRAY_DK)
                     y -= 9.2
                 y -= 2
+            y -= 4
+
+        elif kind == "confidence_layer":
+            # One-line convention note (word-only tags, digit-free for consistency).
+            rule_line = ("%s: %s" % (block["title"], block["rule"]))
+            for ln in doc.wrap(rule_line, doc.FONT, 7.2, W - 6):
+                _ensure(9)
+                doc.text(M + 6, y, ln, font=doc.FONT, size=7.2, rgb=doc.GRAY_DK)
+                y -= 9.4
+            y -= 2
+            # DEPTH_TABLE — pinned from _confidence_mod constants (cannot drift).
+            _ensure(11)
+            doc.text(M + 6, y, "Depth table (GOVERNED BELIEF, cited, reviewable):",
+                     font=doc.FONT_B, size=7.0, rgb=doc.INK)
+            y -= 10
+            cols_d = [M + 6, M + 6 + 110, M + 6 + 210, M + 6 + 290]
+            for hd, cx in zip(("Module", "Discriminator", "Depth", "Why"),
+                              cols_d):
+                doc.text(cx, y, hd, font=doc.FONT_B, size=6.4, rgb=doc.GRAY_MD)
+            y -= 9
+            doc.hairline(M, y + 5, M + W, rgb=doc.GRAY_LT)
+            for module_name, discriminator, level, why in block.get("depth_rows", []):
+                _ensure(9)
+                doc.text(cols_d[0], y, module_name, font=doc.FONT, size=7.0,
+                         rgb=doc.INK)
+                doc.text(cols_d[1], y, discriminator, font=doc.FONT, size=7.0,
+                         rgb=doc.GRAY_DK)
+                doc.text(cols_d[2], y, level, font=doc.FONT_B, size=7.0,
+                         rgb=doc.INK)
+                doc.text(cols_d[3], y, why, font=doc.FONT_I, size=6.8,
+                         rgb=doc.GRAY_MD)
+                y -= 9.0
             y -= 4
 
     return y
