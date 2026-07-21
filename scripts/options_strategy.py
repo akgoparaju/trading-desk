@@ -279,6 +279,7 @@ def build_vol_dashboard(snapshot):
     verdict = vol_verdict(diff)
     as_of = (snapshot.get("meta") or {}).get("as_of_utc")
 
+    ev = options.get("event_vol") or {}
     dash = {
         "verdict": verdict,
         "iv30": sentiment.get("iv30"),
@@ -288,7 +289,14 @@ def build_vol_dashboard(snapshot):
         "atm_iv_by_expiry": atm,
         "term_structure": term_structure(atm, as_of),
         "skew_25d_30d": options.get("skew_25d_30d"),
+        # Wave 4B: the gate uses the ex-earnings RV; surface whether the print was
+        # actually stripped and the isolated event-implied move for the reader.
+        "rv20_ex_earnings_used": bool(options.get("rv20_ex_earnings_stripped")),
+        "event_implied_move": _clean(ev.get("event_implied_move")),
     }
+    if options.get("rv20_ex_earnings_stripped"):
+        dash["rv_note"] = ("IV-vs-realized gate used the ex-earnings RV "
+                           "(a recent print was stripped from the RV20 window)")
     if verdict == "unknown":
         dash["disclosure"] = ("iv_minus_rv20 is null -- IV-vs-realized gate cannot be "
                               "evaluated; treated as fair, no premium-selling edge asserted")

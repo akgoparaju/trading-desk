@@ -646,6 +646,35 @@ class TestScriptedValuesTrace(unittest.TestCase):
         self.assertIn("expression-v1.0.0", self.text)
 
 
+class TestProvisionalDisclosuresFooter(unittest.TestCase):
+    """Code-review fix: the PROVISIONAL module notes (stamped into the module
+    JSONs by the v1.1.0 scorers) must actually RENDER in the integrity footer, so
+    a reader sees a rubric is UNRATIFIED, not just its version number."""
+
+    def _footer(self, modules):
+        snap = {"meta": {"as_of_utc": "2026-07-21T00:00:00Z",
+                         "qc": {"passed": True, "attestation": "QC passed"}}}
+        return rr.build_integrity_footer(snap, modules)
+
+    def test_provisional_note_rendered(self):
+        modules = {
+            "module_risk": {
+                "rubric_version": "1.1.0",
+                "module_note": "risk-v1.1.0 PROVISIONAL -- event/tail weights "
+                               "unratified pending B9; falsifier pre-registered",
+            },
+        }
+        footer = self._footer(modules)
+        self.assertIn("Provisional disclosures:", footer)
+        self.assertIn("PROVISIONAL", footer)
+        self.assertIn("unratified pending B9", footer)
+
+    def test_no_provisional_note_reads_none(self):
+        modules = {"module_risk": {"rubric_version": "1.0.0"}}  # no note
+        footer = self._footer(modules)
+        self.assertIn("Provisional disclosures: none", footer)
+
+
 # --------------------------------------------------------------------------- #
 # Missing required module -> exit 2 naming it.
 # --------------------------------------------------------------------------- #

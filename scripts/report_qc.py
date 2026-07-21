@@ -906,10 +906,11 @@ def check_judgment_flag_citations(bundle):
             just = flags.get("catalyst_clarity_justification")
             if just:
                 to_check.append(("composite", "catalyst_clarity_justification", just))
-        if flags.get("invalidation", "none") != "none":
-            just = flags.get("invalidation_justification")
-            if just:
-                to_check.append(("composite", "invalidation_justification", just))
+        # NOTE: composite `invalidation` is DELIBERATELY EXEMPT from the C-ID
+        # citation gate (matching score_composite, which does not require a C-ID
+        # in --invalidation-justification): the invalidation legs cite trade-plan
+        # LEVELS + fundamental metrics, not context findings. Enforcing a C-ID
+        # here would fail an otherwise-valid composite. (Code-review fix, 4C.)
 
     # ---- verify grounding + referential integrity ----
     for module_label, flag_name, justification in to_check:

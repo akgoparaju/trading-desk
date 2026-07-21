@@ -3,7 +3,9 @@
 WHY: The judgment_flag_citations check is a REPORT-TIME referential-integrity
 gate that verifies every non-default judgment-flag justification string
 (technical divergence, sentiment rating_actions/inst_flow/insider_baseline,
-risk top_risk, composite variant/catalyst_clarity/invalidation) satisfies:
+risk top_risk, composite variant/catalyst_clarity) satisfies:
+(composite `invalidation` is EXEMPT — it cites trade-plan levels, not context
+findings — matching score_composite's own exemption; see the exemption test.)
 
   1. GROUNDING: the justification contains >= 1 C<n> token (cites a context
      finding).  Zero tokens -> FAIL.
@@ -213,6 +215,31 @@ def _composite_with_variant(variant_just):
 # --------------------------------------------------------------------------- #
 # 1. Context present + technical divergence citing a valid C-ID -> passes
 # --------------------------------------------------------------------------- #
+
+class TestInvalidationExempt(unittest.TestCase):
+    def test_invalidation_without_cid_passes(self):
+        """Code-review fix (4C): composite `invalidation` is exempt from the C-ID
+        gate (its legs cite trade-plan levels + fundamental metrics, not context
+        findings — matching score_composite, which does NOT require a C-ID in
+        --invalidation-justification). A non-default invalidation whose
+        justification cites NO C-ID must still PASS (else a valid composite the
+        scorer accepted would fail the report gate)."""
+        with tempfile.TemporaryDirectory() as d:
+            _mk_clean_bundle(d)
+            _write_context(d)
+            comp = _composite_doc()
+            comp["flags"] = {
+                "variant": "none", "variant_justification": None,
+                "catalyst_clarity": "vague", "catalyst_clarity_justification": None,
+                "invalidation": "both-legs",
+                "invalidation_justification": "weekly close below 165 support; "
+                                              "gross margin below 30%",  # no C-ID
+                "base_rate_check": comp["flags"].get("base_rate_check"),
+            }
+            _write_module(d, "module_composite.json", comp)
+            res = rq.check_judgment_flag_citations(d)
+            self.assertIs(res["passed"], True, res["detail"])
+
 
 class TestPassValidCid(unittest.TestCase):
     def test_technical_divergence_valid_cid_passes(self):

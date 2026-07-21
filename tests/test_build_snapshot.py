@@ -1515,6 +1515,28 @@ class TestWave4BEventVolAndExEarningsRV(unittest.TestCase):
         self.assertIsNotNone(rv_ex)
         self.assertGreaterEqual(rv_ex, 0.0)
 
+    def test_iv_gate_uses_ex_earnings_rv(self):
+        # Code-review fix: the PRIMARY IV-vs-realized gate compares iv30 against
+        # the CLEANER ex-earnings RV. rv20_for_iv_comparison is the RV actually
+        # used; it equals rv20_ex_earnings when present, else the contaminated
+        # rv20_ann. iv_minus_rv20 must be computed off that same RV. The
+        # contaminated rv20_ann is retained as a disclosed field, and
+        # rv20_ex_earnings_stripped flags whether a print was actually masked.
+        b = BundleBuilder(self.dir).build_full()
+        snap = self._build(b)
+        o = snap["options"]
+        used = o["rv20_for_iv_comparison"]
+        if o["rv20_ex_earnings"] is not None:
+            self.assertEqual(used, o["rv20_ex_earnings"])
+        else:
+            self.assertEqual(used, o["rv20_ann"])
+        self.assertIn("rv20_ann", o)
+        self.assertIn("rv20_ex_earnings_stripped", o)
+        # stripped flag true iff the two RVs materially differ.
+        if o["rv20_ex_earnings"] is not None and o["rv20_ann"] is not None:
+            differ = abs(o["rv20_ex_earnings"] - o["rv20_ann"]) > 1e-9
+            self.assertEqual(o["rv20_ex_earnings_stripped"], differ)
+
     def test_event_vol_and_rv_ex_null_when_no_chain(self):
         # No chain -> options block None (both fields unreachable, block is null).
         b = BundleBuilder(self.dir)

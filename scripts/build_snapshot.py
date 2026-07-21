@@ -857,8 +857,12 @@ def build_options(chain_path, chain_path_manifest, price, next_earnings_date,
         closes/dates, masking returns within +/-1 session of any own-history
         earnings print (the ``events.earnings_move_history`` quarter_end dates ==
         the quarterlyEarnings reportedDates). Null when the chain/rows are absent
-        or too few unmasked returns remain. The vol gate can compare iv30 against
-        this cleaner ex-earnings RV; the contaminated rv20 is kept for continuity.
+        or too few unmasked returns remain. The IV-vs-realized PRIMARY GATE
+        (``iv_minus_rv20``) compares iv30 against this cleaner ex-earnings RV when
+        available (``rv20_for_iv_comparison`` is the RV actually used); the
+        contaminated ``rv20_ann`` and a ``rv20_ex_earnings_stripped`` flag are
+        emitted for disclosure. Self-limiting: equals rv20_ann when no print falls
+        in the trailing-20d window.
     """
     contracts = chain.load_contracts(chain_path)
     spot = price.get("last")
@@ -906,8 +910,6 @@ def build_options(chain_path, chain_path_manifest, price, next_earnings_date,
     walls = chain.oi_walls(contracts, exp_30, spot) if (exp_30 and spot) else None
     skew = chain.skew_25d(contracts, spot, exp_30) if (exp_30 and spot) else None
 
-    iv_minus_rv = (iv30 - rv20_ann) if (iv30 is not None and rv20_ann is not None) else None
-
     # Wave 4B: event-vol extraction around the next earnings print. Uses ALL
     # contracts (event_implied_vol navigates expiries itself and finds the
     # bracketing pair around next_earnings_date). Null-safe when no earnings date
@@ -931,6 +933,19 @@ def build_options(chain_path, chain_path_manifest, price, next_earnings_date,
         rv20_ex_earnings = indicators.realized_vol_ex_earnings(
             closes, dates, earnings_dates, 20)
 
+    # Wave 4B (code-review fix): the IV-vs-realized PRIMARY GATE compares iv30
+    # against the CLEANER ex-earnings RV when it is available. This is
+    # SELF-LIMITING: realized_vol_ex_earnings masks only days within +/-1 session
+    # of a print, so with no print in the trailing-20d window it EQUALS rv20_ann
+    # (zero behaviour change); it de-noises the gate ONLY when a recent print
+    # actually contaminated the window (review R4: "Fixes RV20 contamination when
+    # a print falls in the window"). rv20_ann is retained as a disclosed field.
+    rv20_gate = rv20_ex_earnings if rv20_ex_earnings is not None else rv20_ann
+    iv_minus_rv = (iv30 - rv20_gate) if (iv30 is not None and rv20_gate is not None) else None
+    rv20_ex_earnings_stripped = (
+        rv20_ex_earnings is not None and rv20_ann is not None
+        and abs(rv20_ex_earnings - rv20_ann) > 1e-9)
+
     return {
         "chain_file_path": chain_path_manifest,
         "chain_as_of": chain_as_of,
@@ -946,10 +961,12 @@ def build_options(chain_path, chain_path_manifest, price, next_earnings_date,
         "max_pain_by_expiry": max_pain_by_expiry,
         "oi_walls": walls,
         "skew_25d_30d": skew,
-        "rv20_for_iv_comparison": rv20_ann,
+        "rv20_for_iv_comparison": rv20_gate,       # the RV the gate actually used
+        "rv20_ann": rv20_ann,                      # contaminated RV, disclosed
         "iv_minus_rv20": iv_minus_rv,
         "event_vol": event_vol,                    # Wave 4B: isolated earnings-day vol
         "rv20_ex_earnings": rv20_ex_earnings,      # Wave 4B: print-days masked RV
+        "rv20_ex_earnings_stripped": rv20_ex_earnings_stripped,  # gate de-noised?
     }, contracts, iv30
 
 

@@ -731,6 +731,22 @@ def build_integrity_footer(snapshot, modules):
         ver_bits.append(f"confidence-v{conf_ver}")
     ver_line = "; ".join(ver_bits)
 
+    # Provisional disclosures: surface each module's PROVISIONAL note verbatim so a
+    # reader sees that a v1.1.0 rubric is UNRATIFIED, not just its version number
+    # (code-review fix — the notes were stamped into the module JSONs but never
+    # rendered). The only numeric token in these notes is the rubric version, which
+    # already travels in the Rubric-versions line above.
+    prov_bits = []
+    for key in ("module_technical", "module_risk", "module_sentiment",
+                "module_composite", "module_tradeplan"):
+        m = modules.get(key)
+        if not isinstance(m, dict):
+            continue
+        note = m.get("module_note") or m.get("note")
+        if note and "PROVISIONAL" in str(note).upper():
+            prov_bits.append(str(note))
+    prov_line = " · ".join(prov_bits) if prov_bits else "none"
+
     plugin_ver = _plugin_version()
 
     lines = [
@@ -742,6 +758,7 @@ def build_integrity_footer(snapshot, modules):
         f"- API tier notes: {api_line}",
         f"- Staleness / missing disclosures: {missing_line}",
         f"- Rubric versions: {ver_line}",
+        f"- Provisional disclosures: {prov_line}",
         f"- Plugin version: {plugin_ver}",
         "",
         _DISCLAIMER,
