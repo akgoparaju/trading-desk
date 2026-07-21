@@ -293,6 +293,11 @@ def _composite_doc(score=59.9, ev_at_current=_EV_AT_CURRENT, profile="balanced")
             "trader": {"score": 61.2, "grade": "B"},
             "balanced": {"score": composite_score, "grade": grade},
             "long-term": {"score": 57.3, "grade": "C"},
+            # score_composite stamps this string label alongside the profile dicts;
+            # the fixture MUST carry it so the suite exercises the real shape (a
+            # real-data E2E found render_report crashing on this key — build_composite_table
+            # iterated it and called .get() on the string).
+            "weight_set": "standard v1",
         },
         "flags": {
             "variant": "some", "variant_justification": "consensus underrates HBM",

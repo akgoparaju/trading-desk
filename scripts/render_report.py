@@ -242,7 +242,10 @@ def build_composite_table(composite):
     table = _table(["Dimension", "Score", "Weight", "Contribution", "Read"], rows)
 
     sens = composite.get("sensitivity", {}) or {}
-    grades = {p: (sens.get(p) or {}).get("grade") for p in sens}
+    # sensitivity carries the three profile dicts PLUS a "weight_set" string label
+    # (score_composite stamps it). Iterate only the dict-valued profile entries —
+    # calling .get() on the weight_set string would crash (real-data E2E finding).
+    grades = {p: v.get("grade") for p, v in sens.items() if isinstance(v, dict)}
     differ = len(set(g for g in grades.values() if g is not None)) > 1
     cells = []
     for p in ("trader", "balanced", "long-term"):
