@@ -6,7 +6,7 @@ one dimension off the snapshot; this module does NOT re-read those snapshot fact
 It CONSUMES the four module JSONs' final scores, adds a fifth dimension it computes
 in-script (THESIS CONVICTION), applies FIXED per-profile weights, and produces the
 composite (0-100), a letter grade, an action, and an expected-value block. Its
-arithmetic IS the composite rubric of record (composite rubric v1.0.0): every
+arithmetic IS the composite rubric of record (composite rubric v1.1.0): every
 weight, band edge, hurdle, and EV formula is deterministic and unit-pinned so a
 report can never silently drift. The LLM layer supplies judgment (the four
 conviction flags and the scenario set, each with mandatory reasoning) and writes
@@ -57,8 +57,32 @@ if _REPO_ROOT not in sys.path:
 
 from scripts import build_snapshot, confidence, ev_kelly
 
-RUBRIC_VERSION = "1.0.0"
+RUBRIC_VERSION = "1.1.0"
 SKILL_NAME = "composite-score"
+
+# PROVISIONAL (composite-v1.1.0, Wave 3B / Philosophy A). Stamped into the module
+# note so a reader knows these thresholds are review's first numbers, subject to the
+# SKILL falsifier — not calibrated defaults.
+_PROVISIONAL_NOTE = (
+    "composite-v1.1.0 PROVISIONAL: base-rate anchoring (+/-5% move bins, 25pp "
+    "deviation flag, N>=4) and the 25-pt auto-tension spread are review's first "
+    "numbers, soft/disclosed and subject to the SKILL falsifier -- not calibrated.")
+
+# --- Base-rate anchoring (Goal A, PROVISIONAL) ------------------------------- #
+# A historical earnings move is "material" (a bull/bear reaction) beyond +/-5%;
+# inside that band it is a base (in-line) reaction. Provisional threshold.
+_BASE_RATE_MOVE_THRESHOLD = 0.05
+# Minimum history length to compute an empirical base rate at all; below this the
+# check is SKIPPED (disclosed), never computed off too-thin a sample.
+_BASE_RATE_MIN_HISTORY = 4
+# A scenario probability that deviates from its base-rate analog by more than this
+# (in probability points, i.e. 0.25 == 25pp) trips the SOFT flag. Provisional.
+_BASE_RATE_DEVIATION_THRESHOLD = 0.25
+
+# --- Auto-tension gate (Goal C, PROVISIONAL) --------------------------------- #
+# When the spread (max - min) across the evidence-dimension scores (thesis_conviction
+# EXCLUDED) exceeds this, tension auto-populates with a scripted string. Provisional.
+_TENSION_SPREAD_THRESHOLD = 25
 
 # This module scores NO snapshot field directly (it consumes module scores and reads
 # price.last only as an EV reference). Empty by construction -> single-mapping safe.
@@ -392,6 +416,130 @@ def score_composite(module_scores, thesis_conviction_score, profile,
 
 
 # --------------------------------------------------------------------------- #
+# Base-rate anchoring (Goal A, composite-v1.1.0 PROVISIONAL).
+# --------------------------------------------------------------------------- #
+
+def classify_move(move_pct):
+    """Classify one historical earnings move into bull/bear/base.
+
+    move_pct > +0.05 -> "bull"; move_pct < -0.05 -> "bear"; else "base".
+    The +/-5% "material move" band is the provisional threshold.
+    """
+    if move_pct > _BASE_RATE_MOVE_THRESHOLD:
+        return "bull"
+    if move_pct < -_BASE_RATE_MOVE_THRESHOLD:
+        return "bear"
+    return "base"
+
+
+def compute_base_rates(earnings_move_history):
+    """Empirical bull/base/bear base rates from a ticker's own earnings-move history.
+
+    ``earnings_move_history`` is the snapshot ``events.earnings_move_history`` list of
+    ``{"quarter_end", "move_pct"}`` (move_pct a decimal fraction). Each move is
+    classified via classify_move; the base rate per class is its empirical frequency.
+
+    Returns ``(base_rates, n)`` where ``base_rates`` is ``{"bull","base","bear"}`` of
+    frequencies (rounded 4dp) and ``n`` is the count of USABLE (numeric move_pct)
+    history rows. When ``n < _BASE_RATE_MIN_HISTORY`` the caller SKIPS the check
+    (too-thin a sample) -- this function still returns the tallied rates for
+    transparency, but callers gate on ``n``.
+    """
+    moves = [row.get("move_pct") for row in (earnings_move_history or [])
+             if isinstance(row, dict) and isinstance(row.get("move_pct"), (int, float))]
+    n = len(moves)
+    if n == 0:
+        return {"bull": None, "base": None, "bear": None}, 0
+    counts = {"bull": 0, "base": 0, "bear": 0}
+    for m in moves:
+        counts[classify_move(m)] += 1
+    base_rates = {k: _clean(v / n) for k, v in counts.items()}
+    return base_rates, n
+
+
+def build_base_rate_check(scenarios, earnings_move_history):
+    """Compare each LLM scenario.prob to its empirical base-rate analog (Goal A).
+
+    Maps a scenario to a class by NAME (a scenario named 'bull'/'base'/'bear' pairs
+    with that class's base rate; any other name is not compared). Deviation =
+    |LLM_prob - base_rate|. ``flagged`` is True iff any deviation exceeds the 25pp
+    provisional threshold. SOFT flag -- disclosed in the report, never a hard gate.
+
+    Returns None when there is not enough history (N < 4) to anchor at all (the
+    check is SKIPPED, disclosed via the returned dict's own ``skipped`` shape). To
+    keep the disclosure explicit we ALWAYS return a dict; ``flagged`` is False and
+    ``deviations`` empty when skipped, with ``n_history`` carrying the (too-small)
+    count so the report can say why.
+    """
+    base_rates, n = compute_base_rates(earnings_move_history)
+    threshold_pp = int(round(_BASE_RATE_DEVIATION_THRESHOLD * 100))
+
+    if n < _BASE_RATE_MIN_HISTORY:
+        # SKIP: too thin to anchor. Disclosed, not silent.
+        return {
+            "base_rates": {"bull": None, "base": None, "bear": None},
+            "deviations": {},
+            "flagged": False,
+            "n_history": n,
+            "threshold_pp": threshold_pp,
+            "skipped": True,
+            "skip_reason": (
+                f"insufficient earnings-move history (n={n} < "
+                f"{_BASE_RATE_MIN_HISTORY}); base-rate check skipped"),
+        }
+
+    deviations = {}
+    flagged = False
+    for sc in scenarios or []:
+        name = sc.get("name")
+        if name not in base_rates or base_rates[name] is None:
+            continue
+        prob = sc.get("prob")
+        if not isinstance(prob, (int, float)):
+            continue
+        dev = _clean(abs(prob - base_rates[name]))
+        deviations[name] = dev
+        if abs(prob - base_rates[name]) > _BASE_RATE_DEVIATION_THRESHOLD:
+            flagged = True
+
+    return {
+        "base_rates": base_rates,
+        "deviations": deviations,
+        "flagged": flagged,
+        "n_history": n,
+        "threshold_pp": threshold_pp,
+        "skipped": False,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Auto-tension gate (Goal C, composite-v1.1.0 PROVISIONAL).
+# --------------------------------------------------------------------------- #
+
+def build_auto_tension(dimensions):
+    """Auto-populate the tension string when the evidence-score spread fires.
+
+    Over the ``dimensions`` rows (the composite doc's per-dimension rows),
+    thesis_conviction EXCLUDED, compute spread = max - min of the raw scores. When
+    spread > 25 (provisional) return a scripted string naming the high/low dims +
+    spread (e.g. "sentiment 58.8 vs fundamental 30.8 -- 28-pt evidence spread").
+    Below threshold -> None (the LLM prose slot stays open).
+    """
+    scores = [(d.get("name"), d.get("score")) for d in (dimensions or [])
+              if d.get("name") != "thesis_conviction"
+              and isinstance(d.get("score"), (int, float))]
+    if len(scores) < 2:
+        return None
+    high_name, high_score = max(scores, key=lambda x: x[1])
+    low_name, low_score = min(scores, key=lambda x: x[1])
+    spread = high_score - low_score
+    if spread <= _TENSION_SPREAD_THRESHOLD:
+        return None
+    return (f"{high_name} {_fmt(_clean(high_score))} vs {low_name} "
+            f"{_fmt(_clean(low_score))} -- {_fmt(_clean(spread))}-pt evidence spread")
+
+
+# --------------------------------------------------------------------------- #
 # Grade bands (fixed).
 # --------------------------------------------------------------------------- #
 
@@ -526,6 +674,9 @@ def build_module(snapshot, module_scores, scenarios, scenario_reasoning, profile
     """
     price = snapshot.get("price", {}) if isinstance(snapshot, dict) else {}
     meta = snapshot.get("meta", {}) if isinstance(snapshot, dict) else {}
+    events = snapshot.get("events", {}) if isinstance(snapshot, dict) else {}
+    if not isinstance(events, dict):
+        events = {}
     last = price.get("last")
 
     weights, weight_set = resolve_weights(profile, custom_profiles, custom_label)
@@ -546,6 +697,16 @@ def build_module(snapshot, module_scores, scenarios, scenario_reasoning, profile
         catalyst_clarity, catalyst_clarity_justification,
         invalidation, invalidation_justification,
         custom_profiles=custom_profiles, custom_label=custom_label)
+
+    # Goal A (PROVISIONAL): anchor the LLM scenario probs against the ticker's own
+    # empirical earnings-move base rates; SOFT-flag any >25pp deviation (disclosed,
+    # not a hard gate). Skipped + disclosed when history < 4.
+    base_rate_check = build_base_rate_check(
+        scenarios, events.get("earnings_move_history"))
+
+    # Goal C (PROVISIONAL): auto-populate tension when the evidence-score spread
+    # (thesis_conviction excluded) exceeds 25; else the LLM prose slot stays open.
+    tension = build_auto_tension(composite["dimensions"])
 
     return {
         "skill": SKILL_NAME,
@@ -575,9 +736,14 @@ def build_module(snapshot, module_scores, scenarios, scenario_reasoning, profile
             "catalyst_clarity_justification": catalyst_clarity_justification,
             "invalidation": invalidation,
             "invalidation_justification": invalidation_justification,
+            # Goal A (PROVISIONAL): base-rate-anchored scenario-probability check.
+            "base_rate_check": base_rate_check,
         },
         "renormalization_note": composite["renormalization_note"],
-        "tension": None,   # LLM prose slot for the one-line tension sentence.
+        # Goal C (PROVISIONAL): auto-populated when the evidence spread > 25; the LLM
+        # may still write a richer tension sentence on top (SKILL contract note).
+        "tension": tension,
+        "note": _PROVISIONAL_NOTE,
         "signal": None,
     }
 

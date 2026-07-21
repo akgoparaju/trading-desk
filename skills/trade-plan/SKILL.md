@@ -1,6 +1,6 @@
 ---
 name: trade-plan
-description: Turn a scored composite into an EXECUTABLE trade plan off an existing bundle — a mechanical entry ladder (confluences of proven support and valuation anchors), profit-take and bull targets, a both-leg invalidation (trade stop AND thesis-invalidation metric), Kelly-arithmetic sizing, a hedge trigger, a don't-chase line, and the EXPRESSION decision (stock vs options) via decision table expression-v1.0.0. Use when the user says "trade plan [ticker]", "entry exit plan", "how would I position [ticker]", or a report needs an actionable plan. Consumes module_composite/technical/risk + the newest snapshot; runs the composite-score skill first if absent; invokes options-strategy in pipeline mode, then re-synthesizes. Rubric v1.0.0.
+description: Turn a scored composite into an EXECUTABLE trade plan off an existing bundle — a mechanical entry ladder (confluences of proven support and valuation anchors), profit-take and bull targets, a both-leg invalidation (trade stop AND thesis-invalidation metric), Kelly-arithmetic sizing, a hedge trigger, a don't-chase line, and the EXPRESSION decision (stock vs options) via decision table expression-v1.0.0. Use when the user says "trade plan [ticker]", "entry exit plan", "how would I position [ticker]", or a report needs an actionable plan. Consumes module_composite/technical/risk + the newest snapshot; runs the composite-score skill first if absent; invokes options-strategy in pipeline mode, then re-synthesizes. Rubric v1.1.0 (PROVISIONAL: bull triangulation, Kelly headline, expression-leads-executable).
 ---
 
 # Trade Plan (Decision Layer — Execution)
@@ -71,9 +71,9 @@ The script writes `<bundle>/module_tradeplan.json` (path printed to stdout) with
 
 **How the plan is built (all mechanical):**
 - **Entries** — valuation anchors = `{ev_breakeven_entry}` ∪ downside_map `valuation_floor` rows. A proven support (swing_low/ma50/ma200/put_wall) within **3%** of an anchor is a **confluence**. `entry_1` = the highest confluence below `last`; **but** if `ev_at_current ≥ hurdle_total`, EV already clears the hurdle and `entry_1` = the current price, **sized down** (half the recommended size). `entry_2`/`entry_3` are the next lower confluences/proven supports, each ≥3% apart. Each entry carries its `ev_at_level` (via `ev_kelly.ev_at`).
-- **Exits** — `profit_take` = nearest ladder resistance above `last`; `bull_target` = the max scenario target, with `required_multiple = target / eps_ntm_consensus` ("implies N× fwd EPS", null-safe).
+- **Exits** — `profit_take` = nearest ladder resistance above `last`; `bull_target` = the max scenario target, **triangulated against coverage anchors** (tradeplan-v1.1.0, Goal B). When a `coverage/valuation_anchors.json` exists (loaded automatically from the bundle's sibling `coverage/` dir), the bull target is clipped to **`min(max_scenario_PT, comps_high)`** — the desk's own comps range caps a raw scenario bull that exceeds it. The raw scenario bull is preserved in `bull_target.scenario_raw`; `dcf_bull` rides along as a displayed reference (never the clip driver); `triangulated` flags whether anchors were applied. No anchors → the raw `max_scenario_PT`, unchanged (disclosed via the null anchor fields). `required_multiple = level / eps_ntm_consensus` is computed off the (triangulated) level ("implies N× fwd EPS", null-safe).
 - **Invalidation** — technical leg (weekly close below the first proven support under the deepest entry) + your fundamental leg.
-- **Sizing** — `f*` from `ev_kelly.kelly` at `entry_1`, capped by `ev_kelly.size_recommendation` for the profile; **−1 notch (quarter-Kelly + half-cap) on a binary event within 30 days**. The full arithmetic string is in `sizing.arithmetic`.
+- **Sizing** — `f*` from `ev_kelly.kelly` at `entry_1`, capped by `ev_kelly.size_recommendation` for the profile; **−1 notch (quarter-Kelly + half-cap) on a binary event within 30 days**. The full arithmetic string is in `sizing.arithmetic`. **Kelly is entry-conditioned** (f* is computed at `entry_1`, not spot) — cite `sizing.headline` (tradeplan-v1.1.0, Goal D: `"f* {f_star} at entry {entry}; capped to {recommended_pct} ({cap_pct} cap)"`) so a bare f* never appears next to a small cap without the entry context that justifies the gap. No arithmetic change — the number is already correct; this is a surfacing rule.
 - **Hedge** — required iff (binary event within 30d AND recommended size ≥ 5%) **OR** (iv_pctile_1yr ≤ 25). Spec names the trigger, structure (put spread or collar), `strikes_from` (first two downside_map levels), expiry rule, and premium cap 1.5%.
 - **Don't-chase** — 5% above the top entry.
 
@@ -92,6 +92,8 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/trade_plan.py --synthesize \
 
 This re-reads `module_tradeplan.json` + `module_options.json` (exit 2 "run options-strategy first" if the latter is missing) and updates `expression` with `synthesized: true`, `structures_selected` (the options module's chosen structures matching the expression mode, with strikes), and `hedge_structure` (the options module's hedge spec, if the plan's hedge is required). If a recommended structure's strikes are absent from `module_options.json`, the script exits 2 (consistency) — the options module must carry real strikes.
 
+**Expression leads with the executable leg (tradeplan-v1.1.0, Goal D).** When the options module gates everything out (`structures_selected` empty), the script sets `expression.executable: false` AND rewrites `expression.recommended_for_profile` to LEAD with the executable stock leg ("stock: buy the entry ladder from … sized to …") plus a "(options gated — implement in stock)" note; the original options-tilted text is preserved in `expression.recommended_for_profile_options_tilted` for the record, and `expression.executability_note` explains why. Quote the (rewritten) `recommended_for_profile` — the reader acts on the implementable leg, not the gated tilt.
+
 ---
 
 ## Step 5 — Write the brief
@@ -105,9 +107,9 @@ Read `module_tradeplan.json` (small — read it directly). Write `<bundle>/brief
 | Don't-chase | `dont_chase.above` (5% above top entry) |
 | Entry 1 / 2 / 3 | `entries[].level` + `condition` + **EV-at-level** (`ev_at_level`); flag `sized_down` if set |
 | Profit-take | `exits.profit_take.level` (`type`) |
-| Bull target | `exits.bull_target.level` + the required-multiple note ("implies N× fwd EPS") |
+| Bull target | `exits.bull_target.level` + the required-multiple note; when `triangulated` is true, say the bull was triangulated to `min(scenario_raw, comps_high)` and show `scenario_raw` + `dcf_bull` (reference) so the clip is transparent |
 | Invalidation | **both legs**: technical (`technical_leg.level`, weekly close below) AND fundamental (`fundamental_leg.metric` `threshold`) |
-| Size | `sizing.recommended_pct` + the **Kelly arithmetic footnote** (`sizing.arithmetic`, verbatim) |
+| Size | `sizing.recommended_pct` + the **Kelly headline** (`sizing.headline`: f* at entry, capped to recommended) + the arithmetic footnote (`sizing.arithmetic`, verbatim) |
 | Hedge | `hedge.required` + `trigger` + `structure` + `strikes_from` (or "not required") |
 | **Expression** | `expression.recommended_for_profile` (+ `synthesized` structures if pass 2 ran) |
 
@@ -135,9 +137,10 @@ Report to the user (and to any calling skill):
 ## Important Notes
 
 - **Catalyst-proximity-first expression.** The selector formalizes the lived rule: **a catalyst in sight selects options for leverage; long-term quality selects stock — the profile only implements.** RULE 1 (days-to-catalyst ≤ 60 AND catalyst-in-thesis=yes) tilts every profile toward defined-risk options tenored past the event; RULE 2 is the per-profile default. The horizon profile decides *how much* stock-vs-options, never *whether* the catalyst matters. This is why long-term still gets a small options **kicker** under RULE 1 — the catalyst earns leverage even for a stock-dominant sleeve.
-- **Falsifier.** If catalyst-tilted expressions underperform the profile-default expression across the decision journal (~20+ decisions), the selector order gets revisited. The decision table is provisional (`expression-v1.0.0`), not gospel — say so if a reader treats a single call as settled.
+- **Falsifier (expression).** If catalyst-tilted expressions underperform the profile-default expression across the decision journal (~20+ decisions), the selector order gets revisited. The decision table is provisional (`expression-v1.0.0`), not gospel — say so if a reader treats a single call as settled.
+- **Bull triangulation is PROVISIONAL (tradeplan-v1.1.0).** The conservative `min(max_scenario_PT, comps_high)` is review's first formula (Philosophy A), stamped `PROVISIONAL` in the module `note`. Kelly-headline surfacing and expression-leads-executable are surfacing/disclosure changes, no arithmetic moves. **Falsifier (tradeplan):** *if `min(PT, comps_high)` triangulation systematically clips bull targets below realized bull outcomes across the B9 set, the formula is refuted (revisit to a median or weighted blend).*
 - **Sizing caps are 5 / 8 / 10% by profile (trader / balanced / long-term), −1 notch on a binary event.** These live in `ev_kelly.size_recommendation`; the notch is quarter-Kelly + half-cap when a binary event is within 30 days. Never re-cap in prose.
 - **position_ctx deltas are v2.** This plan sizes a fresh position from Kelly + caps. Adjusting for an existing position (already long, averaging in, tax lots) is out of scope for v1 — note it if the user has a position.
 - **Both invalidation legs, always.** A plan with only a trade stop and no thesis-invalidation metric (or vice-versa) is incomplete. The technical leg is mechanical; the fundamental leg is your judgment and is REQUIRED.
-- **Rubric + rule versions travel with the numbers.** `rubric_version` (`1.0.0`) and `expression.rule_version` (`expression-v1.0.0`) print in the JSON and MUST appear in the brief footer.
+- **Rubric + rule versions travel with the numbers.** `rubric_version` (`1.1.0`) and `expression.rule_version` (`expression-v1.0.0`) print in the JSON and MUST appear in the brief footer.
 - **Snapshot and upstream modules are read-only.** This skill writes only `module_tradeplan.json` and `brief_tradeplan.md`; it never edits the snapshot or any evidence/composite/options module JSON (pass 2 rewrites only `module_tradeplan.json`).

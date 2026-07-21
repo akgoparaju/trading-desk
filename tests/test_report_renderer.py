@@ -265,7 +265,7 @@ def _composite_doc(score=59.9, ev_at_current=_EV_AT_CURRENT, profile="balanced")
     grade = "C" if composite_score < 60 else "B"
     return {
         "skill": "composite-score",
-        "rubric_version": "1.0.0",
+        "rubric_version": "1.1.0",
         "ticker": "MU",
         "as_of": "2026-07-16",
         "profile": profile,
@@ -298,9 +298,21 @@ def _composite_doc(score=59.9, ev_at_current=_EV_AT_CURRENT, profile="balanced")
             "variant": "some", "variant_justification": "consensus underrates HBM",
             "catalyst_clarity": "clear", "catalyst_clarity_justification": "print in 14d",
             "invalidation": "both-legs", "invalidation_justification": "stop + metric",
+            # composite-v1.1.0 (Goal A): base-rate check skipped here (no history in
+            # this fixture) -> disclosed, not a hard gate.
+            "base_rate_check": {
+                "base_rates": {"bull": None, "base": None, "bear": None},
+                "deviations": {}, "flagged": False, "n_history": 0,
+                "threshold_pp": 25, "skipped": True,
+                "skip_reason": "insufficient earnings-move history (n=0 < 4); "
+                               "base-rate check skipped",
+            },
         },
         "renormalization_note": None,
+        # composite-v1.1.0 (Goal C): tension auto-populates when the evidence spread
+        # fires; this fixture's spread (70-45=25) does NOT exceed 25 -> stays null.
         "tension": None,
+        "note": "composite-v1.1.0 PROVISIONAL",
         "signal": None,
     }
 
@@ -310,7 +322,7 @@ def _tradeplan_doc(entry1=95.0, invalidation_metric="HBM revenue growth"):
     invalidation (both legs)/sizing/hedge/dont_chase + expression w/ structures."""
     return {
         "skill": "trade-plan",
-        "rubric_version": "1.0.0",
+        "rubric_version": "1.1.0",
         "ticker": "MU",
         "as_of": "2026-07-16",
         "profile": "balanced",
@@ -328,7 +340,11 @@ def _tradeplan_doc(entry1=95.0, invalidation_metric="HBM revenue growth"):
             ],
             "exits": {
                 "profit_take": {"level": 112.0, "type": "swing_high"},
-                "bull_target": {"level": 150.0, "required_multiple": 27.3,
+                # tradeplan-v1.1.0 (Goal B): no coverage anchors in this fixture ->
+                # bull target is the raw scenario bull, untriangulated (disclosed).
+                "bull_target": {"level": 150.0, "scenario_raw": 150.0,
+                                "dcf_bull": None, "comps_high": None,
+                                "triangulated": False, "required_multiple": 27.3,
                                 "note": "implies 27.3x fwd EPS"},
             },
             "invalidation": {
@@ -343,6 +359,8 @@ def _tradeplan_doc(entry1=95.0, invalidation_metric="HBM revenue growth"):
                 "f_star": 0.28, "half": 0.14, "quarter": 0.07,
                 "recommended_pct": 0.04, "cap_pct": 0.04,
                 "rationale": "quarter-Kelly, half-cap on binary event",
+                # tradeplan-v1.1.0 (Goal D): headline keeps f* tied to entry + cap.
+                "headline": "f* 28.0% at entry 95; capped to 4.0% (4.0% cap)",
                 "arithmetic": ("f* 28.0% at entry 95; quarter-Kelly 7.0%; "
                                "binary_event_within_30d=True; cap 4.0%; "
                                "recommended 4.0% -- quarter-Kelly, half-cap on binary event"),
@@ -387,6 +405,7 @@ def _tradeplan_doc(entry1=95.0, invalidation_metric="HBM revenue growth"):
             "fund_invalidation_justification": "HBM is the margin thesis",
         },
         "event_playbook": None,
+        "note": "tradeplan-v1.1.0 PROVISIONAL",
         "signal": None,
     }
 

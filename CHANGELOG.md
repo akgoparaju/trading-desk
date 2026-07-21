@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — 2026-07-21 · Wave 3B: composite/trade-plan honesty (`composite-v1.1.0` + `tradeplan-v1.1.0`, PROVISIONAL)
+
+R2 — the orchestration-layer honesty fixes (Philosophy A). **No evidence-module score changes**;
+these are disclosure flags + presentation. Both rubrics → 1.1.0. Suite: 1356 passed.
+
+- **Base-rate-anchored scenario probabilities** (`score_composite`) — reads `events.earnings_move_history`
+  (Wave 2A), computes the empirical bull/base/bear frequencies (±5% material-move bins; N≥4 or skip),
+  and flags any LLM scenario prob deviating >25pp from its base rate (`flags.base_rate_check`, soft/
+  disclosed). Real-data BE: base rates 0.50/0.375/0.125 from its 8 actual earnings moves vs the LLM's
+  0.30/0.45/0.25 — within tolerance, not flagged (Superforecasting discipline, review R2).
+- **Auto-tension gate** (`score_composite`) — `composite.tension` was a null LLM slot that never fired
+  (review #14). Now auto-populated when the evidence-dimension spread > 25pts. Real-data BE:
+  "sentiment 58.75 vs fundamental 30.75 — 28-pt evidence spread" (previously shipped blank).
+- **Bull-target triangulation** (`trade_plan`) — conditionally loads `coverage/valuation_anchors.json`
+  and sets `bull_target.level = min(scenario_PT, comps_high)` (raw preserved in `scenario_raw`,
+  `dcf_bull` shown as reference), so the bull target no longer exceeds the desk's own coverage.
+- **Kelly headline** — `sizing.headline` surfaces f* WITH its entry + cap context (f* is already
+  entry-conditioned in code; this stops a bare 36.7% appearing beside a 4% cap). **Expression** now
+  leads with the executable stock leg when options are gated out (options-tilted text preserved).
+- Both rubrics → 1.1.0 PROVISIONAL; falsifiers pre-registered in the composite + trade-plan SKILLs
+  (base-rate/tension thresholds; the min-triangulation formula). Provisional defaults: ±5% bins,
+  25pp deviation, N≥4, 25-pt tension spread, min(PT, comps_high).
+
 ## Unreleased — 2026-07-21 · Wave 3A: sentiment positioning dynamics (`sentiment-v1.1.0`, PROVISIONAL)
 
 R3 — the positioning/flow/news signals a desk reads, scored (Philosophy A: provisional versioned

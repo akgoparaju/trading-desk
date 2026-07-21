@@ -920,7 +920,7 @@ class TestAssembleMethodology(unittest.TestCase):
         rv = self._block(blocks, "rubric_versions")
         rows = {r[0]: r[1] for r in rv["rows"]}
         self.assertEqual(rows["Fundamental"], "rubric v1.2.0")
-        self.assertEqual(rows["Composite (expression)"], "rubric v1.0.0")
+        self.assertEqual(rows["Composite (expression)"], "rubric v1.1.0")
 
     def test_governance_four_pinned_sentences(self):
         blocks = rp.assemble_methodology(

@@ -58,9 +58,18 @@ if _REPO_ROOT not in sys.path:
 
 from scripts import build_snapshot, ev_kelly
 
-RUBRIC_VERSION = "1.0.0"
+RUBRIC_VERSION = "1.1.0"
 SKILL_NAME = "trade-plan"
 EXPRESSION_RULE_VERSION = "expression-v1.0.0"
+
+# PROVISIONAL (tradeplan-v1.1.0, Wave 3B / Philosophy A). Stamped into the module
+# note so a reader knows the min(PT, comps_high) triangulation is review's first
+# formula, subject to the SKILL falsifier -- not a calibrated default.
+_PROVISIONAL_NOTE = (
+    "tradeplan-v1.1.0 PROVISIONAL: bull-target triangulation clips the raw max "
+    "scenario PT to min(max_scenario_PT, comps_high) when coverage anchors exist "
+    "(raw preserved in bull_target.scenario_raw; dcf_bull shown as reference). The "
+    "conservative min() is review's first formula, subject to the SKILL falsifier.")
 
 # This module scores NO snapshot field directly (it consumes module outputs and reads
 # snapshot facts only as plan references). Empty by construction -> single-mapping safe.
@@ -278,25 +287,59 @@ def _nearest_resistance_above(last, ladder):
     return min(above, key=lambda e: e["level"])
 
 
-def build_exits(last, ladder, scenarios, eps_ntm):
+def build_exits(last, ladder, scenarios, eps_ntm, dcf_bull=None, comps_high=None):
     """profit_take = nearest ladder resistance above last (level + type);
-    bull_target = max scenario price_target, with required_multiple = target /
-    eps_ntm_consensus (null-safe -> None if eps_ntm missing)."""
+    bull_target = the bull price target, with required_multiple = target /
+    eps_ntm_consensus (null-safe -> None if eps_ntm missing).
+
+    Goal B (PROVISIONAL) -- bull-target triangulation from coverage anchors:
+      raw = max scenario price_target (the LLM's scenario input, always preserved
+        in ``bull_target.scenario_raw``).
+      When ``comps_high`` is present, the bull target is CLIPPED conservatively to
+        ``min(raw, comps_high)`` -- the desk's own coverage comps range caps a raw
+        scenario bull that exceeds it. ``dcf_bull`` is carried as a DISPLAYED
+        reference (never the clip driver). No anchors -> unchanged (``raw``),
+        disclosed via the (null) anchor fields.
+    ``required_multiple`` is computed off the (triangulated) ``level``.
+    """
     res = _nearest_resistance_above(last, ladder)
     profit_take = None
     if res is not None:
         profit_take = {"level": _clean(res["level"]), "type": res.get("type")}
 
-    max_target = max((sc["price_target"] for sc in scenarios), default=None)
+    scenario_raw = max((sc["price_target"] for sc in scenarios), default=None)
+
+    # Triangulate: clip the raw scenario bull to comps_high when present (min ==
+    # conservative, the provisional formula). dcf_bull is a displayed reference.
+    level = scenario_raw
+    triangulated = False
+    if scenario_raw is not None and comps_high is not None:
+        level = min(scenario_raw, comps_high)
+        triangulated = True
+
     required_multiple = None
-    if max_target is not None and eps_ntm not in (None, 0):
-        required_multiple = _clean(max_target / eps_ntm)
+    if level is not None and eps_ntm not in (None, 0):
+        required_multiple = _clean(level / eps_ntm)
+
+    if triangulated:
+        base = (f"triangulated to min(scenario_raw {_fmt(_clean(scenario_raw))}, "
+                f"comps_high {_fmt(_clean(comps_high))}) = {_fmt(_clean(level))}")
+        if required_multiple is not None:
+            note = base + f"; implies {required_multiple:.1f}x fwd EPS"
+        else:
+            note = base
+    else:
+        note = (f"implies {required_multiple:.1f}x fwd EPS"
+                if required_multiple is not None else None)
 
     bull_target = {
-        "level": _clean(max_target),
+        "level": _clean(level),
+        "scenario_raw": _clean(scenario_raw),
+        "dcf_bull": _clean(dcf_bull),
+        "comps_high": _clean(comps_high),
+        "triangulated": triangulated,
         "required_multiple": required_multiple,
-        "note": (f"implies {required_multiple:.1f}x fwd EPS"
-                 if required_multiple is not None else None),
+        "note": note,
     }
     return {"profit_take": profit_take, "bull_target": bull_target}
 
@@ -368,6 +411,13 @@ def build_sizing(scenarios, entry_level, profile, binary30d):
         f"cap {s['cap_pct']:.1%}; "
         f"recommended {s['recommended_pct']:.1%} -- {s['rationale']}")
 
+    # Goal D (surfacing, no arithmetic change): a one-line headline that keeps f*
+    # tied to the ENTRY and the CAP so a reader never sees a bare f* (e.g. 36.7%)
+    # sitting next to a 4% cap without the entry context that justifies the gap.
+    headline = (
+        f"f* {f_star:.1%} at entry {_fmt(_clean(entry_level))}; "
+        f"capped to {s['recommended_pct']:.1%} ({s['cap_pct']:.1%} cap)")
+
     return {
         "entry_level": _clean(entry_level),
         "profile": profile,
@@ -378,6 +428,7 @@ def build_sizing(scenarios, entry_level, profile, binary30d):
         "recommended_pct": _clean(s["recommended_pct"]),
         "cap_pct": _clean(s["cap_pct"]),
         "rationale": s["rationale"],
+        "headline": headline,
         "arithmetic": arithmetic,
     }
 
@@ -519,10 +570,61 @@ def _load_json(path):
         return json.load(fh)
 
 
+def _find_valuation_anchors(bundle):
+    """Locate the coverage ``valuation_anchors.json`` for a bundle, or None.
+
+    Optional-existence pattern (mirrors score_fundamental --anchors): the anchors
+    file lives in the bundle's SIBLING ``coverage/`` dir under the ticker's
+    ``trading_desk_<T>/`` root (the bundle is ``trading_desk_<T>/detail_reports_*``,
+    coverage is ``trading_desk_<T>/coverage/valuation_anchors.json``). Absent -> None
+    (the plan is unchanged, disclosed). This is the coverage_distilled path; on the
+    web_compressed floor there is no coverage dir, so None is the correct result.
+    """
+    parent = os.path.dirname(os.path.abspath(bundle))
+    candidate = os.path.join(parent, "coverage", "valuation_anchors.json")
+    if os.path.isfile(candidate):
+        return candidate
+    return None
+
+
+def load_valuation_anchors(bundle):
+    """Return the (dcf_bull, comps_high) anchor pair for a bundle, or (None, None).
+
+    Reads the coverage ``valuation_anchors.json`` (same shape score_fundamental
+    consumes: dcf_base/dcf_bear/dcf_bull/comps_low/comps_high). A missing file, a
+    malformed JSON, or a missing/non-numeric key returns (None, None) -- the plan
+    stays on the raw scenario bull, disclosed. trade-plan does NOT re-validate the
+    anchors (score_fundamental/score_risk are the validation backstop that exits 2
+    on a malformed file upstream); here an unreadable anchors file simply means no
+    triangulation, never a crash.
+    """
+    path = _find_valuation_anchors(bundle)
+    if path is None:
+        return None, None
+    try:
+        with open(path) as fh:
+            anchors = json.load(fh)
+    except (OSError, ValueError):
+        return None, None
+    if not isinstance(anchors, dict):
+        return None, None
+    dcf_bull = anchors.get("dcf_bull")
+    comps_high = anchors.get("comps_high")
+    dcf_bull = dcf_bull if isinstance(dcf_bull, (int, float)) else None
+    comps_high = comps_high if isinstance(comps_high, (int, float)) else None
+    return dcf_bull, comps_high
+
+
 def build_stock_plan_module(composite, technical, risk, snapshot, profile,
                             catalyst_in_thesis, catalyst_in_thesis_justification,
-                            fund_metric, fund_threshold, fund_justification):
-    """Assemble the full module_tradeplan.json document (pass 1)."""
+                            fund_metric, fund_threshold, fund_justification,
+                            dcf_bull=None, comps_high=None):
+    """Assemble the full module_tradeplan.json document (pass 1).
+
+    ``dcf_bull`` / ``comps_high`` are the optional coverage anchors (Goal B): when
+    ``comps_high`` is present the bull target triangulates to min(raw, comps_high);
+    both None -> the plan is unchanged (raw scenario bull), disclosed.
+    """
     meta = snapshot.get("meta", {}) if isinstance(snapshot, dict) else {}
     price = snapshot.get("price", {}) if isinstance(snapshot, dict) else {}
     events = snapshot.get("events", {}) if isinstance(snapshot, dict) else {}
@@ -553,8 +655,9 @@ def build_stock_plan_module(composite, technical, risk, snapshot, profile,
     entries = build_entries(last, ladder, ev, downside_map)
     entry_1_level = entries[0]["level"] if entries else last
 
-    # -- exits -------------------------------------------------------------
-    exits = build_exits(last, ladder, scenarios, eps_ntm)
+    # -- exits (bull target triangulated against coverage anchors, Goal B) --
+    exits = build_exits(last, ladder, scenarios, eps_ntm,
+                        dcf_bull=dcf_bull, comps_high=comps_high)
 
     # -- invalidation ------------------------------------------------------
     invalidation = build_invalidation(entries, ladder, fund_metric,
@@ -598,6 +701,7 @@ def build_stock_plan_module(composite, technical, risk, snapshot, profile,
             "fund_invalidation_justification": fund_justification,
         },
         "event_playbook": None,   # LLM prose slot.
+        "note": _PROVISIONAL_NOTE,
         "signal": None,
     }
 
@@ -640,11 +744,38 @@ def synthesize(plan, options_module):
     # the expression still read "options tenored past catalyst"). Disclose it.
     plan["expression"]["executable"] = bool(structures_selected)
     if not structures_selected:
+        # Preserve the original options-tilted text for the record, then LEAD the
+        # recommendation with the executable (stock) leg so a reader acts on the
+        # leg that is actually implementable, not the gated options tilt (Goal D).
+        options_tilted = plan["expression"].get("recommended_for_profile")
+        plan["expression"]["recommended_for_profile_options_tilted"] = options_tilted
+        plan["expression"]["recommended_for_profile"] = (
+            _stock_fallback_expression(plan)
+            + " (options gated -- implement in stock)")
         plan["expression"]["executability_note"] = (
             "no options structures survived the options module's vol/liquidity/event "
             "gates (see module_options declined + liquidity_verdict) -- implement the "
             "expression in STOCK per the stock plan until conditions change")
     return plan
+
+
+def _stock_fallback_expression(plan):
+    """The executable stock-leg recommendation when options are gated out.
+
+    Leads with the concrete stock action from the plan (buy the entry ladder,
+    size to the recommended %) so the reader acts on the implementable leg. Reads
+    only fields the plan already carries -- no arithmetic.
+    """
+    sp = plan.get("stock_plan", {}) or {}
+    entries = sp.get("entries") or []
+    sizing = sp.get("sizing", {}) or {}
+    entry_1 = entries[0].get("level") if entries else None
+    rec = sizing.get("recommended_pct")
+    rec_txt = f"{rec:.1%}" if isinstance(rec, (int, float)) else "the recommended size"
+    if entry_1 is not None:
+        return (f"stock: buy the entry ladder from {_fmt(_clean(entry_1))}, "
+                f"sized to {rec_txt}")
+    return f"stock: buy the entry ladder, sized to {rec_txt}"
 
 
 # --------------------------------------------------------------------------- #
@@ -708,11 +839,17 @@ def _run_stock_plan(args):
     # The yes|no selector flag becomes a boolean for the decision table.
     catalyst_in_thesis = args.catalyst_in_thesis == "yes"
 
+    # Goal B (PROVISIONAL): conditionally load the coverage valuation anchors from
+    # the bundle's sibling coverage dir (optional-existence). Absent -> (None, None)
+    # -> unchanged bull target, disclosed.
+    dcf_bull, comps_high = load_valuation_anchors(args.bundle)
+
     doc = build_stock_plan_module(
         composite, technical, risk, snapshot, profile,
         catalyst_in_thesis, args.catalyst_in_thesis_justification,
         args.fund_invalidation_metric, args.fund_invalidation_threshold,
-        args.fund_invalidation_justification)
+        args.fund_invalidation_justification,
+        dcf_bull=dcf_bull, comps_high=comps_high)
 
     out = args.out or os.path.join(args.bundle, "module_tradeplan.json")
     with open(out, "w") as fh:

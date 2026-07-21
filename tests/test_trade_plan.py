@@ -274,6 +274,99 @@ class TestExits(unittest.TestCase):
         self.assertEqual(exits["bull_target"]["level"], 150.0)
         self.assertIsNone(exits["bull_target"]["required_multiple"])
 
+    # -- Goal B: bull-target triangulation from coverage anchors --------------- #
+
+    def test_bull_target_unchanged_without_anchors(self):
+        # no anchors -> level == raw scenario bull, scenario_raw preserved,
+        # triangulated False, anchor fields null.
+        exits = tp.build_exits(_LAST, _technical_doc()["ladder"], _SCENARIOS, 5.5)
+        bt = exits["bull_target"]
+        self.assertEqual(bt["level"], 150.0)
+        self.assertEqual(bt["scenario_raw"], 150.0)
+        self.assertFalse(bt["triangulated"])
+        self.assertIsNone(bt["dcf_bull"])
+        self.assertIsNone(bt["comps_high"])
+
+    def test_bull_target_triangulates_to_min_when_comps_high_below_raw(self):
+        # comps_high 130 < raw 150 -> level clipped to 130; raw preserved.
+        exits = tp.build_exits(_LAST, _technical_doc()["ladder"], _SCENARIOS, 5.5,
+                               dcf_bull=145.0, comps_high=130.0)
+        bt = exits["bull_target"]
+        self.assertEqual(bt["level"], 130.0)          # min(150, 130)
+        self.assertEqual(bt["scenario_raw"], 150.0)   # raw preserved
+        self.assertTrue(bt["triangulated"])
+        self.assertEqual(bt["dcf_bull"], 145.0)       # displayed reference
+        self.assertEqual(bt["comps_high"], 130.0)
+        # required_multiple recomputed off the TRIANGULATED level (130), not raw.
+        self.assertAlmostEqual(bt["required_multiple"], 130.0 / 5.5, places=4)
+
+    def test_bull_target_keeps_raw_when_comps_high_above_raw(self):
+        # comps_high 160 > raw 150 -> min keeps 150; still marked triangulated.
+        exits = tp.build_exits(_LAST, _technical_doc()["ladder"], _SCENARIOS, 5.5,
+                               dcf_bull=155.0, comps_high=160.0)
+        bt = exits["bull_target"]
+        self.assertEqual(bt["level"], 150.0)          # min(150, 160)
+        self.assertEqual(bt["scenario_raw"], 150.0)
+        self.assertTrue(bt["triangulated"])
+        self.assertEqual(bt["comps_high"], 160.0)
+
+    def test_bull_target_dcf_bull_is_display_only_not_clip(self):
+        # dcf_bull 100 far below raw 150 but NO comps_high -> NOT triangulated;
+        # dcf_bull is a displayed reference, never the clip driver.
+        exits = tp.build_exits(_LAST, _technical_doc()["ladder"], _SCENARIOS, 5.5,
+                               dcf_bull=100.0, comps_high=None)
+        bt = exits["bull_target"]
+        self.assertEqual(bt["level"], 150.0)          # unclipped (no comps_high)
+        self.assertFalse(bt["triangulated"])
+        self.assertEqual(bt["dcf_bull"], 100.0)
+
+
+# --------------------------------------------------------------------------- #
+# Valuation-anchor loading (Goal B): sibling coverage dir, optional-existence.
+# --------------------------------------------------------------------------- #
+
+class TestLoadValuationAnchors(unittest.TestCase):
+    def setUp(self):
+        import shutil
+        self.root = tempfile.mkdtemp()          # stands in for trading_desk_MU/
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.bundle = os.path.join(self.root, "detail_reports_2026-07-16")
+        os.makedirs(self.bundle)
+
+    def _write_anchors(self, doc):
+        cov = os.path.join(self.root, "coverage")
+        os.makedirs(cov, exist_ok=True)
+        with open(os.path.join(cov, "valuation_anchors.json"), "w") as fh:
+            json.dump(doc, fh)
+
+    def test_absent_coverage_returns_none_none(self):
+        dcf_bull, comps_high = tp.load_valuation_anchors(self.bundle)
+        self.assertIsNone(dcf_bull)
+        self.assertIsNone(comps_high)
+
+    def test_present_anchors_return_dcf_bull_and_comps_high(self):
+        self._write_anchors({
+            "dcf_base": 120.0, "dcf_bear": 95.0, "dcf_bull": 150.0,
+            "comps_low": 100.0, "comps_high": 140.0, "as_of": "2026-07-01"})
+        dcf_bull, comps_high = tp.load_valuation_anchors(self.bundle)
+        self.assertEqual(dcf_bull, 150.0)
+        self.assertEqual(comps_high, 140.0)
+
+    def test_malformed_anchors_return_none_none_no_crash(self):
+        cov = os.path.join(self.root, "coverage")
+        os.makedirs(cov, exist_ok=True)
+        with open(os.path.join(cov, "valuation_anchors.json"), "w") as fh:
+            fh.write("{not valid json")
+        dcf_bull, comps_high = tp.load_valuation_anchors(self.bundle)
+        self.assertIsNone(dcf_bull)
+        self.assertIsNone(comps_high)
+
+    def test_non_numeric_keys_return_none(self):
+        self._write_anchors({"dcf_bull": "n/a", "comps_high": None})
+        dcf_bull, comps_high = tp.load_valuation_anchors(self.bundle)
+        self.assertIsNone(dcf_bull)
+        self.assertIsNone(comps_high)
+
 
 # --------------------------------------------------------------------------- #
 # Invalidation: BOTH legs mandatory.
@@ -332,6 +425,22 @@ class TestSizing(unittest.TestCase):
         sizing = tp.build_sizing(_SCENARIOS, 95.0, "balanced", True)
         self.assertIn("f*", sizing["arithmetic"])
         self.assertIn("binary", sizing["arithmetic"].lower())
+
+    def test_sizing_headline_carries_f_star_entry_and_cap(self):
+        # Goal D: headline keeps f* tied to the entry and the cap so a bare f*
+        # never sits next to a small cap without context. No arithmetic change.
+        k = ev_kelly.kelly(_SCENARIOS, 95.0)
+        s = ev_kelly.size_recommendation(k["f_star"], "balanced", True)
+        sizing = tp.build_sizing(_SCENARIOS, 95.0, "balanced", True)
+        self.assertIn("headline", sizing)
+        h = sizing["headline"]
+        self.assertIn("f*", h)
+        self.assertIn(f"{k['f_star']:.1%}", h)   # the actual f*
+        self.assertIn("entry 95", h)             # entry context
+        self.assertIn(f"{s['cap_pct']:.1%}", h)  # the cap
+        self.assertIn(f"{s['recommended_pct']:.1%}", h)  # capped-to value
+        # f_star field itself is unchanged (no arithmetic change).
+        self.assertAlmostEqual(sizing["f_star"], k["f_star"], places=4)
 
 
 # --------------------------------------------------------------------------- #
@@ -519,7 +628,7 @@ class TestStockPlanCLI(unittest.TestCase):
                          f"stdout={proc.stdout}\nstderr={proc.stderr}")
         doc = self._read()
         self.assertEqual(doc["skill"], "trade-plan")
-        self.assertEqual(doc["rubric_version"], "1.0.0")
+        self.assertEqual(doc["rubric_version"], "1.1.0")
         self.assertEqual(doc["ticker"], "MU")
         self.assertEqual(doc["as_of"], "2026-07-16")
         self.assertEqual(doc["profile"], "balanced")
@@ -614,6 +723,27 @@ class TestStockPlanCLI(unittest.TestCase):
         bt = doc["stock_plan"]["exits"]["bull_target"]
         self.assertAlmostEqual(bt["required_multiple"], 150.0 / 5.5, places=4)
 
+    def test_cli_bull_target_untriangulated_without_coverage(self):
+        # The flat tempdir bundle has no sibling coverage/ -> raw scenario bull.
+        self._run()
+        bt = self._read()["stock_plan"]["exits"]["bull_target"]
+        self.assertEqual(bt["level"], 150.0)
+        self.assertEqual(bt["scenario_raw"], 150.0)
+        self.assertFalse(bt["triangulated"])
+
+    def test_cli_rubric_1_1_0_and_note(self):
+        self._run()
+        doc = self._read()
+        self.assertEqual(doc["rubric_version"], "1.1.0")
+        self.assertIn("PROVISIONAL", doc["note"])
+
+    def test_cli_sizing_headline_present(self):
+        self._run()
+        sizing = self._read()["stock_plan"]["sizing"]
+        self.assertIn("headline", sizing)
+        self.assertIn("f*", sizing["headline"])
+        self.assertIn("cap", sizing["headline"])
+
     def test_cli_missing_composite_exit2(self):
         os.remove(os.path.join(self.dir, "module_composite.json"))
         proc = self._run()
@@ -659,6 +789,59 @@ class TestStockPlanCLI(unittest.TestCase):
         self.assertEqual(p1.returncode, 0)
         self.assertEqual(p2.returncode, 0)
         self.assertEqual(a, b)
+
+
+# --------------------------------------------------------------------------- #
+# CLI bull triangulation with a real sibling coverage/ dir (Goal B).
+# --------------------------------------------------------------------------- #
+
+class TestBullTriangulationCLI(unittest.TestCase):
+    """CLI triangulation with a real sibling coverage/ dir (the coverage_distilled
+    layout: trading_desk_MU/detail_reports_*/ bundle, trading_desk_MU/coverage/)."""
+
+    def setUp(self):
+        import shutil
+        self.root = tempfile.mkdtemp()          # stands in for trading_desk_MU/
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.bundle = os.path.join(self.root, "detail_reports_2026-07-16")
+        os.makedirs(self.bundle)
+        _full_bundle(self.bundle)
+
+    def _write_anchors(self, dcf_bull=145.0, comps_high=130.0):
+        cov = os.path.join(self.root, "coverage")
+        os.makedirs(cov, exist_ok=True)
+        with open(os.path.join(cov, "valuation_anchors.json"), "w") as fh:
+            json.dump({"dcf_base": 120.0, "dcf_bear": 95.0, "dcf_bull": dcf_bull,
+                       "comps_low": 100.0, "comps_high": comps_high,
+                       "as_of": "2026-07-01"}, fh)
+
+    def _run(self):
+        cmd = [sys.executable, SCRIPT, "--stock-plan", "--bundle", self.bundle]
+        cmd += _base_fund_flags()
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    def _read(self):
+        with open(os.path.join(self.bundle, "module_tradeplan.json")) as fh:
+            return json.load(fh)
+
+    def test_cli_triangulates_to_comps_high(self):
+        # comps_high 130 < raw scenario bull 150 -> bull target clipped to 130.
+        self._write_anchors(dcf_bull=145.0, comps_high=130.0)
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        bt = self._read()["stock_plan"]["exits"]["bull_target"]
+        self.assertEqual(bt["level"], 130.0)
+        self.assertEqual(bt["scenario_raw"], 150.0)   # raw preserved
+        self.assertTrue(bt["triangulated"])
+        self.assertEqual(bt["dcf_bull"], 145.0)       # displayed reference
+
+    def test_cli_no_anchors_leaves_raw(self):
+        # coverage/ absent -> untriangulated, raw scenario bull.
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        bt = self._read()["stock_plan"]["exits"]["bull_target"]
+        self.assertEqual(bt["level"], 150.0)
+        self.assertFalse(bt["triangulated"])
 
 
 # --------------------------------------------------------------------------- #
@@ -750,6 +933,38 @@ class TestSynthesizeCLI(unittest.TestCase):
         self.assertTrue(exp["synthesized"])
         self.assertFalse(exp["executable"])
         self.assertIn("STOCK", exp["executability_note"])
+
+    def test_synthesize_zero_structures_expression_leads_with_stock(self):
+        # Goal D: when options are gated out, recommended_for_profile leads with the
+        # executable stock leg (buy the ladder, sized) + "(options gated ...)" note;
+        # the original options-tilted text is preserved for the record.
+        empty = _options_doc()
+        empty["recommended_structures"] = []
+        empty["hedge_structure"] = None
+        empty.pop("hedge", None)
+        self._write_options(empty)
+        proc = self._synth()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        exp = self._read()["expression"]
+        rec = exp["recommended_for_profile"].lower()
+        # leads with the executable leg (stock / entry ladder), not the options tilt.
+        self.assertTrue(rec.startswith("stock"))
+        self.assertIn("entry ladder", rec)
+        self.assertIn("options gated", rec)
+        # original options-tilted recommendation preserved for the record.
+        self.assertIn("recommended_for_profile_options_tilted", exp)
+        self.assertIsNotNone(exp["recommended_for_profile_options_tilted"])
+
+    def test_synthesize_with_structures_keeps_options_recommendation(self):
+        # When structures survive, recommended_for_profile stays the options tilt
+        # (no stock fallback substitution).
+        self._write_options()
+        proc = self._synth()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        exp = self._read()["expression"]
+        self.assertNotIn("options gated",
+                         exp["recommended_for_profile"].lower())
+        self.assertNotIn("recommended_for_profile_options_tilted", exp)
 
 
 if __name__ == "__main__":

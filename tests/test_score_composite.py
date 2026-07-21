@@ -343,6 +343,161 @@ class TestSensitivity(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# Base-rate anchoring (Goal A, composite-v1.1.0 PROVISIONAL).
+# --------------------------------------------------------------------------- #
+
+# A known 8-quarter earnings-move history -> known bull/base/bear frequencies.
+#   moves: +.10 (bull), +.02 (base), -.08 (bear), -.01 (base),
+#          +.07 (bull), +.20 (bull), -.06 (bear), +.03 (base)
+#   classify at +/-5%: bull {.10,.07,.20}=3, base {.02,-.01,.03}=3, bear {-.08,-.06}=2
+#   n=8 -> bull 3/8=.375, base 3/8=.375, bear 2/8=.25.
+_MOVE_HISTORY = [
+    {"quarter_end": "2026-04-30", "move_pct": 0.10},
+    {"quarter_end": "2026-01-30", "move_pct": 0.02},
+    {"quarter_end": "2025-10-30", "move_pct": -0.08},
+    {"quarter_end": "2025-07-30", "move_pct": -0.01},
+    {"quarter_end": "2025-04-30", "move_pct": 0.07},
+    {"quarter_end": "2025-01-30", "move_pct": 0.20},
+    {"quarter_end": "2024-10-30", "move_pct": -0.06},
+    {"quarter_end": "2024-07-30", "move_pct": 0.03},
+]
+
+
+class TestBaseRateAnchoring(unittest.TestCase):
+    def test_classify_move_bands(self):
+        self.assertEqual(sc.classify_move(0.06), "bull")   # > +5%
+        self.assertEqual(sc.classify_move(0.051), "bull")
+        self.assertEqual(sc.classify_move(0.05), "base")   # exactly +5% is base
+        self.assertEqual(sc.classify_move(0.0), "base")
+        self.assertEqual(sc.classify_move(-0.05), "base")  # exactly -5% is base
+        self.assertEqual(sc.classify_move(-0.06), "bear")  # < -5%
+
+    def test_base_rates_known_frequencies(self):
+        rates, n = sc.compute_base_rates(_MOVE_HISTORY)
+        self.assertEqual(n, 8)
+        self.assertAlmostEqual(rates["bull"], 0.375, places=4)
+        self.assertAlmostEqual(rates["base"], 0.375, places=4)
+        self.assertAlmostEqual(rates["bear"], 0.25, places=4)
+
+    def test_deviation_flag_fires_above_25pp(self):
+        # base-rate bull .375; an LLM bull prob .70 deviates .325 > .25 -> flagged.
+        scenarios = [
+            {"name": "bull", "prob": 0.70, "price_target": 150.0},
+            {"name": "base", "prob": 0.20, "price_target": 120.0},
+            {"name": "bear", "prob": 0.10, "price_target": 80.0},
+        ]
+        brc = sc.build_base_rate_check(scenarios, _MOVE_HISTORY)
+        self.assertTrue(brc["flagged"])
+        self.assertFalse(brc["skipped"])
+        self.assertEqual(brc["n_history"], 8)
+        self.assertEqual(brc["threshold_pp"], 25)
+        # bull deviation |.70 - .375| = .325 recorded.
+        self.assertAlmostEqual(brc["deviations"]["bull"], 0.325, places=4)
+
+    def test_deviation_flag_clears_within_25pp(self):
+        # probs near the base rates (.375/.375/.25) -> every deviation <= 25pp.
+        scenarios = [
+            {"name": "bull", "prob": 0.40, "price_target": 150.0},
+            {"name": "base", "prob": 0.35, "price_target": 120.0},
+            {"name": "bear", "prob": 0.25, "price_target": 80.0},
+        ]
+        brc = sc.build_base_rate_check(scenarios, _MOVE_HISTORY)
+        self.assertFalse(brc["flagged"])
+        self.assertFalse(brc["skipped"])
+        # each deviation is small.
+        for name in ("bull", "base", "bear"):
+            self.assertLessEqual(brc["deviations"][name], 0.25)
+
+    def test_deviation_exactly_25pp_does_not_fire(self):
+        # boundary: |prob - base_rate| == .25 exactly -> NOT flagged (strict >).
+        scenarios = [
+            {"name": "bull", "prob": 0.625, "price_target": 150.0},  # .625-.375=.25
+            {"name": "base", "prob": 0.275, "price_target": 120.0},
+            {"name": "bear", "prob": 0.10, "price_target": 80.0},
+        ]
+        brc = sc.build_base_rate_check(scenarios, _MOVE_HISTORY)
+        self.assertFalse(brc["flagged"])
+
+    def test_skip_when_history_below_4(self):
+        # n=3 < 4 -> skipped + disclosed, never flagged, base_rates all None.
+        short = _MOVE_HISTORY[:3]
+        scenarios = [
+            {"name": "bull", "prob": 0.90, "price_target": 150.0},
+            {"name": "base", "prob": 0.05, "price_target": 120.0},
+            {"name": "bear", "prob": 0.05, "price_target": 80.0},
+        ]
+        brc = sc.build_base_rate_check(scenarios, short)
+        self.assertTrue(brc["skipped"])
+        self.assertEqual(brc["n_history"], 3)
+        self.assertFalse(brc["flagged"])
+        self.assertEqual(brc["deviations"], {})
+        self.assertIsNone(brc["base_rates"]["bull"])
+        self.assertIn("insufficient", brc["skip_reason"])
+
+    def test_skip_when_no_history(self):
+        brc = sc.build_base_rate_check(_SCENARIOS, None)
+        self.assertTrue(brc["skipped"])
+        self.assertEqual(brc["n_history"], 0)
+
+    def test_exactly_4_history_computes(self):
+        # n=4 is the minimum that computes (>= 4).
+        four = _MOVE_HISTORY[:4]  # +.10 bull, +.02 base, -.08 bear, -.01 base
+        rates, n = sc.compute_base_rates(four)
+        self.assertEqual(n, 4)
+        self.assertAlmostEqual(rates["bull"], 0.25, places=4)
+        self.assertAlmostEqual(rates["base"], 0.5, places=4)
+        self.assertAlmostEqual(rates["bear"], 0.25, places=4)
+        brc = sc.build_base_rate_check(_SCENARIOS, four)
+        self.assertFalse(brc["skipped"])
+        self.assertEqual(brc["n_history"], 4)
+
+
+# --------------------------------------------------------------------------- #
+# Auto-tension gate (Goal C, composite-v1.1.0 PROVISIONAL).
+# --------------------------------------------------------------------------- #
+
+class TestAutoTension(unittest.TestCase):
+    def _dims(self, technical, fundamental, sentiment, risk, thesis=76):
+        return [
+            {"name": "technical", "score": technical},
+            {"name": "fundamental", "score": fundamental},
+            {"name": "sentiment", "score": sentiment},
+            {"name": "risk", "score": risk},
+            {"name": "thesis_conviction", "score": thesis},
+        ]
+
+    def test_fires_above_25_spread_names_dims(self):
+        # sentiment 59 high, fundamental 31 low -> spread 28 > 25 -> fires.
+        dims = self._dims(technical=50, fundamental=31, sentiment=59, risk=45)
+        tension = sc.build_auto_tension(dims)
+        self.assertIsNotNone(tension)
+        self.assertIn("sentiment", tension)
+        self.assertIn("fundamental", tension)
+        self.assertIn("59", tension)
+        self.assertIn("31", tension)
+        self.assertIn("28-pt", tension)
+
+    def test_null_at_or_below_25_spread(self):
+        # spread exactly 25 (70-45) -> not > 25 -> null.
+        dims = self._dims(technical=70, fundamental=60, sentiment=55, risk=45)
+        self.assertIsNone(sc.build_auto_tension(dims))
+
+    def test_thesis_conviction_excluded_from_spread(self):
+        # evidence dims tight (50-55, spread 5), thesis 95 -> if thesis counted the
+        # spread would be 45 and fire; it must NOT (thesis excluded) -> null.
+        dims = self._dims(technical=50, fundamental=52, sentiment=55, risk=51,
+                          thesis=95)
+        self.assertIsNone(sc.build_auto_tension(dims))
+
+    def test_fires_just_above_25(self):
+        # spread 26 (71-45) -> fires.
+        dims = self._dims(technical=71, fundamental=60, sentiment=55, risk=45)
+        tension = sc.build_auto_tension(dims)
+        self.assertIsNotNone(tension)
+        self.assertIn("26-pt", tension)
+
+
+# --------------------------------------------------------------------------- #
 # INPUT_FIELDS declaration (single-mapping governance).
 # --------------------------------------------------------------------------- #
 
@@ -377,11 +532,13 @@ def _conf(level):
     }
 
 
-def _write_snapshot(dir_):
+def _write_snapshot(dir_, earnings_move_history=None):
     snap = {
         "meta": {"ticker": "MU", "as_of_utc": "2026-07-16T00:00:00Z"},
         "price": {"last": 100.0},
     }
+    if earnings_move_history is not None:
+        snap["events"] = {"earnings_move_history": earnings_move_history}
     with open(os.path.join(dir_, "snapshot_MU_2026-07-16.json"), "w") as fh:
         json.dump(snap, fh)
 
@@ -498,14 +655,27 @@ class TestCLI(unittest.TestCase):
         with open(out) as fh:
             doc = json.load(fh)
         self.assertEqual(doc["skill"], "composite-score")
-        self.assertEqual(doc["rubric_version"], "1.0.0")
+        self.assertEqual(doc["rubric_version"], "1.1.0")
         self.assertEqual(doc["ticker"], "MU")
         self.assertEqual(doc["as_of"], "2026-07-16")
         self.assertEqual(doc["profile"], "balanced")
         self.assertAlmostEqual(doc["score"], 59.9, places=4)
         self.assertEqual(doc["grade"], "C")
         self.assertEqual(doc["action"], "Hold/Trim")
-        self.assertIsNone(doc["tension"])
+        # Auto-tension (Goal C): fixture evidence scores 70/60/50/40 -> spread 30
+        # > 25 -> tension auto-populates naming the high/low dims (technical high,
+        # risk low). thesis_conviction is excluded from the spread.
+        self.assertIsNotNone(doc["tension"])
+        self.assertIn("technical", doc["tension"])
+        self.assertIn("risk", doc["tension"])
+        self.assertIn("30-pt", doc["tension"])
+        # base_rate_check (Goal A): fixture snapshot carries no earnings_move_history
+        # (n=0 < 4) -> the check is SKIPPED + disclosed, never a hard gate.
+        brc = doc["flags"]["base_rate_check"]
+        self.assertTrue(brc["skipped"])
+        self.assertEqual(brc["n_history"], 0)
+        self.assertFalse(brc["flagged"])
+        self.assertEqual(brc["threshold_pp"], 25)
         self.assertIsNone(doc["signal"])
         # dimensions include all five
         names = {d["name"] for d in doc["dimensions"]}
@@ -678,6 +848,108 @@ class TestCLI(unittest.TestCase):
         with open(out2) as fh:
             b = fh.read()
         self.assertEqual(a, b)
+
+
+# --------------------------------------------------------------------------- #
+# CLI: base-rate anchoring + auto-tension (Goal A + C, composite-v1.1.0).
+# --------------------------------------------------------------------------- #
+
+class TestBaseRateAndTensionCLI(unittest.TestCase):
+    def setUp(self):
+        import shutil
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        for name, s in _MOD_SCORES.items():
+            _write_module(self.dir, name, s)
+        self.scen = _write_scenarios(self.dir)
+
+    def _base_flags(self):
+        return [
+            "--scenarios", self.scen,
+            "--scenario-reasoning", "asymmetric HBM demand",
+            "--variant", "some",
+            "--variant-justification", "gross-margin path differentiated",
+            "--catalyst-clarity", "clear",
+            "--catalyst-clarity-justification", "HBM ramp dated",
+            "--invalidation", "both-legs",
+            "--invalidation-justification", "thesis + trade stops named",
+        ]
+
+    def _run(self, extra=None):
+        cmd = [sys.executable, SCRIPT, "--bundle", self.dir] + self._base_flags()
+        if extra:
+            cmd += extra
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    def _read(self):
+        with open(os.path.join(self.dir, "module_composite.json")) as fh:
+            return json.load(fh)
+
+    def test_base_rate_check_computes_off_history(self):
+        # snapshot carries the 8-quarter history -> base rates + deviations land.
+        _write_snapshot(self.dir, earnings_move_history=_MOVE_HISTORY)
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        brc = self._read()["flags"]["base_rate_check"]
+        self.assertFalse(brc["skipped"])
+        self.assertEqual(brc["n_history"], 8)
+        self.assertAlmostEqual(brc["base_rates"]["bull"], 0.375, places=4)
+        # default fixture scenarios .25/.5/.25 vs base rates .375/.375/.25 ->
+        # each deviation <= 25pp -> not flagged.
+        self.assertFalse(brc["flagged"])
+
+    def test_base_rate_flag_fires_on_overconfident_bull(self):
+        # a bull-heavy scenario set (.80/.15/.05) deviates > 25pp from .375 -> flag.
+        overconf = [
+            {"name": "bull", "prob": 0.80, "price_target": 150.0},
+            {"name": "base", "prob": 0.15, "price_target": 120.0},
+            {"name": "bear", "prob": 0.05, "price_target": 80.0},
+        ]
+        scen = _write_scenarios(self.dir, overconf)
+        _write_snapshot(self.dir, earnings_move_history=_MOVE_HISTORY)
+        cmd = [sys.executable, SCRIPT, "--bundle", self.dir,
+               "--scenarios", scen] + self._base_flags()[2:]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        brc = self._read()["flags"]["base_rate_check"]
+        self.assertTrue(brc["flagged"])
+        self.assertFalse(brc["skipped"])
+
+    def test_base_rate_skipped_when_history_thin(self):
+        _write_snapshot(self.dir, earnings_move_history=_MOVE_HISTORY[:3])
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        brc = self._read()["flags"]["base_rate_check"]
+        self.assertTrue(brc["skipped"])
+        self.assertEqual(brc["n_history"], 3)
+
+    def test_auto_tension_fires_on_wide_spread(self):
+        # _MOD_SCORES: technical 70 / risk 40 -> spread 30 > 25 -> tension fires.
+        _write_snapshot(self.dir, earnings_move_history=_MOVE_HISTORY)
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        doc = self._read()
+        self.assertIsNotNone(doc["tension"])
+        self.assertIn("technical", doc["tension"])
+        self.assertIn("risk", doc["tension"])
+
+    def test_auto_tension_null_on_tight_spread(self):
+        # rewrite modules tight (spread 20 <= 25) -> tension stays null.
+        for name, s in {"technical": 60, "fundamental": 55,
+                        "sentiment": 50, "risk": 40}.items():
+            _write_module(self.dir, name, s)
+        _write_snapshot(self.dir, earnings_move_history=_MOVE_HISTORY)
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIsNone(self._read()["tension"])
+
+    def test_rubric_is_1_1_0_and_note_provisional(self):
+        _write_snapshot(self.dir, earnings_move_history=_MOVE_HISTORY)
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        doc = self._read()
+        self.assertEqual(doc["rubric_version"], "1.1.0")
+        self.assertIn("PROVISIONAL", doc["note"])
 
 
 # --------------------------------------------------------------------------- #
