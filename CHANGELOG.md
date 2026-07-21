@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased — 2026-07-21 · Wave 4C: C-ID referential-integrity gate on judgment flags (B29)
+
+The cross-cutting governance close-out. The review's "judgments must cite context, not narrate
+alongside it" becomes a **checking artifact**, not prose. **Moves no score** — a report-time validator.
+Suite: 1469 passed.
+
+- **New blocking `judgment_flag_citations` check in `report_qc.py`** — when a `module_context.json`
+  registry exists, every NON-DEFAULT judgment flag's justification (technical `divergence`; sentiment
+  `rating_actions`/`inst_flow`/`insider_baseline`; risk `top_risk`; composite `variant`/
+  `catalyst_clarity`/`invalidation`) must (a) be GROUNDED — contain ≥1 `C<n>` token — and (b) satisfy
+  REFERENTIAL INTEGRITY — every cited C-ID exists in `module_context.findings`. Orphan or ungrounded
+  citation → report fails. Same regex + registry discipline fundamental `--moat` already had, now
+  applied to the flags that ran in Phase 2 parallel with context (enforced at the report gate, the
+  ordering-safe point). Waivable with a disclosed reason.
+- **Compressed floor auto-passes** (no registry to cite) — mirrors fundamental's compressed behavior.
+- The four evidence/orchestration SKILLs now state the requirement + name the check.
+- Real-data proof: the as-shipped BE bundle (built pre-gate) FAILS the check — its `insider_baseline`
+  judgment cited no context finding. That ungrounded judgment is exactly what the 2026-07-19 review
+  flagged; the gate would now force it grounded. Orphan-C-ID and valid-C-ID paths both confirmed.
+
 ## Unreleased — 2026-07-21 · Wave 4B: event-vol-aware options (`options-v1.1.0`, PROVISIONAL)
 
 R4 — the options module goes event-vol-aware (Philosophy A). The options module is the expression

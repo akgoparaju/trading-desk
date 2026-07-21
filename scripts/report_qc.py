@@ -795,6 +795,146 @@ def check_no_empty_slots(report_text):
     return _result("no_empty_slots", True, "no unfilled slots remain")
 
 
+# C\d+ token regex (finding citation): same pattern as _FINDING_REF_RE above
+# but compiled once here for use in check_judgment_flag_citations.
+_CID_RE = re.compile(r"C\d+")
+
+
+def check_judgment_flag_citations(bundle):
+    """C-ID referential-integrity gate on all non-default judgment flags (B29).
+
+    Collects every non-default judgment-flag justification string across the
+    four scored module JSONs, then verifies two things for each:
+
+      * GROUNDING: the justification contains >=1 C<n> token (it cites a
+        context finding). Zero tokens -> FAIL ("ungrounded judgment flag").
+      * REFERENTIAL INTEGRITY: every C<n> token in the justification matches
+        a finding id in module_context.findings[]. An orphan C-ID (one that
+        does NOT appear in the registry) -> FAIL ("orphan citation").
+
+    When module_context.json is ABSENT from the bundle (the web_compressed
+    floor where no registry exists to cite) → passes automatically: there is
+    no registry to check against, and the compressed-floor disclosure covers
+    the omission.
+
+    A module JSON that is absent from the bundle is SKIPPED (not a failure;
+    only present modules are checked).
+
+    Returns the standard {check, passed, detail} shape. Wired into the BLOCKING
+    check list in run_report_qc so a failure makes the gate exit 1.
+    """
+    check_name = "judgment_flag_citations"
+
+    # ---- load module_context.json; auto-pass if absent ----
+    context_path = os.path.join(bundle, "module_context.json")
+    if not os.path.isfile(context_path):
+        return _result(check_name, True,
+                       "no module_context.json — compressed floor, auto-pass")
+
+    try:
+        with open(context_path) as fh:
+            ctx = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return _result(check_name, False,
+                       f"cannot parse module_context.json: {exc}")
+
+    # Build the valid finding-ID set from module_context.findings[].id
+    valid_ids = set()
+    for f in (ctx.get("findings") or []):
+        if isinstance(f, dict) and isinstance(f.get("id"), str):
+            valid_ids.add(f["id"])
+
+    # ---- collect non-default judgment-flag justifications per module ----
+    # Each entry: (module_label, flag_name, justification_string)
+    to_check = []
+
+    # Helper: load a module JSON from the bundle; return None if absent.
+    def _load_module(filename):
+        path = os.path.join(bundle, filename)
+        if not os.path.isfile(path):
+            return None
+        try:
+            with open(path) as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return None
+
+    # --- technical ---
+    tech = _load_module("module_technical.json")
+    if tech is not None:
+        flags = tech.get("flags") or {}
+        if flags.get("divergence", "none") != "none":
+            just = flags.get("divergence_justification")
+            if just:
+                to_check.append(("technical", "divergence_justification", just))
+
+    # --- sentiment ---
+    sent = _load_module("module_sentiment.json")
+    if sent is not None:
+        flags = sent.get("flags") or {}
+        if flags.get("rating_actions", "neutral") != "neutral":
+            just = flags.get("rating_actions_justification")
+            if just:
+                to_check.append(("sentiment", "rating_actions_justification", just))
+        if flags.get("inst_flow", "unknown") != "unknown":
+            just = flags.get("inst_flow_justification")
+            if just:
+                to_check.append(("sentiment", "inst_flow_justification", just))
+        if flags.get("insider_baseline", "normal") != "normal":
+            just = flags.get("insider_baseline_justification")
+            if just:
+                to_check.append(("sentiment", "insider_baseline_justification", just))
+
+    # --- risk ---
+    risk = _load_module("module_risk.json")
+    if risk is not None:
+        flags = risk.get("flags") or {}
+        if flags.get("top_risk") is not None and flags.get("stress_pct") is not None:
+            just = flags.get("top_risk")  # top_risk IS the justification string
+            if just:
+                to_check.append(("risk", "top_risk", just))
+
+    # --- composite ---
+    comp = _load_module("module_composite.json")
+    if comp is not None:
+        flags = comp.get("flags") or {}
+        if flags.get("variant", "none") != "none":
+            just = flags.get("variant_justification")
+            if just:
+                to_check.append(("composite", "variant_justification", just))
+        if flags.get("catalyst_clarity", "vague") != "vague":
+            just = flags.get("catalyst_clarity_justification")
+            if just:
+                to_check.append(("composite", "catalyst_clarity_justification", just))
+        if flags.get("invalidation", "none") != "none":
+            just = flags.get("invalidation_justification")
+            if just:
+                to_check.append(("composite", "invalidation_justification", just))
+
+    # ---- verify grounding + referential integrity ----
+    for module_label, flag_name, justification in to_check:
+        cids = _CID_RE.findall(justification)
+
+        # Grounding: must cite at least one C-ID
+        if not cids:
+            return _result(check_name, False,
+                           f"ungrounded judgment flag {module_label}.{flag_name}"
+                           " — cite a context finding (C<n>)")
+
+        # Referential integrity: every cited C-ID must exist in the registry
+        for cid in cids:
+            if cid not in valid_ids:
+                return _result(check_name, False,
+                               f"orphan citation {cid} in {module_label}.{flag_name}"
+                               " — not in module_context.findings")
+
+    n = len(to_check)
+    return _result(check_name, True,
+                   f"{n} non-default judgment flag(s) checked — all grounded and"
+                   " citations resolve" if n else
+                   "no non-default judgment flags — check trivially passes")
+
+
 # --------------------------------------------------------------------------- #
 # Orchestration.
 # --------------------------------------------------------------------------- #
@@ -849,6 +989,7 @@ def run_report_qc(bundle, report_path, delta=False, previous=None):
         check_footer_integrity(report_text, docs),
         check_word_cap(report_text),
         check_no_empty_slots(report_text),
+        check_judgment_flag_citations(bundle),
     ]
 
 
