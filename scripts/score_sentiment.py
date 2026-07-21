@@ -639,6 +639,26 @@ def _find_snapshot(bundle):
     return max(matches, key=os.path.getmtime)
 
 
+def _days_to_earnings(snapshot):
+    """Return calendar days from the snapshot as_of date to the next earnings
+    date, or None if either date is absent/unparseable."""
+    from datetime import date
+    meta = snapshot.get("meta", {}) if isinstance(snapshot, dict) else {}
+    events = snapshot.get("events", {}) if isinstance(snapshot, dict) else {}
+    as_of_raw = meta.get("as_of_utc") or ""
+    as_of_str = as_of_raw[:10] if isinstance(as_of_raw, str) else ""
+    ne = events.get("next_earnings") if isinstance(events, dict) else None
+    ne_date_str = (ne.get("date") if isinstance(ne, dict) else None) or ""
+    if not as_of_str or not ne_date_str:
+        return None
+    try:
+        as_of = date.fromisoformat(as_of_str[:10])
+        ne_date = date.fromisoformat(ne_date_str[:10])
+    except ValueError:
+        return None
+    return (ne_date - as_of).days
+
+
 def build_module(snapshot, rating_actions, rating_actions_justification,
                  inst_flow, inst_flow_justification,
                  insider_baseline, insider_baseline_justification) -> dict:
@@ -657,6 +677,22 @@ def build_module(snapshot, rating_actions, rating_actions_justification,
                    insider_baseline, insider_baseline_justification)
 
     iv = sentiment.get("iv_pctile_1yr")
+
+    # QF5: when revisions_90d is null and the snapshot is within ~14 days of
+    # next_earnings, the renormalization silently removes the most forward-looking
+    # signal at exactly the moment it matters most -- surface this loudly.
+    revisions_null_reason = fund.get("revisions_null_reason")
+    days_to_earnings = _days_to_earnings(snapshot)
+    pre_earnings_revisions_warning = None
+    if revisions is None and days_to_earnings is not None and 0 <= days_to_earnings <= 14:
+        pre_earnings_revisions_warning = (
+            f"WARNING: revisions_90d is null within {days_to_earnings}d of next earnings "
+            f"-- the 20-pt revisions dimension has been renormalized away at the most "
+            f"critical signal window. Null reason: {revisions_null_reason or 'unknown'}. "
+            f"Treat the sentiment score as incomplete; do NOT interpret a high score "
+            f"as confirmation of positive revision momentum."
+        )
+
     doc = {
         "skill": SKILL_NAME,
         "rubric_version": RUBRIC_VERSION,
@@ -676,12 +712,21 @@ def build_module(snapshot, rating_actions, rating_actions_justification,
             "inst_flow_justification": inst_flow_justification,
             "insider_baseline": insider_baseline,
             "insider_baseline_justification": insider_baseline_justification,
+            # QF5: loud disclosure when revisions null near earnings.
+            "revisions_null_pre_earnings_warning": pre_earnings_revisions_warning,
         },
         "renormalized": scored["renormalized"],
         "signal": None,
     }
     if scored["renormalization_note"]:
         doc["renormalization_note"] = scored["renormalization_note"]
+    # QF5: promote the warning into renormalization_note when it fires.
+    if pre_earnings_revisions_warning:
+        existing = doc.get("renormalization_note") or ""
+        doc["renormalization_note"] = (
+            pre_earnings_revisions_warning
+            + (" | " + existing if existing else "")
+        )
     return doc
 
 

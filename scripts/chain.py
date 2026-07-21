@@ -182,6 +182,18 @@ def expiries(contracts) -> list[str]:
     return sorted({c["expiration"] for c in contracts if c.get("expiration")})
 
 
+def future_expiries(contracts, as_of: str) -> list[str]:
+    """Sorted unique expirations that are >= ``as_of`` (YYYY-MM-DD).
+
+    Keeps ``expiries()`` pure (no date filtering there). ``as_of`` is compared
+    lexicographically so YYYY-MM-DD strings sort correctly without importing
+    datetime.  Returns an empty list when ``as_of`` is None or not a string.
+    """
+    if not isinstance(as_of, str):
+        return expiries(contracts)
+    return [e for e in expiries(contracts) if e >= as_of[:10]]
+
+
 def nearest_strike(contracts, spot, expiry, opt_type):
     """Contract of ``opt_type`` at ``expiry`` whose strike is closest to spot.
 

@@ -513,6 +513,16 @@ def _build_attestation(snapshot, results, waived_names):
         parts.append("Staleness disclosure: " + staleness["detail"] + ".")
     if failed:
         parts.append("Failed: " + "; ".join(r["check"] for r in failed) + ".")
+
+    # QF2: non-blocking note when latest_trading_day != as_of date (gate still
+    # exits 0 regardless -- this is a disclosure, not a check failure).
+    ltd = meta.get("latest_trading_day")
+    if isinstance(ltd, str) and ltd and ltd != as_of_date:
+        parts.append(
+            f"Note: as_of {as_of_date} vs latest trading day {ltd} "
+            f"(weekend/stale print)."
+        )
+
     return " ".join(parts)
 
 

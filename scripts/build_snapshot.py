@@ -38,7 +38,7 @@ if _REPO_ROOT not in sys.path:
 
 from scripts import chain, indicators
 
-SCHEMA_VERSION = "0.2.1"
+SCHEMA_VERSION = "0.2.2"
 
 # Files that MUST be present; their absence aborts the build.
 REQUIRED = ("global_quote", "overview", "daily_adjusted", "spy_daily_adjusted")
@@ -297,6 +297,9 @@ def build_price(quote, overview, rows, web_spot):
     prev_close = num(gq.get("08. previous close"))
     high = num(gq.get("03. high"))
     low = num(gq.get("04. low"))
+    # QF2: capture the vendor's latest-trading-day stamp for staleness disclosure.
+    # Null when absent (e.g. web-fallback global_quote lacks this field).
+    latest_trading_day = gq.get("07. latest trading day") or None
 
     shares = num(overview.get("SharesOutstanding")) if isinstance(overview, dict) else None
     shares_m = shares / 1e6 if shares is not None else None
@@ -327,6 +330,10 @@ def build_price(quote, overview, rows, web_spot):
         "mktcap_computed": mktcap_computed,
         "adv_dollar_3m": adv,
         "web_spot_check": spot_block,
+        # QF2: vendor latest-trading-day stamp; moved to meta.latest_trading_day
+        # by the caller (build_snapshot) -- kept here so build_price stays a
+        # pure function over its inputs without separate return values.
+        "_latest_trading_day": latest_trading_day,
     }
 
 
@@ -496,20 +503,44 @@ def build_fundamentals(income, balance, cashflow, earnings, estimates,
             eps_ntm_method = "nearest_future_fiscal_year"
 
     # Revisions + next-FY consensus from nearest FUTURE fiscal-year row.
+    # QF5: trace WHY revisions_90d is null so silence is replaced by disclosure.
     revisions = None
+    revisions_null_reason = None
     next_fy = None
-    if fy:
+    if not fy:
+        # No future fiscal-year estimates row exists in the payload.
+        revisions_null_reason = "no_future_fy_row"
+    else:
         row = fy[0]
         eps_now = num(row.get("eps_estimate_average"))
         eps_90 = num(row.get("eps_estimate_average_90_days_ago"))
         pct = (eps_now / eps_90 - 1) if (eps_now is not None and eps_90) else None
+        up_30d = num(row.get("eps_estimate_revision_up_trailing_30_days"))
+        down_30d = num(row.get("eps_estimate_revision_down_trailing_30_days"))
         revisions = {
             "eps_now": eps_now,
             "eps_90d_ago": eps_90,
             "pct": pct,
-            "up_30d": num(row.get("eps_estimate_revision_up_trailing_30_days")),
-            "down_30d": num(row.get("eps_estimate_revision_down_trailing_30_days")),
+            "up_30d": up_30d,
+            "down_30d": down_30d,
         }
+        # QF5: record why the pct / up_30d / down_30d fields are null within a
+        # present FY row -- distinguishes "fields absent" from "row absent".
+        if pct is None or up_30d is None or down_30d is None:
+            absent_fields = []
+            if eps_now is None:
+                absent_fields.append("eps_estimate_average")
+            if eps_90 is None:
+                absent_fields.append("eps_estimate_average_90_days_ago")
+            if up_30d is None:
+                absent_fields.append("eps_estimate_revision_up_trailing_30_days")
+            if down_30d is None:
+                absent_fields.append("eps_estimate_revision_down_trailing_30_days")
+            if absent_fields:
+                revisions_null_reason = (
+                    "future_fy_row_present_but_fields_absent: "
+                    + ", ".join(absent_fields)
+                )
         next_fy = {"rev": num(row.get("revenue_estimate_average")),
                    "eps": num(row.get("eps_estimate_average"))}
 
@@ -542,6 +573,7 @@ def build_fundamentals(income, balance, cashflow, earnings, estimates,
         "eps_ntm_consensus": eps_ntm,
         "eps_ntm_method": eps_ntm_method,
         "revisions_90d": revisions,
+        "revisions_null_reason": revisions_null_reason,  # QF5: null when revisions populated
         "next_fy_consensus": next_fy,
         "fcf_ttm": fcf_ttm,
         "net_cash_defined": net_cash,
@@ -701,7 +733,9 @@ def build_options(chain_path, chain_path_manifest, price, next_earnings_date,
     """Options block from the on-disk chain (never loaded into LLM context)."""
     contracts = chain.load_contracts(chain_path)
     spot = price.get("last")
-    exps = chain.expiries(contracts)
+    # QF3: filter to future expiries only so no expired expiry reaches
+    # expected_moves or atm_iv_by_expiry. chain.expiries() stays pure.
+    exps = chain.future_expiries(contracts, as_of_date)
 
     chain_as_of = _chain_date(chain_path)
     if chain_as_of is None:
@@ -748,7 +782,14 @@ def build_options(chain_path, chain_path_manifest, price, next_earnings_date,
     return {
         "chain_file_path": chain_path_manifest,
         "chain_as_of": chain_as_of,
-        "atm_iv_by_expiry": chain.atm_iv_by_expiry(contracts, spot) if spot else [],
+        # QF3: filter to future contracts so atm_iv_by_expiry never sees an
+        # expired expiry (atm_iv_by_expiry internally calls chain.expiries).
+        "atm_iv_by_expiry": (
+            chain.atm_iv_by_expiry(
+                [c for c in contracts if c.get("expiration", "") >= (as_of_date or "")],
+                spot,
+            ) if spot else []
+        ),
         "expected_moves": expected_moves,
         "max_pain_by_expiry": max_pain_by_expiry,
         "oi_walls": walls,
@@ -1057,6 +1098,9 @@ def build_snapshot(bundle, ticker):
 
     # -- assemble blocks ---------------------------------------------------
     price = build_price(quote, overview, rows, web_spot)
+    # QF2: extract the vendor latest-trading-day stamp from the price block
+    # (build_price stores it under a private key) and move it to meta.
+    latest_trading_day = price.pop("_latest_trading_day", None)
     technicals = build_technicals(rows, series_source=series_source)
     benchmark = build_benchmark(rows, spy_rows)
     fundamentals = build_fundamentals(income, balance, cashflow, earnings,
@@ -1109,6 +1153,7 @@ def build_snapshot(bundle, ticker):
             "ticker": ticker,
             "as_of_utc": as_of_utc,
             "schema_version": SCHEMA_VERSION,
+            "latest_trading_day": latest_trading_day,   # QF2: vendor stamp, null when absent
             "missing": missing,
             "data_mode": manifest.get("data_mode", "alpha_vantage"),
             "data_source": manifest.get("data_source", "alphavantage"),

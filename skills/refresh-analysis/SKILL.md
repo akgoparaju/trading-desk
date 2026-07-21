@@ -68,7 +68,7 @@ For each group in `refresh_plan.groups`:
 - **`action: "reuse"`** → `cp` the raw file from the previous bundle's `raw/` into the new bundle's `raw/`, AND copy its manifest entry **VERBATIM** into the new manifest — keeping the ORIGINAL `retrieved_utc` (honest provenance; the plan only reused it because it is in-window, so QC passes).
 - **`action: "refetch"`** → fetch it per the **market-snapshot SKILL's conventions** — the SAME endpoints, manifest keys, `return_full_data=true` + `datatype=json` rules, and the web gap-fill steps for web groups (`web_spot_check`, `short_interest`, and the `earnings_calendar` web fallback). Record a NEW `retrieved_utc`. `options_chain` with reason `absent last run` is a gap-fill — fetch it if the tier allows; if the tier blocks it, leave it absent and disclose (options stand aside, exactly as in a fresh degraded run).
 
-For `iv_history`: `reuse` → leave the parent cache untouched; `refresh` → run the market-snapshot **Step 4** biweekly sampling to refresh `../iv_history_<TICKER>.json` (~26 calls; skip on any degraded/fallback tier).
+For `iv_history`: `reuse` → leave the parent cache untouched; `refresh` → run the market-snapshot **Step 4** batched biweekly sampling to refresh `../iv_history_<TICKER>.json` — the SAME two-phase collapse (parallel `HISTORICAL_OPTIONS` fetches → `raw/iv_samples.json` manifest → ONE `scripts/build_iv_history.py --samples raw/iv_samples.json --daily raw/daily_adjusted.json --out ../iv_history_<TICKER>.json` call that deletes the consumed chains) — never the retired per-sample fetch→one-liner→`rm` loop (~26 API calls, a few turns; skip on any degraded/fallback tier).
 
 ---
 
@@ -94,6 +94,8 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/qc_gate.py <new_bundle>/snapshot_<TICKER>_
 ## Step 5 — Re-run ALL modules (single-snapshot rule) with JUDGMENT CARRY-FORWARD
 
 Re-run the full module chain against the new bundle, in dependency order — **technical → risk; sentiment; company-context; fundamental (via the composite step); composite; trade-plan pass 1; options pipeline; synthesize** — exactly as `full-trade-analysis` Phases 2-4 do (parallel evidence subagents where independent; technical before risk; context alongside them, completing before composite). No module is skipped.
+
+**Model directive (EXPLICIT).** When you spawn the re-run evidence subagents (technical / sentiment / risk) and the company-context subagent, **set the Agent tool's `model` parameter to `sonnet`** on each dispatch — do not rely on inheritance; a bounded, script-driven scorer must not run on the orchestrator's tier. These are the same bounded scorers full-trade-analysis Phase 2 runs; a frontier orchestrator model wastes budget. (A refresh never re-initiates coverage, so there is no `opus` coverage-init dispatch here — a model-update, if triggered in Step 2, follows the FSI skill's own model.)
 
 **CONTEXT REFRESH RULE (coverage-first).** The company-context module is re-authored with a **partial carry-forward** — the live tape is always fresh; the durable narrative carries unless an event re-opens it:
 - **`live_tape` is ALWAYS re-authored** from the fresh `news_sentiment` / `snapshot.events` — drop stale events, add new dated entries (each `≤` the new `as_of`). The live tape answers *what is moving the stock NOW*, so it can never be carried stale.

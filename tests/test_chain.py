@@ -68,5 +68,36 @@ class TestChain(unittest.TestCase):
         cs = C.load_contracts(self._write(CHAIN))
         self.assertAlmostEqual(C.skew_25d(cs, 100.0, "2026-08-21"), 0.60 - 0.48)  # 25-delta put IV - 25-delta call IV
 
+    # -- QF3: future_expiries --------------------------------------------------
+
+    def test_future_expiries_drops_past(self):
+        # CHAIN has "2026-08-21" and "2026-09-18".
+        # as_of = "2026-09-01": "2026-08-21" is past, "2026-09-18" is future.
+        cs = C.load_contracts(self._write(CHAIN))
+        result = C.future_expiries(cs, "2026-09-01")
+        self.assertEqual(result, ["2026-09-18"])
+
+    def test_future_expiries_keeps_same_day(self):
+        # as_of equals one of the expiries -> keep it (>= comparison).
+        cs = C.load_contracts(self._write(CHAIN))
+        result = C.future_expiries(cs, "2026-08-21")
+        self.assertIn("2026-08-21", result)
+        self.assertIn("2026-09-18", result)
+
+    def test_future_expiries_all_past(self):
+        cs = C.load_contracts(self._write(CHAIN))
+        result = C.future_expiries(cs, "2027-01-01")
+        self.assertEqual(result, [])
+
+    def test_future_expiries_empty_as_of_returns_all(self):
+        # Non-string as_of falls back to expiries() (no filtering).
+        cs = C.load_contracts(self._write(CHAIN))
+        self.assertEqual(C.future_expiries(cs, None), C.expiries(cs))
+
+    def test_expiries_still_pure(self):
+        # expiries() must be unchanged (not filter by date).
+        cs = C.load_contracts(self._write(CHAIN))
+        self.assertEqual(C.expiries(cs), ["2026-08-21", "2026-09-18"])
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,47 @@
 # Changelog
 
+## Unreleased — 2026-07-20 · Wave 0: efficiency & correctness hardening
+
+Version TBD (release gated with the user). The efficiency audit + quality review's quick
+fixes, executed as Wave 0 — cheap, pure-win speed and honesty fixes that move NO score,
+band, or weight, landed first so the expensive Wave 1–4 work iterates on a faster machine.
+Suite: 1121 passed, 26 skipped.
+
+- **IV-history sampling collapsed from ~54 serial tool round-trips to a batch (B18).** New
+  `scripts/build_iv_history.py` (self-contained: `scripts.chain` + stdlib): reads a
+  `raw/iv_samples.json` manifest of `{date, chain_file}`, derives spot from the daily file's
+  **nominal `"4. close"`** (never adjusted — historical option strikes are nominal), picks the
+  ~30-DTE expiry, computes ATM IV via `chain.atm_iv`, merges/dedupes the cache, and deletes
+  consumed chains on success. `market-snapshot` Step 4 now issues the ~26 `HISTORICAL_OPTIONS`
+  fetches as parallel tool-use + one script call instead of 26 fetch→one-liner→`rm` turns;
+  `refresh-analysis` points at the same script. **Also a correctness gain:** spot was previously
+  an unspecified LLM-supplied arg (non-deterministic near strike boundaries); it is now
+  deterministic. Exit 2 (not a silent adjusted-close fallback) if `"4. close"` is absent.
+  `tests/test_build_iv_history.py` (8 tests) asserts correctness at the raw spot.
+- **Evidence-scorer model tier pinned explicitly (B20).** `full-trade-analysis` and
+  `refresh-analysis` now direct the orchestrator to set `model: sonnet` on the
+  evidence / company-context / market-snapshot dispatches (and `model: opus` at coverage-init),
+  not rely on inheritance — a bounded, script-driven scorer must never run on the orchestrator's tier.
+- **`meta.latest_trading_day` + weekend/stale-print honesty (QF2).** `build_snapshot` captures
+  the quote's `"07. latest trading day"` into `meta.latest_trading_day` (null when the source
+  lacks it); `qc.py` attestation appends a **non-blocking** note when it differs from `as_of`.
+  Snapshot schema **0.2.1 → 0.2.2** (additive). This field is the input the Wave-1 confidence
+  layer reads for its staleness axis.
+- **Expired expiries no longer leak into `expected_moves` / `atm_iv_by_expiry` (QF3).** New
+  `chain.future_expiries(contracts, as_of)` (keeps `expiries()` pure); `build_snapshot` filters
+  to future expiries at the single minting site. `options-strategy` already dropped past expiries
+  downstream, so no change there.
+- **Catalyst-calendar honesty (QF4).** `render_report.build_catalyst_calendar` labels past-dated
+  rows `(past)` and replaces empty Note cells with `—`. Presentational only.
+- **`revisions_90d` null now explained, and loud pre-earnings (QF5).** `build_snapshot` records a
+  `revisions_null_reason` (`no_future_fy_row` vs named absent fields); `score_sentiment` surfaces a
+  prominent warning when revisions null within 14 days of earnings instead of silently
+  renormalizing. **Traced root cause:** the AV parser keys are correct — the null is an upstream AV
+  data gap (JSON `null` on future-FY rows), not a parsing bug, so no parser change was made.
+- **QF1 verified already-closed (no change).** The `fundamental_mode` mislabel was fixed in 0.12.1
+  (commit 7f95a2f); the flagged BE artifact was 0.12.0. Confirmed the predicate cannot diverge and
+  the regression test `test_anchored_run_discloses_anchored_mode` covers it — dropped from Wave 0.
+
 ## 0.13.0 — 2026-07-19 · Full-FSI-depth coverage contract
 
 Depth becomes the DEFAULT, CHECKABLE, and PROVENANCE-RECORDED. The user demanded

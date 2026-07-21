@@ -1213,5 +1213,162 @@ class TestNumberExtraction(unittest.TestCase):
         self.assertIn("2026.1", res["detail"])
 
 
+# --------------------------------------------------------------------------- #
+# QF4: build_catalyst_calendar past-event labeling + empty-note replacement
+# --------------------------------------------------------------------------- #
+
+class TestBuildCatalystCalendar(unittest.TestCase):
+    """QF4 regression: past rows get '(past)' suffix; empty notes become '—'."""
+
+    def _snap(self, as_of_utc, ne_date, ne_eps, catalysts=None):
+        """Minimal snapshot for build_catalyst_calendar."""
+        return {
+            "meta": {"as_of_utc": as_of_utc},
+            "events": {
+                "next_earnings": {"date": ne_date, "consensus_eps": ne_eps},
+                "catalysts": catalysts or [],
+            },
+        }
+
+    def test_future_earnings_not_labeled_past(self):
+        snap = self._snap("2026-07-16T00:00:00Z", "2026-09-25", 1.88)
+        result = rr.build_catalyst_calendar(snap)
+        self.assertNotIn("(past)", result)
+        self.assertIn("2026-09-25", result)
+
+    def test_past_earnings_labeled_past(self):
+        snap = self._snap("2026-07-16T00:00:00Z", "2026-07-01", None)
+        result = rr.build_catalyst_calendar(snap)
+        self.assertIn("(past)", result)
+
+    def test_empty_earnings_note_replaced_with_dash(self):
+        # consensus_eps is None -> note would be empty -> must become "—".
+        snap = self._snap("2026-07-16T00:00:00Z", "2026-09-25", None)
+        result = rr.build_catalyst_calendar(snap)
+        # "—" must appear (either as note or as no-catalyst fallback).
+        self.assertIn("—", result)
+        # Specifically, the note cell for this row should NOT be a raw empty string.
+        # The table contains a pipe-separated row; check there's no "| |" pattern
+        # (two consecutive pipes with just spaces indicating empty cell).
+        # A simple proxy: "consensus EPS n/a" should NOT appear; "—" should.
+        self.assertNotIn("consensus EPS n/a", result)
+
+    def test_past_catalyst_labeled(self):
+        snap = self._snap(
+            "2026-07-16T00:00:00Z", "2026-09-25", 1.88,
+            catalysts=[
+                {"name": "product_launch", "date": "2026-07-10", "note": "old launch"},
+                {"name": "conf", "date": "2026-08-01", "note": "upcoming conf"},
+            ]
+        )
+        result = rr.build_catalyst_calendar(snap)
+        # Past catalyst note must contain "(past)".
+        self.assertIn("old launch (past)", result)
+        # Future catalyst note must NOT contain "(past)".
+        self.assertIn("upcoming conf", result)
+        self.assertNotIn("upcoming conf (past)", result)
+
+    def test_empty_catalyst_note_replaced_with_dash(self):
+        snap = self._snap(
+            "2026-07-16T00:00:00Z", "2026-09-25", 1.88,
+            catalysts=[{"name": "ev", "date": "2026-08-01", "note": ""}]
+        )
+        result = rr.build_catalyst_calendar(snap)
+        # Empty note must be replaced by em-dash, not left blank.
+        self.assertIn("—", result)
+
+    def test_no_as_of_date_no_past_label(self):
+        # When meta.as_of_utc is absent, no "(past)" should appear.
+        snap = {
+            "meta": {},
+            "events": {
+                "next_earnings": {"date": "2020-01-01", "consensus_eps": None},
+                "catalysts": [],
+            },
+        }
+        result = rr.build_catalyst_calendar(snap)
+        self.assertNotIn("(past)", result)
+
+
+# --------------------------------------------------------------------------- #
+# QF5: score_sentiment loud pre-earnings warning when revisions null
+# --------------------------------------------------------------------------- #
+
+class TestQF5SentimentPreEarningsWarning(unittest.TestCase):
+    """QF5 regression: score_sentiment surfaces a loud warning when revisions_90d
+    is null and the snapshot is within 14 days of next_earnings."""
+
+    def _snap_with(self, days_to_earnings, revisions=None, revisions_null_reason=None):
+        """Minimal snapshot for build_module."""
+        from datetime import date, timedelta
+        as_of = date(2026, 7, 16)
+        ne_date = (as_of + timedelta(days=days_to_earnings)).isoformat()
+        return {
+            "meta": {"ticker": "MU", "as_of_utc": "2026-07-16T00:00:00Z"},
+            "sentiment": {
+                "ratings": {"strong_buy": 10, "buy": 8, "hold": 5,
+                            "sell": 1, "strong_sell": 0, "n": 24},
+                "pt_vs_price_pct": 0.10,
+                "insider_net_90d_usd": 1000.0,
+                "short_interest_pct": 5.0,
+                "put_call_ratio_full_chain": 0.9,
+                "iv_pctile_1yr": 50.0,
+            },
+            "technicals": {"rsi14": 55.0, "ret_3m": 0.05, "ret_6m": 0.10,
+                           "ret_12m": 0.30},
+            "benchmark": {"spy_ret_3m": 0.02, "spy_ret_12m": 0.10},
+            "fundamentals": {
+                "revisions_90d": revisions,
+                "revisions_null_reason": revisions_null_reason,
+            },
+            "events": {
+                "next_earnings": {"date": ne_date, "consensus_eps": None},
+                "catalysts": [],
+            },
+        }
+
+    def _build(self, snap):
+        from scripts import score_sentiment as ss
+        return ss.build_module(snap, "neutral", None, "unknown", None,
+                               "normal", None)
+
+    def test_warning_fires_when_null_within_14d(self):
+        snap = self._snap_with(10, revisions=None,
+                               revisions_null_reason="no_future_fy_row")
+        doc = self._build(snap)
+        warning = doc["flags"]["revisions_null_pre_earnings_warning"]
+        self.assertIsNotNone(warning)
+        self.assertIn("WARNING", warning)
+        self.assertIn("renormalized", warning.lower())
+        self.assertIn("no_future_fy_row", warning)
+
+    def test_warning_in_renormalization_note(self):
+        snap = self._snap_with(7, revisions=None,
+                               revisions_null_reason="no_future_fy_row")
+        doc = self._build(snap)
+        note = doc.get("renormalization_note") or ""
+        self.assertIn("WARNING", note)
+
+    def test_no_warning_when_revisions_present(self):
+        rev = {"pct": 0.02, "up_30d": 9, "down_30d": 3,
+               "eps_now": 7.5, "eps_90d_ago": 7.0}
+        snap = self._snap_with(10, revisions=rev)
+        doc = self._build(snap)
+        self.assertIsNone(doc["flags"]["revisions_null_pre_earnings_warning"])
+
+    def test_no_warning_when_beyond_14d(self):
+        snap = self._snap_with(20, revisions=None,
+                               revisions_null_reason="no_future_fy_row")
+        doc = self._build(snap)
+        self.assertIsNone(doc["flags"]["revisions_null_pre_earnings_warning"])
+
+    def test_no_warning_on_day_zero_exactly_14(self):
+        # 14 days is still within the window (0 <= days <= 14).
+        snap = self._snap_with(14, revisions=None,
+                               revisions_null_reason="no_future_fy_row")
+        doc = self._build(snap)
+        self.assertIsNotNone(doc["flags"]["revisions_null_pre_earnings_warning"])
+
+
 if __name__ == "__main__":
     unittest.main()

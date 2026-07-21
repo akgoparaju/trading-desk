@@ -453,7 +453,7 @@ class TestBuildSnapshotFull(unittest.TestCase):
         m = self.snap["meta"]
         self.assertEqual(m["ticker"], "MU")
         self.assertEqual(m["as_of_utc"], AS_OF)
-        self.assertEqual(m["schema_version"], "0.2.1")
+        self.assertEqual(m["schema_version"], "0.2.2")  # QF2: bumped 0.2.1 -> 0.2.2
         self.assertEqual(m["missing"], [])
         self.assertIn("qc", m)
         self.assertTrue(len(m["sources"]) >= 4)
@@ -945,6 +945,215 @@ class TestQCGate(unittest.TestCase):
                          waivers=["check_mktcap:known share lag"])
         self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertIn("WAIVED", proc.stdout)
+
+
+# --------------------------------------------------------------------------- #
+# QF2: meta.latest_trading_day + QC note when as_of != latest_trading_day
+# --------------------------------------------------------------------------- #
+
+class TestLatestTradingDay(unittest.TestCase):
+    """QF2 regression: meta.latest_trading_day populated from Global Quote field
+    07. latest trading day; qc_gate emits a non-blocking note when the dates diverge."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _build_snap(self, b):
+        b.write_manifest()
+        proc = _run_build(self.dir)
+        self.assertEqual(proc.returncode, 0, f"stderr={proc.stderr}")
+        out = os.path.join(self.dir, f"snapshot_MU_{AS_OF_DATE}.json")
+        with open(out) as fh:
+            return json.load(fh), out
+
+    def test_latest_trading_day_present_when_in_quote(self):
+        # BundleBuilder.add_global_quote includes "07. latest trading day".
+        b = BundleBuilder(self.dir).build_full()
+        snap, _ = self._build_snap(b)
+        # The fixture last_date is the last row of the 320-row walk ending at
+        # 2026-07-15 (the most recent business day before AS_OF 2026-07-16).
+        self.assertEqual(snap["meta"]["latest_trading_day"], b.last_date)
+
+    def test_latest_trading_day_null_when_absent_in_quote(self):
+        # Build a bundle whose global_quote lacks "07. latest trading day".
+        b = BundleBuilder(self.dir)
+        gq_no_ltd = {"Global Quote": {
+            "01. symbol": b.ticker,
+            "05. price": f"{b.last}",
+            "08. previous close": f"{b.stock_rows[-2]['close']}",
+            "03. high": f"{b.stock_rows[-1]['high']}",
+            "04. low": f"{b.stock_rows[-1]['low']}",
+            # NOTE: "07. latest trading day" deliberately absent
+        }}
+        b.files = {}
+        b._add("global_quote", "global_quote.json", gq_no_ltd, "GLOBAL_QUOTE")
+        b.add_overview(); b.add_daily(); b.add_spy()
+        snap, _ = self._build_snap(b)
+        self.assertIsNone(snap["meta"]["latest_trading_day"])
+
+    def test_qc_note_emitted_when_dates_differ(self):
+        """Non-blocking QC note when meta.latest_trading_day != as_of date.
+        The gate may or may not pass for other reasons; the note itself is
+        non-blocking and must always appear in the attestation regardless.
+        """
+        b = BundleBuilder(self.dir).build_full()
+        snap, snap_path = self._build_snap(b)
+
+        # Keep as_of_utc unchanged (2026-07-16); set latest_trading_day to a
+        # different (earlier) date to simulate a weekend/stale-print scenario.
+        snap["meta"]["latest_trading_day"] = "2026-07-14"
+        with open(snap_path, "w") as fh:
+            json.dump(snap, fh)
+
+        proc = _run_gate(snap_path)
+        # The note is non-blocking: the gate exit code may be 0 or 1 depending
+        # on other checks (staleness, etc.) -- we assert on the NOTE itself.
+        combined = proc.stdout + proc.stderr
+        self.assertIn("2026-07-14", combined,
+                      "expected latest_trading_day date in attestation")
+        self.assertIn("weekend/stale", combined)
+
+    def test_qc_no_note_when_dates_match(self):
+        """No stale-print note when as_of date matches latest_trading_day."""
+        b = BundleBuilder(self.dir).build_full()
+        snap, snap_path = self._build_snap(b)
+        # Force the dates to match.
+        snap["meta"]["latest_trading_day"] = AS_OF_DATE
+        with open(snap_path, "w") as fh:
+            json.dump(snap, fh)
+        proc = _run_gate(snap_path)
+        self.assertNotIn("weekend/stale", proc.stdout + proc.stderr)
+
+
+# --------------------------------------------------------------------------- #
+# QF3: future_expiries filters expired rows from expected_moves / atm_iv_by_expiry
+# --------------------------------------------------------------------------- #
+
+class TestQF3FutureExpiriesInBuild(unittest.TestCase):
+    """QF3 regression: build_snapshot must produce no expected_moves or
+    atm_iv_by_expiry entries whose expiry < as_of_date."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _add_chain_with_past_expiry(self, b):
+        """Chain that includes one PAST expiry (2026-07-01) and two future ones."""
+        as_of = AS_OF_DATE  # "2026-07-16"
+        def c(exp, k, t, mark, iv, oi):
+            return {"expiration": exp, "strike": str(k), "type": t, "mark": str(mark),
+                    "implied_volatility": str(iv), "delta": "0.5",
+                    "open_interest": str(oi), "volume": "5", "date": as_of}
+        chain = [
+            # PAST expiry -- must be filtered out
+            c("2026-07-01", 100, "put", 0.01, 0.50, 10),
+            c("2026-07-01", 100, "call", 0.01, 0.50, 10),
+            # future expiries
+            c("2026-08-14", 100, "put", 4.0, 0.55, 1000),
+            c("2026-08-14", 100, "call", 5.0, 0.50, 900),
+            c("2026-09-18", 100, "put", 6.0, 0.52, 400),
+            c("2026-09-18", 100, "call", 7.0, 0.47, 500),
+        ]
+        b._add("options_chain", "chain.json", {"data": chain}, "HISTORICAL_OPTIONS")
+
+    def test_no_past_expiry_in_expected_moves(self):
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        self._add_chain_with_past_expiry(b)
+        b.write_manifest()
+        proc = _run_build(self.dir)
+        self.assertEqual(proc.returncode, 0, f"stderr={proc.stderr}")
+        out = os.path.join(self.dir, f"snapshot_MU_{AS_OF_DATE}.json")
+        with open(out) as fh:
+            snap = json.load(fh)
+        opts = snap.get("options") or {}
+        for em in opts.get("expected_moves", []):
+            self.assertGreaterEqual(
+                em["expiry"], AS_OF_DATE,
+                f"expired expiry {em['expiry']} found in expected_moves"
+            )
+
+    def test_no_past_expiry_in_atm_iv_by_expiry(self):
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        self._add_chain_with_past_expiry(b)
+        b.write_manifest()
+        proc = _run_build(self.dir)
+        self.assertEqual(proc.returncode, 0, f"stderr={proc.stderr}")
+        out = os.path.join(self.dir, f"snapshot_MU_{AS_OF_DATE}.json")
+        with open(out) as fh:
+            snap = json.load(fh)
+        opts = snap.get("options") or {}
+        for row in opts.get("atm_iv_by_expiry", []):
+            self.assertGreaterEqual(
+                row["expiry"], AS_OF_DATE,
+                f"expired expiry {row['expiry']} found in atm_iv_by_expiry"
+            )
+
+
+# --------------------------------------------------------------------------- #
+# QF5: revisions_null_reason populated + loud warning in score_sentiment
+# --------------------------------------------------------------------------- #
+
+class TestQF5RevisionsNullReason(unittest.TestCase):
+    """QF5 regression: build_fundamentals records WHY revisions_90d is null."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _build_snap(self, b):
+        b.write_manifest()
+        proc = _run_build(self.dir)
+        self.assertEqual(proc.returncode, 0, f"stderr={proc.stderr}")
+        out = os.path.join(self.dir, f"snapshot_MU_{AS_OF_DATE}.json")
+        with open(out) as fh:
+            return json.load(fh)
+
+    def test_revisions_null_reason_no_future_fy_row(self):
+        """No estimates file -> revisions_null_reason = no_future_fy_row."""
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        b.add_income(); b.add_balance(); b.add_cashflow(); b.add_earnings()
+        # No estimates -> fy = [] -> reason = no_future_fy_row
+        snap = self._build_snap(b)
+        self.assertIsNone(snap["fundamentals"]["revisions_90d"])
+        self.assertEqual(snap["fundamentals"]["revisions_null_reason"], "no_future_fy_row")
+
+    def test_revisions_null_reason_fields_absent(self):
+        """FY row present but revision fields absent -> fields_absent reason."""
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        b.add_income(); b.add_balance(); b.add_cashflow(); b.add_earnings()
+        # Add estimates with a future FY row but no revision fields.
+        est_no_revisions = [
+            {"date": "2027-06-30", "horizon": "fiscal year",
+             "eps_estimate_average": "7.50",
+             # eps_estimate_average_90_days_ago absent -> pct will be None
+             # revision_up/down absent
+             "revenue_estimate_average": "34000"},
+        ]
+        b._add("earnings_estimates", "estimates.json",
+               {"symbol": b.ticker, "estimates": est_no_revisions},
+               "EARNINGS_ESTIMATES")
+        snap = self._build_snap(b)
+        # revisions dict IS populated (eps_now has a value) but some fields null
+        rev = snap["fundamentals"]["revisions_90d"]
+        self.assertIsNotNone(rev)
+        self.assertIsNone(rev["pct"])
+        self.assertIsNone(rev["up_30d"])
+        reason = snap["fundamentals"]["revisions_null_reason"]
+        self.assertIsNotNone(reason)
+        self.assertIn("future_fy_row_present_but_fields_absent", reason)
+        self.assertIn("eps_estimate_average_90_days_ago", reason)
+
+    def test_revisions_null_reason_none_when_all_fields_present(self):
+        """When revisions_90d is fully populated, revisions_null_reason is None."""
+        b = BundleBuilder(self.dir).build_full()  # includes full estimates
+        snap = self._build_snap(b)
+        self.assertIsNotNone(snap["fundamentals"]["revisions_90d"])
+        self.assertIsNone(snap["fundamentals"]["revisions_null_reason"])
 
 
 if __name__ == "__main__":

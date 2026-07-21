@@ -503,17 +503,28 @@ def build_sr_and_downside(technical, risk):
 
 
 def build_catalyst_calendar(snapshot):
+    # QF4: compute as_of date from snapshot.meta so we can label past rows.
+    meta = snapshot.get("meta", {}) or {}
+    as_of_utc = meta.get("as_of_utc") or ""
+    as_of_date = as_of_utc[:10] if isinstance(as_of_utc, str) and len(as_of_utc) >= 10 else ""
+
     events = snapshot.get("events", {}) or {}
     rows = []
     ne = events.get("next_earnings") if isinstance(events, dict) else None
     if isinstance(ne, dict) and ne.get("date"):
         cons = ne.get("consensus_eps")
-        rows.append(["next earnings", ne.get("date"),
-                     f"consensus EPS {_fmt(cons)}" if cons is not None else ""])
+        note = f"consensus EPS {_fmt(cons)}" if cons is not None else ""
+        # QF4: empty note -> em-dash; past event -> append " (past)".
+        note = note or "—"
+        if as_of_date and ne.get("date", "") < as_of_date:
+            note += " (past)"
+        rows.append(["next earnings", ne.get("date"), note])
     for c in events.get("catalysts", []) or []:
         if isinstance(c, dict):
-            rows.append([c.get("name", "catalyst"), c.get("date", ""),
-                         c.get("note", "")])
+            note = c.get("note", "") or "—"
+            if as_of_date and (c.get("date") or "") < as_of_date:
+                note += " (past)"
+            rows.append([c.get("name", "catalyst"), c.get("date", ""), note])
     if not rows:
         rows.append(["—", "—", "no scheduled catalysts"])
     tbl = _table(["Catalyst", "Date", "Note"], rows)

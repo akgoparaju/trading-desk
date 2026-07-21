@@ -216,25 +216,31 @@ Cache file `iv_history_<TICKER>.json` lives in the bundle's **PARENT** dir — n
 {"ticker": "<TICKER>", "samples": [{"date": "YYYY-MM-DD", "atm_iv": <number>}]}
 ```
 
-If the cache is absent OR its newest sample is more than 14 days old, refresh it: sample `HISTORICAL_OPTIONS` at ~26 biweekly dates across the trailing year (param `date=YYYY-MM-DD`, `return_full_data=true` → each response offloaded to a file). Pick trading days — bi-weekly **Fridays** work; if a sampled date returns an empty/error response (holiday), step back one day at a time (up to 3) and retry, else skip that sample and note it. For each sample date, compute the ATM IV at the ~30-DTE expiry **via the script** (never in text). Use this one-liner, substituting the offloaded file path, the spot at that date, and the sample date:
+If the cache is absent OR its newest sample is more than 14 days old, refresh it. The refresh is **two collapsed phases** — a batched fetch, then ONE script call — never a per-sample fetch→compute→`rm` loop (spec B18; that loop was ~54 serial turns and re-read its own context every turn). **The spot is NOT an LLM argument** — the script derives it deterministically from the daily raw close, so the sampling is reproducible.
+
+**(a) Batch the fetches into a manifest (never into context).** Sample `HISTORICAL_OPTIONS` at ~26 biweekly dates across the trailing year (param `date=YYYY-MM-DD`, `return_full_data=true`, `datatype=json` → each response offloaded to a file). Pick trading days — bi-weekly **Fridays** work. **Issue the fetches as PARALLEL tool-use blocks** — several `HISTORICAL_OPTIONS` MCP calls per assistant turn, not one per turn — so the whole sweep costs a few turns, not 26. As each offloads to a temp file, append its `{"date": "<sample_date>", "chain_file": "<offloaded_path>"}` to the manifest **via Bash** (never paste a chain into context):
 
 ```bash
-python3 - "<offloaded_chain_file>" "<spot>" "<sample_date>" <<'PY'
-import os, sys, datetime
-sys.path.insert(0, os.environ["CLAUDE_PLUGIN_ROOT"])  # plugin install dir (env var set at skill runtime)
-from scripts import chain
-path, spot, sample = sys.argv[1], float(sys.argv[2]), sys.argv[3]
-cs = chain.load_contracts(path)
-sd = datetime.date.fromisoformat(sample)
-# expiry closest to ~30 days after the sample date
-exp = min(chain.expiries(cs), key=lambda e: abs((datetime.date.fromisoformat(e) - sd).days - 30))
-print(chain.atm_iv(cs, spot, exp))
-PY
+# once, before the sweep:
+echo '[]' > raw/iv_samples.json
+# after each fetch offloads to <offloaded_path> (append one entry; keep it valid JSON):
+python3 -c 'import json,sys; p="raw/iv_samples.json"; a=json.load(open(p)); a.append({"date":sys.argv[1],"chain_file":sys.argv[2]}); json.dump(a,open(p,"w"))' "<sample_date>" "<offloaded_path>"
 ```
 
-Append `{"date": "<sample_date>", "atm_iv": <printed value>}` to the cache. **Then DELETE that temp historical chain file immediately** — 26 chains ≈ hundreds of MB. `rm "<offloaded_chain_file>"`.
+**Holiday step-back retry (unchanged):** if a sampled date returns an empty/error response (holiday), step back one day at a time (up to 3) and **re-fetch the stepped-back date**, recording THAT date + its offloaded path in the manifest; if all retries fail, just omit the sample (the script also records a skip reason for any empty chain it later finds). Never hand-compute an IV.
 
-~26 calls ≈ 21 s at 75/min — pace only if rate-limit errors appear. When done, record the cache path in the manifest as a **top-level** key (not under `files`). The relative form is unchanged — `..` now resolves from `detail_reports_<date>/` up to the ticker parent, where the cache lives:
+**(b) ONE batch script call** computes every sample's ATM IV from the offloaded chains on disk, at the ~30-DTE expiry, using the nominal raw close as spot; merges/dedupes/sorts into the cache; and **deletes each consumed chain file on success** (the old per-sample `rm`, moved into the script — 26 chains ≈ hundreds of MB):
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_iv_history.py \
+  --samples raw/iv_samples.json \
+  --daily   raw/daily_adjusted.json \
+  --out     ../iv_history_<TICKER>.json
+```
+
+The script skips (with a recorded reason, printed to stderr) any sample whose chain is empty/holiday, whose sample date has no `"4. close"` in the daily file, or whose chain is too sparse for an ATM IV; it errors (exit 2) only on an unreadable manifest/daily or a daily file with no `"4. close"` column (IV history runs only in premium `alpha_vantage` mode, where the daily is AV JSON — it never silently uses the adjusted close). The cache keeps the same shape as above (`{"ticker", "samples": [{"date", "atm_iv"}]}`).
+
+~26 fetches ≈ 21 s of API time at 75/min (batched across a few turns) — pace only if rate-limit errors appear. When done, record the cache path in the manifest as a **top-level** key (not under `files`). The relative form is unchanged — `..` now resolves from `detail_reports_<date>/` up to the ticker parent, where the cache lives:
 ```json
 "iv_history_path": "../iv_history_<TICKER>.json"
 ```
