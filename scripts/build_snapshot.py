@@ -22,6 +22,7 @@ import argparse
 import csv
 import io
 import json
+import math
 import os
 import sys
 
@@ -38,7 +39,7 @@ if _REPO_ROOT not in sys.path:
 
 from scripts import chain, indicators
 
-SCHEMA_VERSION = "0.2.2"
+SCHEMA_VERSION = "0.3.0"
 
 # Files that MUST be present; their absence aborts the build.
 REQUIRED = ("global_quote", "overview", "daily_adjusted", "spy_daily_adjusted")
@@ -374,6 +375,26 @@ def build_technicals(rows, series_source=None):
 
     ten_yr = adj[-_TEN_YR_ROWS:]
 
+    # A1: overnight-gap tail statistics. The gap series is open[i]/adj_close[i-1]-1
+    # over the retained rows (open is parsed but was previously unused downstream).
+    # All figures deterministic; the 2sigma jump threshold is a documented
+    # convention (indicators.jump_count_2sigma). Null block if too few gaps.
+    gaps = indicators.overnight_gap_series(rows)
+    abs_gaps = sorted(abs(g) for g in gaps)
+    overnight_gap = None
+    if abs_gaps:
+        n_gaps = len(abs_gaps)
+        # p95 via nearest-rank on the sorted abs series (ceil(0.95*n) - 1, clamped).
+        idx = min(n_gaps - 1, max(0, math.ceil(0.95 * n_gaps) - 1))
+        overnight_gap = {
+            "mean_abs": sum(abs_gaps) / n_gaps,
+            "p95_abs": abs_gaps[idx],
+            "max_abs": abs_gaps[-1],
+            "excess_kurtosis": indicators.excess_kurtosis(gaps),
+            "jump_count_2sigma": indicators.jump_count_2sigma(gaps),
+            "n": n_gaps,
+        }
+
     block = {
         "ma50": indicators.sma(adj, 50),
         "ma200": indicators.sma(adj, 200),
@@ -400,6 +421,7 @@ def build_technicals(rows, series_source=None):
              for r in rows if r["adjusted_close"] is not None])[-10:],
         "ohlcv_rows": len(rows),
         "last_ohlcv_date": rows[-1]["date"] if rows else None,
+        "overnight_gap": overnight_gap,   # A1: tail/gap disclosure (unscored)
     }
     if series_source:
         block["series_source"] = series_source
@@ -954,8 +976,91 @@ def _parse_earnings_calendar(payload):
     return None
 
 
-def build_events(earnings_calendar, overview):
-    """Events block: next earnings + dividends. Catalysts are an LLM slot."""
+def _days_between(as_of_date, target_date):
+    """Calendar days from ``as_of_date`` to ``target_date`` (both YYYY-MM-DD).
+
+    A1: this is the exact subtraction that already lives at
+    score_sentiment.py:642-659 (_days_to_earnings); replicated inline here (no
+    cross-module import) so the snapshot can compute events.days_to_event.
+    Returns None if either date is absent/unparseable.
+    """
+    base = _parse_date(as_of_date)
+    tgt = _parse_date(target_date)
+    if base is None or tgt is None:
+        return None
+    return (tgt - base).days
+
+
+def build_earnings_move_history(earn_q, rows):
+    """Up-to-8 {"quarter_end", "move_pct"} from the ticker's own reported quarters.
+
+    A1 reaction-window convention (documented -- a MEASUREMENT, not a
+    calibration): for a reportedDate D,
+        move_pct = close[first trading day >= D+1]
+                   / close[last trading day <= D-1] - 1
+    which spans the report and is robust to BMO/AMC timing ambiguity. A quarter
+    is SKIPPED (not recorded) when its reportedDate is absent/unparseable or when
+    OHLCV is missing on either side of the report window.
+
+    ``earn_q`` is the newest-first quarterlyEarnings list; ``rows`` are the
+    oldest-first parsed daily rows (date + close). Output is newest-first (the
+    same order as ``earn_q``), capped at 8 quarters.
+    """
+    if not isinstance(earn_q, list) or not rows:
+        return []
+    # Ascending list of (date, close) for trading days that carry a close.
+    dated = sorted(
+        ((r["date"], r["close"]) for r in rows
+         if r.get("date") and r.get("close") is not None),
+        key=lambda x: x[0],
+    )
+    if not dated:
+        return []
+    dates = [d for d, _ in dated]
+    close_by_date = {d: c for d, c in dated}
+
+    import bisect
+
+    out = []
+    for q in earn_q[:8]:
+        if not isinstance(q, dict):
+            continue
+        report_date = q.get("reportedDate")
+        d = _parse_date(report_date)
+        if d is None:
+            continue
+        before_key = (d - timedelta(days=1)).isoformat()
+        after_key = (d + timedelta(days=1)).isoformat()
+        # last trading day <= D-1: rightmost date <= before_key.
+        i_before = bisect.bisect_right(dates, before_key) - 1
+        # first trading day >= D+1: leftmost date >= after_key.
+        i_after = bisect.bisect_left(dates, after_key)
+        if i_before < 0 or i_after >= len(dates):
+            continue  # missing OHLCV around the report window -> skip
+        pre_close = close_by_date[dates[i_before]]
+        post_close = close_by_date[dates[i_after]]
+        if pre_close in (None, 0):
+            continue
+        out.append({
+            "quarter_end": report_date,
+            "move_pct": post_close / pre_close - 1,
+        })
+    return out
+
+
+def build_events(earnings_calendar, overview, as_of_date, earn_q=None,
+                 rows=None, implied_move=None):
+    """Events block: next earnings + dividends + event-aware disclosure fields.
+
+    A1 additions (all deterministic, additive, null-safe):
+      - days_to_event: integer days from as_of_date to next_earnings.date.
+      - implied_move: the sentiment.implied_move_next_earnings_pct value, copied
+        here for locality (passed in by the caller; no re-computation).
+      - earnings_move_history: up to 8 own-history reaction moves.
+      - implied_move_vs_own_history_pctile: percentile rank of implied_move
+        within the ABS move-history values.
+    Catalysts remain an LLM slot.
+    """
     ne = _parse_earnings_calendar(earnings_calendar)
     ov = overview if isinstance(overview, dict) else {}
     dividends = {
@@ -963,8 +1068,31 @@ def build_events(earnings_calendar, overview):
         "ex_date": ov.get("ExDividendDate") if ov.get("ExDividendDate") not in (None, "None", "-") else None,
         "pay_date": ov.get("DividendDate") if ov.get("DividendDate") not in (None, "None", "-") else None,
     }
+
+    ne_date = ne.get("date") if isinstance(ne, dict) else None
+    days_to_event = _days_between(as_of_date, ne_date)
+
+    move_history = build_earnings_move_history(earn_q or [], rows or [])
+
+    # Percentile rank of the implied move within this name's OWN reaction
+    # history (abs values): 100 * count(abs_move <= implied_move) / n. Null only
+    # when the implied move is absent or there is no usable history. Computed
+    # inline (not via indicators.percentile_rank, whose >=10-sample guard would
+    # always null a max-8-quarter history).
+    implied_vs_own = None
+    if implied_move is not None and move_history:
+        abs_moves = [abs(m["move_pct"]) for m in move_history
+                     if m.get("move_pct") is not None]
+        if abs_moves:
+            at_or_below = sum(1 for a in abs_moves if a <= implied_move)
+            implied_vs_own = 100 * at_or_below / len(abs_moves)
+
     return {
         "next_earnings": ne,
+        "days_to_event": days_to_event,
+        "implied_move": implied_move,
+        "earnings_move_history": move_history,
+        "implied_move_vs_own_history_pctile": implied_vs_own,
         "dividends": dividends,
         "catalysts": [],   # LLM slot
     }
@@ -1109,8 +1237,15 @@ def build_snapshot(bundle, ticker):
     # this runs before valuation so a web-supplied eps_ntm/fcf feeds the multiples.
     apply_web_fundamentals(fundamentals, web_fundamentals)
     valuation = build_valuation(price, fundamentals, overview, rows)
-    events = build_events(earnings_calendar, overview)
-    next_earnings_date = events["next_earnings"]["date"] if events["next_earnings"] else None
+
+    # Parse next-earnings up front so options + sentiment can key off it; the
+    # full events block (which surfaces the sentiment-computed implied move) is
+    # assembled AFTER sentiment below to reuse that value without re-calling the
+    # chain (A1).
+    next_earnings = _parse_earnings_calendar(earnings_calendar)
+    next_earnings_date = next_earnings.get("date") if isinstance(next_earnings, dict) else None
+    # Own-history earnings reactions read reportedDate from quarterlyEarnings.
+    earn_q = _quarterly(earnings, "quarterlyEarnings")
 
     # Options depend on the chain file being present.
     options = None
@@ -1131,6 +1266,15 @@ def build_snapshot(bundle, ticker):
     sentiment = build_sentiment(overview, price, pc_realtime, short_interest,
                                 news, insider, contracts, iv30, iv_history,
                                 next_earnings_date, as_of_date)
+
+    # A1: assemble events AFTER sentiment so events.implied_move reuses the
+    # already-computed sentiment.implied_move_next_earnings_pct (no double chain
+    # call). All event fields are deterministic + null-safe.
+    events = build_events(
+        earnings_calendar, overview, as_of_date,
+        earn_q=earn_q, rows=rows,
+        implied_move=sentiment.get("implied_move_next_earnings_pct"),
+    )
     macro = build_macro(treasury)
 
     # -- provenance + missing disclosure -----------------------------------

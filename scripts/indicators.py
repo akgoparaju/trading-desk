@@ -274,3 +274,76 @@ def dist_from_high(values: list[float]) -> float:
     if high == 0:
         return 0.0
     return values[-1] / high - 1
+
+
+def overnight_gap_series(rows: list[dict]) -> list[float]:
+    """Overnight-gap series over oldest-first OHLCV rows.
+
+    Each gap is ``adj_open[i] / adjusted_close[i-1] - 1`` -- the return from the
+    prior day's ADJUSTED close to today's ADJUSTED open. The raw ``open`` is
+    adjustment-consistent-ified by the day's split/dividend factor
+    ``adjusted_close/close`` so a split/dividend does NOT manufacture a spurious
+    gap (raw open vs adjusted prior close would blow up around any adjustment
+    event -- real-data finding: BE showed a bogus 57.8% max gap / kurtosis 56
+    from that mismatch). When the raw ``close`` is absent/zero (e.g. stooq CSV,
+    where ``close`` already IS adjusted) the factor is 1 and ``open`` is used
+    as-is. Rows whose ``open`` or the prior ``adjusted_close`` is absent/zero are
+    SKIPPED. Result length <= len(rows) - 1; empty if fewer than 2 usable rows.
+    """
+    out = []
+    for i in range(1, len(rows)):
+        prev_adj = rows[i - 1].get("adjusted_close")
+        cur_open = rows[i].get("open")
+        cur_close = rows[i].get("close")
+        cur_adj = rows[i].get("adjusted_close")
+        if prev_adj is None or cur_open is None or prev_adj == 0:
+            continue
+        # Adjust the raw open by today's split/div factor so both sides of the
+        # ratio live in the same (adjusted) price space.
+        if cur_close and cur_adj is not None and cur_close != 0:
+            adj_open = cur_open * (cur_adj / cur_close)
+        else:
+            adj_open = cur_open
+        out.append(adj_open / prev_adj - 1)
+    return out
+
+
+def excess_kurtosis(values: list[float]) -> float | None:
+    """Excess kurtosis: the 4th standardized moment minus 3.
+
+    Formula (population moments):
+        m2 = mean((x - mean)**2)
+        m4 = mean((x - mean)**4)
+        kurtosis = m4 / m2**2 ; excess = kurtosis - 3.
+    A normal distribution has excess kurtosis 0; fat tails are positive.
+    Returns None if fewer than 4 values or the variance is zero (degenerate).
+    """
+    n = len(values)
+    if n < 4:
+        return None
+    mu = sum(values) / n
+    m2 = sum((x - mu) ** 2 for x in values) / n
+    if m2 == 0:
+        return None
+    m4 = sum((x - mu) ** 4 for x in values) / n
+    return m4 / (m2 ** 2) - 3
+
+
+def jump_count_2sigma(values: list[float]) -> int:
+    """Count values whose absolute deviation exceeds 2x the population std.
+
+    The 2-sigma threshold is a DOCUMENTED convention (not a calibrated
+    parameter): ``count(|x| > 2 * std(values))`` where ``std`` is the
+    population standard deviation of the series. Returns 0 for fewer than 2
+    values or a zero-variance series (no jumps possible).
+    """
+    n = len(values)
+    if n < 2:
+        return 0
+    mu = sum(values) / n
+    var = sum((x - mu) ** 2 for x in values) / n
+    if var <= 0:
+        return 0
+    std = math.sqrt(var)
+    threshold = 2 * std
+    return sum(1 for x in values if abs(x) > threshold)

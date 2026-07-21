@@ -103,6 +103,14 @@ Report to the user (and to any calling skill):
 
 ---
 
+## Governance Doctrine
+
+**Risk is a gate/governor, never a reward input — conviction never loosens a risk parameter.**
+
+A strong thesis on a name, a high sentiment score, or a compelling catalyst does NOT change what the risk rubric scores. The four dimensions (volatility state, drawdown profile, margin of safety, liquidity & solvency) are computed from evidence that exists independently of conviction. A trader who "deserves" more size because they are very confident has misread what risk scores. Conviction is for position sizing *after* risk gates are satisfied, not a reason to move them.
+
+---
+
 ## Important Notes
 
 - **Higher score means better conditions.** This module scores risk-*reward*, not danger. A near-100 score is a calm, discounted, asymmetric, liquid, cash-rich setup. State the convention in the brief so it can never be read backwards.
@@ -112,3 +120,5 @@ Report to the user (and to any calling skill):
 - **Correlation is context, not a score.** `corr` (and `beta_n_days`) sit in `vol_profile` for the SPY correlation note; only `beta` feeds the volatility-state score. Do not treat correlation as a scored factor.
 - **Rubric version travels with the numbers.** The rubric version (`1.0.0`) is printed in the module JSON and MUST appear in the brief footer, so any reader can tell which scoring rule produced the score.
 - **Snapshot is read-only.** This module never edits `snapshot.json`.
+- **`top_risk` judgment and `event_context` (A2):** The module JSON now includes `tables.event_context` — `{days_to_event, implied_move, implied_move_vs_own_history_pctile, earnings_move_history_summary}` — surfaced verbatim from the snapshot (unscored; scoring gated on calibration in Part B). When writing the `top_risk` judgment (the single named risk for `--top-risk`), you MUST cite this context when an event is imminent: **if `events.days_to_event ≤ 30`, name the event explicitly** (e.g. "earnings 2026-07-24") **and cite the `event_context` figures** — specifically `implied_move` (the market's priced move) and `implied_move_vs_own_history_pctile` (how that compares to this ticker's own history). Example: "earnings binary 12d out; market pricing ±8.2% move (74th pctile vs own history) — size for the binary." An event within 30 days that goes unnamed in `top_risk` is an omission error. The data is now in the module; use it.
+- **`downside_floor_mode` and long-horizon anchors.** When `downside_floor_mode` is `"dcf_bear"` or the floor row carries `basis: "long-horizon anchor (not a swing level)"`, note in the brief that this anchor is a multi-year DCF floor — it is a valuation reference, NOT an actionable swing level. A trader should not size or stop around it as if it were near-term structure.

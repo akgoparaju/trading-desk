@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased — 2026-07-20 · Wave 2 Part A: event-aware risk DATA + disclosure (R1, scoring gated)
+
+The deterministic half of R1. The event/tail signals a desk actually uses are now COMPUTED and
+SURFACED in the risk module — closing the "collected then discarded" gap for the deterministic
+signals — while the SCORING re-weight stays gated on a calibration decision (Part B, below).
+**No risk score moves** (byte-identical-score regression pinned); risk rubric_version stays 1.0.0.
+Snapshot schema **0.2.2 → 0.3.0**. Suite: 1220 passed, 26 skipped.
+
+- **Snapshot 0.3.0 event/tail fields** (deterministic, additive, null-safe):
+  - `events.days_to_event` — days to next earnings.
+  - `events.implied_move` — the front-expiry earnings straddle move (surfaced from the existing
+    `sentiment.implied_move_next_earnings_pct`).
+  - `events.earnings_move_history` — the ticker's own last-8-quarter earnings-day reactions
+    (from `quarterlyEarnings[].reportedDate` × daily closes; report-spanning close-to-close
+    convention, robust to BMO/AMC).
+  - `events.implied_move_vs_own_history_pctile` — where the current implied move sits vs the name's
+    own reaction history (BE validated: 27.2% implied = 100th pctile — bigger than any of its last 8).
+  - `technicals.overnight_gap` — `{mean_abs, p95_abs, max_abs, excess_kurtosis, jump_count_2sigma, n}`
+    from adjustment-consistent overnight gaps (the raw open is scaled by the day's
+    `adjusted_close/close` factor so a split can't manufacture a spurious gap — a general-case
+    correctness guard; BE, which never split, is unaffected and its extreme tails are real).
+- **Risk module surfaces the data UNSCORED**: `tables.event_context` + `tables.tail_context`, read
+  verbatim from the snapshot (zero arithmetic in the module); new paths flagged CONTEXT-ONLY for
+  single-mapping; module note `"event-context v1 (unscored) — scoring gated on calibration"`.
+- **Presentation fix**: the long-horizon `dcf_bear` / suspect valuation floor is relabeled
+  `"long-horizon anchor (not a swing level)"` in the downside map (the review's "−97.7% anchor in a
+  swing map"). Numeric level unchanged.
+- **Governance doctrine** added to the risk SKILL: "Risk is a gate/governor, never a reward input —
+  conviction never loosens a risk parameter"; `top_risk` directed to name an event ≤30d out and cite
+  the event_context figures.
+- **GATED (Part B, needs a user decision — not built):** the scored re-weight (`risk-v1.1.0` — a
+  calibration decision, B8/B9), `sentiment.news_heat` (EWMA parameters), and `sentiment.short_campaign`
+  (short-seller entity list + detection heuristic — a risk gate acting on a false positive needs
+  sign-off). Confidence DEPTH for risk stays MEDIUM until the scored re-weight lands.
+
 ## Unreleased — 2026-07-20 · Wave 1: confidence / provenance layer (`confidence-v1.0.0`)
 
 Every report now ships a **per-module confidence badge + a composite roll-up**, computed

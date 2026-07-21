@@ -453,7 +453,7 @@ class TestBuildSnapshotFull(unittest.TestCase):
         m = self.snap["meta"]
         self.assertEqual(m["ticker"], "MU")
         self.assertEqual(m["as_of_utc"], AS_OF)
-        self.assertEqual(m["schema_version"], "0.2.2")  # QF2: bumped 0.2.1 -> 0.2.2
+        self.assertEqual(m["schema_version"], "0.3.0")  # A1: bumped 0.2.2 -> 0.3.0
         self.assertEqual(m["missing"], [])
         self.assertIn("qc", m)
         self.assertTrue(len(m["sources"]) >= 4)
@@ -1154,6 +1154,189 @@ class TestQF5RevisionsNullReason(unittest.TestCase):
         snap = self._build_snap(b)
         self.assertIsNotNone(snap["fundamentals"]["revisions_90d"])
         self.assertIsNone(snap["fundamentals"]["revisions_null_reason"])
+
+
+# --------------------------------------------------------------------------- #
+# Wave 2 A1: event-aware deterministic snapshot fields (schema 0.3.0).
+# --------------------------------------------------------------------------- #
+
+def _expected_move(rows, report_date):
+    """Reference implementation of the A1 reaction-window convention.
+
+    move_pct = close[first trading day >= D+1] / close[last trading day <= D-1] - 1,
+    or None if OHLCV is missing on either side. ``rows`` are the fixture rows
+    (date/close), oldest-first.
+    """
+    import datetime as _dt
+    d = _dt.date.fromisoformat(report_date)
+    before = (d - _dt.timedelta(days=1)).isoformat()
+    after = (d + _dt.timedelta(days=1)).isoformat()
+    pre = [r["close"] for r in rows if r["date"] <= before]
+    post = [r["close"] for r in rows if r["date"] >= after]
+    if not pre or not post:
+        return None
+    return post[0] / pre[-1] - 1
+
+
+class TestA1EventAwareFields(unittest.TestCase):
+    """Deterministic event/tail fields added to the snapshot in Wave 2 A1."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _build(self, b):
+        b.write_manifest()
+        proc = _run_build(self.dir)
+        self.assertEqual(proc.returncode, 0, f"stdout={proc.stdout}\nstderr={proc.stderr}")
+        out = os.path.join(self.dir, f"snapshot_MU_{AS_OF_DATE}.json")
+        with open(out) as fh:
+            return json.load(fh)
+
+    def test_days_to_event(self):
+        # next earnings 2026-09-25; as_of 2026-07-16 -> 71 calendar days.
+        b = BundleBuilder(self.dir).build_full()
+        snap = self._build(b)
+        import datetime as _dt
+        expected = (_dt.date(2026, 9, 25) - _dt.date(2026, 7, 16)).days
+        self.assertEqual(snap["events"]["days_to_event"], expected)
+
+    def test_days_to_event_null_when_no_next_earnings(self):
+        # No earnings_calendar file -> next_earnings null -> days_to_event null.
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        snap = self._build(b)
+        self.assertIsNone(snap["events"]["next_earnings"])
+        self.assertIsNone(snap["events"]["days_to_event"])
+
+    def test_implied_move_copied_from_sentiment(self):
+        # events.implied_move must be byte-identical to the sentiment value
+        # (reused, not recomputed).
+        b = BundleBuilder(self.dir).build_full()
+        snap = self._build(b)
+        self.assertIsNotNone(snap["sentiment"]["implied_move_next_earnings_pct"])
+        self.assertEqual(snap["events"]["implied_move"],
+                         snap["sentiment"]["implied_move_next_earnings_pct"])
+
+    def test_implied_move_null_when_no_chain(self):
+        # No options chain -> sentiment implied move null -> events.implied_move null.
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        b.add_earnings_calendar()
+        snap = self._build(b)
+        self.assertIsNone(snap["sentiment"]["implied_move_next_earnings_pct"])
+        self.assertIsNone(snap["events"]["implied_move"])
+
+    def test_earnings_move_history_hand_computed(self):
+        # Fixture earnings has 4 reportedDates within the daily-row range; each
+        # move must match the documented reaction-window convention exactly.
+        b = BundleBuilder(self.dir).build_full()
+        snap = self._build(b)
+        emh = snap["events"]["earnings_move_history"]
+        # The 4 fixture reportedDates (newest-first, matching earn_q order).
+        report_dates = ["2026-07-01", "2026-04-01", "2026-01-05", "2025-10-05"]
+        self.assertEqual([m["quarter_end"] for m in emh], report_dates)
+        for m in emh:
+            expected = _expected_move(b.stock_rows, m["quarter_end"])
+            self.assertIsNotNone(expected)
+            self.assertAlmostEqual(m["move_pct"], expected, places=9)
+
+    def test_earnings_move_history_skips_out_of_range_quarter(self):
+        # A reportedDate BEFORE the daily-row range (no pre-window close) is
+        # skipped; the other quarters remain, capped at 8, newest-first.
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        b.add_chain(); b.add_earnings_calendar()
+        # Earnings: 3 in-range dates + one date far before the walk start
+        # (2020-01-15, no pre/post rows) which MUST be skipped.
+        q = [
+            {"fiscalDateEnding": "2026-06-30", "reportedDate": "2026-07-01", "reportedEPS": "1.60"},
+            {"fiscalDateEnding": "2026-03-31", "reportedDate": "2026-04-01", "reportedEPS": "1.40"},
+            {"fiscalDateEnding": "2025-12-31", "reportedDate": "2026-01-05", "reportedEPS": "1.20"},
+            {"fiscalDateEnding": "2019-12-31", "reportedDate": "2020-01-15", "reportedEPS": "0.50"},
+        ]
+        b._add("earnings", "earnings.json",
+               {"symbol": b.ticker, "annualEarnings": [], "quarterlyEarnings": q},
+               "EARNINGS")
+        snap = self._build(b)
+        emh = snap["events"]["earnings_move_history"]
+        # The out-of-range quarter (2020-01-15) is dropped; 3 remain.
+        self.assertEqual([m["quarter_end"] for m in emh],
+                         ["2026-07-01", "2026-04-01", "2026-01-05"])
+        for m in emh:
+            expected = _expected_move(b.stock_rows, m["quarter_end"])
+            self.assertAlmostEqual(m["move_pct"], expected, places=9)
+
+    def test_earnings_move_history_skips_quarter_missing_reported_date(self):
+        # A quarter with no reportedDate is skipped (no key error, no entry).
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        b.add_chain(); b.add_earnings_calendar()
+        q = [
+            {"fiscalDateEnding": "2026-06-30", "reportedEPS": "1.60"},  # no reportedDate
+            {"fiscalDateEnding": "2026-03-31", "reportedDate": "2026-04-01", "reportedEPS": "1.40"},
+        ]
+        b._add("earnings", "earnings.json",
+               {"symbol": b.ticker, "annualEarnings": [], "quarterlyEarnings": q},
+               "EARNINGS")
+        snap = self._build(b)
+        emh = snap["events"]["earnings_move_history"]
+        self.assertEqual([m["quarter_end"] for m in emh], ["2026-04-01"])
+
+    def test_earnings_move_history_empty_when_no_earnings(self):
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        snap = self._build(b)
+        self.assertEqual(snap["events"]["earnings_move_history"], [])
+
+    def test_implied_move_vs_own_history_pctile(self):
+        # implied_move (~0.127) exceeds all 4 abs history moves (<0.012) ->
+        # 100th percentile. Hand-check against the same rule the builder uses.
+        b = BundleBuilder(self.dir).build_full()
+        snap = self._build(b)
+        ev = snap["events"]
+        im = ev["implied_move"]
+        abs_moves = [abs(m["move_pct"]) for m in ev["earnings_move_history"]]
+        expected = 100 * sum(1 for a in abs_moves if a <= im) / len(abs_moves)
+        self.assertAlmostEqual(ev["implied_move_vs_own_history_pctile"], expected,
+                               places=9)
+
+    def test_implied_move_vs_own_history_pctile_null_without_implied(self):
+        # No chain -> implied_move null -> pctile null (one input absent).
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        b.add_earnings(); b.add_earnings_calendar()
+        snap = self._build(b)
+        self.assertIsNone(snap["events"]["implied_move"])
+        self.assertIsNone(snap["events"]["implied_move_vs_own_history_pctile"])
+
+    def test_overnight_gap_block_shape_and_values(self):
+        # overnight_gap block computed off the fixture's open + adjusted_close.
+        b = BundleBuilder(self.dir).build_full()
+        snap = self._build(b)
+        og = snap["technicals"]["overnight_gap"]
+        self.assertIsNotNone(og)
+        self.assertEqual(set(og),
+                         {"mean_abs", "p95_abs", "max_abs", "excess_kurtosis",
+                          "jump_count_2sigma", "n"})
+        # n gaps == len(rows) - 1 (fixture has open + adj_close on every row).
+        self.assertEqual(og["n"], len(b.stock_rows) - 1)
+        # Cross-check against the indicator library over the same series.
+        from scripts import indicators
+        rows = [{"open": r["open"], "adjusted_close": r["adj"]} for r in b.stock_rows]
+        gaps = indicators.overnight_gap_series(rows)
+        abs_gaps = [abs(g) for g in gaps]
+        self.assertAlmostEqual(og["mean_abs"], sum(abs_gaps) / len(abs_gaps), places=9)
+        self.assertAlmostEqual(og["max_abs"], max(abs_gaps), places=9)
+        self.assertAlmostEqual(og["excess_kurtosis"],
+                               indicators.excess_kurtosis(gaps), places=9)
+        self.assertEqual(og["jump_count_2sigma"],
+                         indicators.jump_count_2sigma(gaps))
+
+    def test_schema_version_is_0_3_0(self):
+        b = BundleBuilder(self.dir).build_full()
+        snap = self._build(b)
+        self.assertEqual(snap["meta"]["schema_version"], "0.3.0")
 
 
 if __name__ == "__main__":

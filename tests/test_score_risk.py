@@ -549,6 +549,8 @@ class TestAnchoredValuationFloor(unittest.TestCase):
         # dcf_bear 95 sits between the 96 ladder support (nearer) and the 90
         # ladder support (farther); nearest-first (descending) ordering is
         # unchanged -- 96 first, then 95, then 90.
+        # A3: an anchored dcf_bear floor is a long-horizon anchor and is
+        # relabeled in the map so it cannot be mistaken for a swing level.
         ladder = _ladder([(90.0, "swing_low"), (96.0, "ma50")])
         vf = sr.valuation_floor(pe_5yr_median=12.0, eps_ntm=6.0, last=100.0,
                                 pe_fwd=10.0, anchors=_anchors(dcf_bear=95.0))
@@ -559,7 +561,10 @@ class TestAnchoredValuationFloor(unittest.TestCase):
         self.assertEqual(levels, [96.0, 95.0, 90.0])
         vfr = [r for r in rows if r["type"] == "valuation_floor"][0]
         self.assertEqual(vfr["level"], 95.0)
-        self.assertEqual(vfr["basis"], "dcf_bear (coverage anchors)")
+        # A3 relabel: the map basis is the long-horizon anchor label, not the
+        # raw "dcf_bear (coverage anchors)" — the valuation_floor() return value
+        # still carries the raw basis but the display map relabels it.
+        self.assertEqual(vfr["basis"], sr._LONG_HORIZON_ANCHOR_BASIS)
 
 
 # --------------------------------------------------------------------------- #
@@ -631,6 +636,260 @@ class TestInputFields(unittest.TestCase):
     def test_shared_reference_fields_not_listed(self):
         self.assertNotIn("price.last", sr.INPUT_FIELDS)
 
+    def test_context_fields_exact(self):
+        # A2: CONTEXT_FIELDS are separate from INPUT_FIELDS (unscored, carry no
+        # points) so the single-mapping governance test is not confused into
+        # treating them as scored. Pinned here for the same reason INPUT_FIELDS is.
+        self.assertEqual(sr.CONTEXT_FIELDS, {
+            "events.days_to_event",
+            "events.implied_move",
+            "events.implied_move_vs_own_history_pctile",
+            "events.earnings_move_history",
+            "technicals.overnight_gap",
+        })
+
+    def test_context_fields_disjoint_from_input_fields(self):
+        # CONTEXT_FIELDS must not overlap with INPUT_FIELDS: they carry no points
+        # and must not accidentally enter the single-mapping governance check.
+        self.assertFalse(sr.CONTEXT_FIELDS & sr.INPUT_FIELDS)
+
+
+# --------------------------------------------------------------------------- #
+# A2: event_context / tail_context (unscored, verbatim passthrough)
+# --------------------------------------------------------------------------- #
+
+class TestEventContext(unittest.TestCase):
+    """A2: build_event_context reads event fields verbatim from the snapshot."""
+
+    def _snap(self, ev_override=None, tech_override=None):
+        """Minimal snapshot with an events block and an overnight_gap block."""
+        ev = {
+            "days_to_event": 12,
+            "implied_move": 0.082,
+            "implied_move_vs_own_history_pctile": 74.0,
+            "earnings_move_history": [
+                {"quarter_end": "2026-03-31", "move_pct": 0.07},
+                {"quarter_end": "2025-12-31", "move_pct": -0.11},
+            ],
+            "next_earnings": {"date": "2026-08-01"},
+            "dividends": {},
+            "catalysts": [],
+        }
+        if ev_override:
+            ev.update(ev_override)
+        og = {"mean_abs": 0.012, "p95_abs": 0.035, "max_abs": 0.08,
+              "excess_kurtosis": 2.1, "jump_count_2sigma": 5, "n": 300}
+        tech = {"overnight_gap": og}
+        if tech_override:
+            tech.update(tech_override)
+        return {"events": ev, "technicals": tech}
+
+    def test_event_context_passthrough(self):
+        # build_event_context reads verbatim — no arithmetic in the module.
+        snap = self._snap()
+        ec = sr.build_event_context(snap)
+        self.assertEqual(ec["days_to_event"], 12)
+        self.assertAlmostEqual(ec["implied_move"], 0.082)
+        self.assertAlmostEqual(ec["implied_move_vs_own_history_pctile"], 74.0)
+        # earnings_move_history_summary carries the list and count
+        ems = ec["earnings_move_history_summary"]
+        self.assertEqual(ems["count"], 2)
+        self.assertEqual(len(ems["history"]), 2)
+
+    def test_event_context_null_safe(self):
+        # Absent events block -> all None / empty list, no exception.
+        ec = sr.build_event_context({})
+        self.assertIsNone(ec["days_to_event"])
+        self.assertIsNone(ec["implied_move"])
+        self.assertIsNone(ec["implied_move_vs_own_history_pctile"])
+        self.assertIsNone(ec["earnings_move_history_summary"]["count"])
+
+    def test_event_context_no_history(self):
+        # Null earnings_move_history -> count None, history empty list.
+        snap = self._snap(ev_override={"earnings_move_history": None})
+        ec = sr.build_event_context(snap)
+        ems = ec["earnings_move_history_summary"]
+        self.assertIsNone(ems["count"])
+        self.assertEqual(ems["history"], [])
+
+    def test_build_module_includes_event_and_tail_context(self):
+        # build_module wires event_context + tail_context into tables, and the
+        # values equal the snapshot fields (verbatim passthrough confirmed end-to-end).
+        snap = self._snap()
+        ladder = _ladder([(88.0, "ma50"), (105.0, "swing_high")])
+        doc = sr.build_module(snap, ladder, stress_pct=None, top_risk=None)
+        tables = doc["tables"]
+        self.assertIn("event_context", tables)
+        self.assertIn("tail_context", tables)
+        # event_context values match snapshot
+        ec = tables["event_context"]
+        self.assertEqual(ec["days_to_event"],
+                         snap["events"]["days_to_event"])
+        self.assertEqual(ec["implied_move"],
+                         snap["events"]["implied_move"])
+        self.assertEqual(ec["implied_move_vs_own_history_pctile"],
+                         snap["events"]["implied_move_vs_own_history_pctile"])
+        # tail_context is verbatim overnight_gap block
+        tc = tables["tail_context"]
+        self.assertEqual(tc, snap["technicals"]["overnight_gap"])
+
+    def test_module_note_present(self):
+        # The module carries the A2 disclosure note.
+        snap = self._snap()
+        ladder = _ladder([(88.0, "ma50"), (105.0, "swing_high")])
+        doc = sr.build_module(snap, ladder, stress_pct=None, top_risk=None)
+        self.assertIn("note", doc)
+        self.assertIn("event-context v1 (unscored)", doc["note"])
+        self.assertIn("Part B", doc["note"])
+
+    def test_tail_context_none_when_absent(self):
+        # When overnight_gap is absent from technicals, tail_context is None.
+        snap = self._snap()
+        snap["technicals"].pop("overnight_gap")
+        ladder = _ladder([(88.0, "ma50")])
+        doc = sr.build_module(snap, ladder, stress_pct=None, top_risk=None)
+        self.assertIsNone(doc["tables"]["tail_context"])
+
+
+# --------------------------------------------------------------------------- #
+# A3: valuation_floor relabel in the downside map
+# --------------------------------------------------------------------------- #
+
+class TestValuationFloorRelabel(unittest.TestCase):
+    """A3: long-horizon anchors (dcf_bear or suspect) are relabeled in the map."""
+
+    def test_anchored_dcf_bear_relabeled_as_long_horizon(self):
+        # An anchored (dcf_bear) floor is a long-horizon anchor and should be
+        # relabeled in the downside map so it cannot be mistaken for a swing level.
+        vf = sr.valuation_floor(pe_5yr_median=12.0, eps_ntm=6.0, last=100.0,
+                                pe_fwd=10.0, anchors=_anchors(dcf_bear=70.0))
+        # The raw valuation_floor() return value carries the original basis.
+        self.assertEqual(vf["basis"], "dcf_bear (coverage anchors)")
+        # In the downside map the basis is relabeled.
+        rows = sr.build_downside_map([], last=100.0, val_floor=vf,
+                                     stress_pct=None, top_risk=None)
+        vfr = [r for r in rows if r["type"] == "valuation_floor"]
+        self.assertEqual(len(vfr), 1)
+        self.assertEqual(vfr[0]["basis"], sr._LONG_HORIZON_ANCHOR_BASIS)
+        # Level is UNCHANGED (presentation only).
+        self.assertEqual(vfr[0]["level"], 70.0)
+
+    def test_suspect_floor_relabeled_as_long_horizon(self):
+        # A suspect snapshot floor (approx_current_eps breakdown — floor/last < 0.25)
+        # is also relabeled in the map.
+        vf = sr.valuation_floor(pe_5yr_median=1.82, eps_ntm=20.0, last=200.0)
+        self.assertTrue(vf.get("suspect"))
+        rows = sr.build_downside_map([], last=200.0, val_floor=vf,
+                                     stress_pct=None, top_risk=None)
+        vfr = [r for r in rows if r["type"] == "valuation_floor"]
+        self.assertEqual(len(vfr), 1)
+        self.assertEqual(vfr[0]["basis"], sr._LONG_HORIZON_ANCHOR_BASIS)
+        # Level is unchanged (presentation only).
+        self.assertIsNotNone(vfr[0]["level"])
+        # Suspect flag is still present.
+        self.assertTrue(vfr[0].get("suspect"))
+
+    def test_normal_pe_median_floor_not_relabeled(self):
+        # A healthy pe-median floor (not suspect, not anchored) keeps its own basis.
+        vf = sr.valuation_floor(pe_5yr_median=12.0, eps_ntm=6.0,
+                                last=100.0, pe_fwd=10.0)
+        self.assertIsNone(vf.get("suspect"))
+        rows = sr.build_downside_map([], last=100.0, val_floor=vf,
+                                     stress_pct=None, top_risk=None)
+        vfr = [r for r in rows if r["type"] == "valuation_floor"]
+        self.assertEqual(len(vfr), 1)
+        self.assertEqual(vfr[0]["basis"], "valuation")
+        self.assertNotEqual(vfr[0]["basis"], sr._LONG_HORIZON_ANCHOR_BASIS)
+
+
+# --------------------------------------------------------------------------- #
+# A2 regression: byte-identical scored outputs after A2/A3 additions
+# --------------------------------------------------------------------------- #
+
+class TestByteIdenticalScoreRegression(unittest.TestCase):
+    """Verifies that adding A2 (event_context/tail_context) and A3
+    (valuation_floor relabel) does NOT change the scored score or any subscore
+    points/max. The four factors, bands, and weights are untouched."""
+
+    # Hand-computed "before" values for the standard _tech() / 600M ADV /
+    # 10/100 net fixture (same inputs used in TestRenormalization):
+    #   volatility_state: pctile=25 -> 20, beta=1.0 -> 5, total=25/25
+    #   drawdown_profile: maxdd=-0.30 -> 12, dd30=1 -> 8, spread=dd20-dd30=2 -> 5, total=25/25
+    #   margin_of_safety: dist=-0.20 -> 12; ladder=(96,110): d_sup=4% d_res=10% ratio=0.4 -> 18, total=30/30
+    #   liquidity_solvency: adv=600e6 -> 10, net=10/100=10% -> 10, total=20/20
+    #   score = 100/100 -> 100.0
+    _EXPECTED_SCORE = 100.0
+    _EXPECTED_SUBSCORES = [
+        {"name": "volatility_state", "points": 25, "max": 25},
+        {"name": "drawdown_profile", "points": 25, "max": 25},
+        {"name": "margin_of_safety", "points": 30, "max": 30},
+        {"name": "liquidity_solvency", "points": 20, "max": 20},
+    ]
+
+    def _run_score(self, tech, beta, ladder, last, adv, net, mktcap):
+        return sr.score(tech=tech, beta=beta, ladder=ladder, last=last,
+                        adv=adv, net=net, mktcap=mktcap)
+
+    def test_score_unchanged(self):
+        tech = _tech()
+        ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
+        result = self._run_score(tech, beta=1.0, ladder=ladder, last=100.0,
+                                 adv=600e6, net=10.0, mktcap=100.0)
+        self.assertEqual(result["score"], self._EXPECTED_SCORE,
+                         "score changed after A2/A3 additions")
+
+    def test_subscores_points_and_max_unchanged(self):
+        tech = _tech()
+        ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
+        result = self._run_score(tech, beta=1.0, ladder=ladder, last=100.0,
+                                 adv=600e6, net=10.0, mktcap=100.0)
+        for expected in self._EXPECTED_SUBSCORES:
+            actual = next(s for s in result["subscores"]
+                          if s["name"] == expected["name"])
+            self.assertEqual(actual["points"], expected["points"],
+                             f"{expected['name']} points changed")
+            self.assertEqual(actual["max"], expected["max"],
+                             f"{expected['name']} max changed")
+
+    def test_build_module_scores_unchanged_with_event_context(self):
+        # Even when a full snapshot with events + overnight_gap is provided,
+        # the scored dimensions are byte-identical (context fields carry no points).
+        snap = {
+            "events": {
+                "days_to_event": 12, "implied_move": 0.082,
+                "implied_move_vs_own_history_pctile": 74.0,
+                "earnings_move_history": [],
+            },
+            "technicals": {
+                "rv30_vs_10yr_pctile": 25.0, "max_dd_10yr": -0.30,
+                "dd_episodes_20pct_10yr": 3, "dd_episodes_30pct_10yr": 1,
+                "dist_from_ath_pct": -0.20, "ohlcv_rows": 800,
+                "overnight_gap": {"mean_abs": 0.01, "p95_abs": 0.03,
+                                  "max_abs": 0.07, "excess_kurtosis": 1.5,
+                                  "jump_count_2sigma": 3, "n": 250},
+            },
+            "benchmark": {"beta": 1.0, "beta_n_days": 300},
+            "price": {"last": 100.0, "adv_dollar_3m": 600e6,
+                      "mktcap_computed": 100.0},
+            "fundamentals": {
+                "net_cash_defined": {"net": 10.0},
+                "eps_ntm_consensus": 6.0,
+            },
+            "valuation": {"pe_5yr_median": 12.0, "pe_fwd": 10.0},
+            "meta": {"ticker": "TST", "as_of_utc": "2026-07-20T16:00:00Z"},
+        }
+        ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
+        doc = sr.build_module(snap, ladder, stress_pct=None, top_risk=None)
+        self.assertEqual(doc["score"], self._EXPECTED_SCORE,
+                         "build_module score changed")
+        for expected in self._EXPECTED_SUBSCORES:
+            actual = next(s for s in doc["subscores"]
+                          if s["name"] == expected["name"])
+            self.assertEqual(actual["points"], expected["points"],
+                             f"build_module {expected['name']} points changed")
+            self.assertEqual(actual["max"], expected["max"],
+                             f"build_module {expected['name']} max changed")
+
 
 # --------------------------------------------------------------------------- #
 # CLI end-to-end (real bundle, reuses test_build_snapshot fixtures)
@@ -691,6 +950,12 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(len(doc["subscores"]), 4)
         self.assertIn("downside_map", doc["tables"])
         self.assertIn("vol_profile", doc["tables"])
+        # A2: event_context and tail_context present in the module JSON.
+        self.assertIn("event_context", doc["tables"])
+        self.assertIn("tail_context", doc["tables"])
+        # A2: module note present.
+        self.assertIn("note", doc)
+        self.assertIn("event-context v1 (unscored)", doc["note"])
         self.assertIsNone(doc["signal"])
         # confidence-v1.0.0: well-formed block; depth MEDIUM at rubric 1.0.0.
         conf = doc["confidence"]
@@ -772,10 +1037,11 @@ class TestCLI(unittest.TestCase):
         dm = doc["tables"]["downside_map"]
         vfs = [r for r in dm if r["type"] == "valuation_floor"]
         # The floor is present only when dcf_bear < last (MU fixture last ~90);
-        # when present it must be the dcf_bear level with the anchored basis.
+        # when present it must be the dcf_bear level; A3 relabels anchored floors
+        # in the map as "long-horizon anchor (not a swing level)".
         for r in vfs:
             self.assertEqual(r["level"], 95.0)
-            self.assertEqual(r["basis"], "dcf_bear (coverage anchors)")
+            self.assertEqual(r["basis"], sr._LONG_HORIZON_ANCHOR_BASIS)
             self.assertNotIn("suspect", r)
 
     def test_cli_malformed_anchors_exit2(self):

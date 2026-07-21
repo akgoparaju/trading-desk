@@ -115,6 +115,21 @@ INPUT_FIELDS = {
     "technicals.ohlcv_rows",
 }
 
+# Snapshot fields consumed by this module as CONTEXT-ONLY (unscored, carry zero
+# points, excluded from INPUT_FIELDS so the single-mapping governance test is not
+# confused into treating them as scored). These are surfaced verbatim from the
+# snapshot into tables.event_context and tables.tail_context for disclosure —
+# scoring is gated on calibration (Part B). A2 additions.
+CONTEXT_FIELDS = {
+    # event_context (A2)
+    "events.days_to_event",
+    "events.implied_move",
+    "events.implied_move_vs_own_history_pctile",
+    "events.earnings_move_history",
+    # tail_context (A2)
+    "technicals.overnight_gap",
+}
+
 # Minimum history for a component to be trusted (see the module docstring / the
 # real-world bug that motivated this: a beta of 3.61 from 100 unadjusted days).
 _MIN_BETA_N_DAYS = 150     # ~half a trading year of return-days for a stable beta
@@ -559,6 +574,14 @@ def valuation_floor(pe_5yr_median, eps_ntm, last=None, pe_fwd=None, anchors=None
     return row
 
 
+# A3: the long-horizon anchor basis label, applied in the downside map when the
+# floor is a dcf_bear (anchored mode) or a suspect snapshot floor far below the
+# nearest proven swing support. PRESENTATION ONLY -- the numeric level is
+# unchanged. The relabeled basis clearly segregates long-horizon anchors from
+# actionable swing levels in the display (spec A3).
+_LONG_HORIZON_ANCHOR_BASIS = "long-horizon anchor (not a swing level)"
+
+
 def build_downside_map(ladder, last, val_floor, stress_pct, top_risk) -> list:
     """Ordered list of downside anchors BELOW ``last``, NEAREST-FIRST.
 
@@ -567,6 +590,11 @@ def build_downside_map(ladder, last, val_floor, stress_pct, top_risk) -> list:
     the deepest anchors instead of the nearest). Ladder entries below ``last``
     plus the valuation-floor row (if computable) in sorted position; the
     stress-scenario row (if ``stress_pct`` given) appends last, labeled.
+
+    A3 (valuation_floor relabel): a dcf_bear (anchored) floor OR a suspect
+    snapshot floor are long-horizon anchors -- not actionable swing levels.
+    Their ``basis`` is relabeled in this map so a reader cannot mistake them
+    for short-term structure. The numeric level is unchanged.
     """
     rows = []
     for e in ladder:
@@ -579,8 +607,16 @@ def build_downside_map(ladder, last, val_floor, stress_pct, top_risk) -> list:
 
     if val_floor is not None and last is not None and val_floor["level"] < last:
         pct = _clean(val_floor["level"] / last - 1) if last else None
+        # A3: determine whether this floor should carry the long-horizon-anchor
+        # relabel. Two triggers (spec A3): (a) anchored dcf_bear mode, or (b)
+        # suspect snapshot floor (approx_current_eps breakdown) which already
+        # signals the floor is far below any proven swing level.
+        is_long_horizon = (val_floor.get("method") == "dcf_bear"
+                           or val_floor.get("suspect"))
+        display_basis = (_LONG_HORIZON_ANCHOR_BASIS if is_long_horizon
+                         else val_floor["basis"])
         vf_row = {"level": val_floor["level"], "type": val_floor["type"],
-                  "basis": val_floor["basis"], "method": val_floor["method"],
+                  "basis": display_basis, "method": val_floor["method"],
                   "pct_from_last": pct}
         # Carry the suspect flag so DISPLAY consumers can gray/omit the row while
         # keeping it in the map for continuity (fix 3).
@@ -689,6 +725,31 @@ def _find_snapshot(bundle):
     return max(matches, key=os.path.getmtime)
 
 
+def build_event_context(snapshot) -> dict:
+    """Surface the event-context fields verbatim from the snapshot (A2, unscored).
+
+    Reads events.{days_to_event, implied_move, implied_move_vs_own_history_pctile,
+    earnings_move_history} from the snapshot without any arithmetic. The
+    earnings_move_history list and its count are passed through unchanged.
+    Returns a dict suitable for tables.event_context. Null-safe: any absent
+    field is returned as None.
+    """
+    ev = snapshot.get("events") if isinstance(snapshot, dict) else None
+    if not isinstance(ev, dict):
+        ev = {}
+    history = ev.get("earnings_move_history")
+    history_count = len(history) if isinstance(history, list) else None
+    return {
+        "days_to_event": ev.get("days_to_event"),
+        "implied_move": ev.get("implied_move"),
+        "implied_move_vs_own_history_pctile": ev.get("implied_move_vs_own_history_pctile"),
+        "earnings_move_history_summary": {
+            "history": history if isinstance(history, list) else [],
+            "count": history_count,
+        },
+    }
+
+
 def build_module(snapshot, ladder, stress_pct, top_risk, anchors=None,
                  bundle_dir=None) -> dict:
     """Build the full module_risk.json document from parsed inputs + ladder.
@@ -726,6 +787,11 @@ def build_module(snapshot, ladder, stress_pct, top_risk, anchors=None,
     downside_map = build_downside_map(ladder, last, vf, stress_pct, top_risk)
     vol_profile = build_vol_profile(tech, bench)
 
+    # A2: surface context-only (unscored) event and tail blocks verbatim from the
+    # snapshot. Zero arithmetic here -- all computation was done in build_snapshot.
+    event_context = build_event_context(snapshot)
+    tail_context = tech.get("overnight_gap")  # verbatim passthrough; may be None
+
     doc = {
         "skill": SKILL_NAME,
         "rubric_version": RUBRIC_VERSION,
@@ -736,6 +802,8 @@ def build_module(snapshot, ladder, stress_pct, top_risk, anchors=None,
         "tables": {
             "downside_map": downside_map,
             "vol_profile": vol_profile,
+            "event_context": event_context,
+            "tail_context": tail_context,
         },
         "flags": {
             "stress_pct": stress_pct,
@@ -744,6 +812,8 @@ def build_module(snapshot, ladder, stress_pct, top_risk, anchors=None,
         "downside_floor_mode": "dcf_bear" if isinstance(anchors, dict)
                                else "pe_median",
         "renormalized": scored["renormalized"],
+        "note": ("event-context v1 (unscored) — surfaced for disclosure; "
+                 "scoring gated on calibration (Part B)"),
         "signal": None,
     }
     if scored["renormalization_note"]:
