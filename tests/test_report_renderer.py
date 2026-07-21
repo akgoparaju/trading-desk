@@ -431,7 +431,7 @@ def _options_doc():
     }
     return {
         "skill": "options-strategy",
-        "rubric_version": "1.0.0",
+        "rubric_version": "1.1.0",
         "ticker": "MU",
         "as_of": "2026-07-16",
         "mode": "pipeline",

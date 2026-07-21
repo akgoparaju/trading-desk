@@ -12,6 +12,7 @@ stdlib-only; unittest; each test builds an isolated tempdir bundle.
 """
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -453,7 +454,7 @@ class TestBuildSnapshotFull(unittest.TestCase):
         m = self.snap["meta"]
         self.assertEqual(m["ticker"], "MU")
         self.assertEqual(m["as_of_utc"], AS_OF)
-        self.assertEqual(m["schema_version"], "0.3.2")  # Wave 4A: 0.3.1 -> 0.3.2
+        self.assertEqual(m["schema_version"], "0.3.3")  # Wave 4B: 0.3.2 -> 0.3.3
         self.assertEqual(m["missing"], [])
         self.assertIn("qc", m)
         self.assertTrue(len(m["sources"]) >= 4)
@@ -1333,10 +1334,10 @@ class TestA1EventAwareFields(unittest.TestCase):
         self.assertEqual(og["jump_count_2sigma"],
                          indicators.jump_count_2sigma(gaps))
 
-    def test_schema_version_is_0_3_2(self):
+    def test_schema_version_is_0_3_3(self):
         b = BundleBuilder(self.dir).build_full()
         snap = self._build(b)
-        self.assertEqual(snap["meta"]["schema_version"], "0.3.2")
+        self.assertEqual(snap["meta"]["schema_version"], "0.3.3")
 
 
 # --------------------------------------------------------------------------- #
@@ -1467,6 +1468,73 @@ class TestWave3ADtcAndSkew(unittest.TestCase):
         snap = self._build(b)
         self.assertIsNone(snap["options"])
         self.assertIsNone(snap["sentiment"]["skew_25d_30d"])
+
+
+class TestWave4BEventVolAndExEarningsRV(unittest.TestCase):
+    """Wave 4B: options.event_vol + options.rv20_ex_earnings snapshot fields."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _build(self, b):
+        b.write_manifest()
+        proc = _run_build(self.dir)
+        self.assertEqual(proc.returncode, 0, f"stdout={proc.stdout}\nstderr={proc.stderr}")
+        out = os.path.join(self.dir, f"snapshot_MU_{AS_OF_DATE}.json")
+        with open(out) as fh:
+            return json.load(fh)
+
+    def test_event_vol_present_and_brackets_earnings(self):
+        # Fixture: earnings 2026-09-25; chain expiries 2026-08-14/09-18/10-16.
+        # pre = 2026-09-18 (last < earnings), post = 2026-10-16 (first >= earnings).
+        b = BundleBuilder(self.dir).build_full()
+        snap = self._build(b)
+        ev = snap["options"]["event_vol"]
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev["exp_pre"], "2026-09-18")
+        self.assertEqual(ev["exp_post"], "2026-10-16")
+        # ATM IVs (call/put mean at K=100): pre (0.47+0.52)/2, post (0.45+0.50)/2.
+        self.assertAlmostEqual(ev["iv_pre"], (0.47 + 0.52) / 2)
+        self.assertAlmostEqual(ev["iv_post"], (0.45 + 0.50) / 2)
+        self.assertGreater(ev["event_implied_move"], 0.0)
+        # Desk variance additivity with both horizons from the snapshot's as_of.
+        from datetime import date
+        def _d(s):
+            y, m, dd = str(s)[:10].split("-"); return date(int(y), int(m), int(dd))
+        aod = _d(snap["meta"]["as_of_utc"])
+        t_pre = (_d("2026-09-18") - aod).days / 365.0
+        t_post = (_d("2026-10-16") - aod).days / 365.0
+        expected = math.sqrt(ev["iv_post"] ** 2 * t_post - ev["iv_pre"] ** 2 * t_pre)
+        self.assertAlmostEqual(ev["event_implied_move"], expected, places=10)
+
+    def test_rv20_ex_earnings_present(self):
+        b = BundleBuilder(self.dir).build_full()
+        snap = self._build(b)
+        rv_ex = snap["options"]["rv20_ex_earnings"]
+        self.assertIsNotNone(rv_ex)
+        self.assertGreaterEqual(rv_ex, 0.0)
+
+    def test_event_vol_and_rv_ex_null_when_no_chain(self):
+        # No chain -> options block None (both fields unreachable, block is null).
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        b.add_earnings_calendar()
+        snap = self._build(b)
+        self.assertIsNone(snap["options"])
+
+    def test_event_vol_null_when_no_earnings_date(self):
+        # Chain present but NO earnings_calendar -> next_earnings.date None ->
+        # event_vol null. rv20_ex_earnings still computes (masks nothing).
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        b.add_chain(); b.add_pc()
+        snap = self._build(b)
+        self.assertIsNotNone(snap["options"])
+        self.assertIsNone(snap["options"]["event_vol"])
+        # rv20_ex_earnings is still present (no earnings quarters to mask, but the
+        # RV over the daily series still computes).
+        self.assertIsNotNone(snap["options"]["rv20_ex_earnings"])
 
 
 class TestWave3AInsiderClassification(unittest.TestCase):

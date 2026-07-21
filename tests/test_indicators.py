@@ -37,6 +37,66 @@ class TestIndicators(unittest.TestCase):
         v = [100 * (1.001 ** i) for i in range(40)]
         self.assertAlmostEqual(I.realized_vol(v, 20), 0.0, places=6)
 
+    def test_realized_vol_ex_earnings_strips_print_jump(self):
+        # 30 trading days, tiny drift, with ONE big +15% print-day jump.
+        import datetime as _dt
+        dates, d = [], _dt.date(2026, 1, 1)
+        while len(dates) < 30:
+            if d.weekday() < 5:
+                dates.append(d.isoformat())
+            d += _dt.timedelta(days=1)
+        closes = [100.0]
+        for _ in range(1, 30):
+            closes.append(closes[-1] * 1.001)
+        closes[15] = closes[14] * 1.15            # +15% print-day jump on day 15
+        for j in range(16, 30):
+            closes[j] = closes[j - 1] * 1.001
+        earnings_day = dates[15]
+
+        contaminated = I.realized_vol(closes, 20)
+        ex = I.realized_vol_ex_earnings(closes, dates, [earnings_day], 20)
+        self.assertIsNotNone(contaminated)
+        self.assertIsNotNone(ex)
+        # Stripping the jump makes ex-earnings RV noticeably LOWER.
+        self.assertLess(ex, contaminated)
+        self.assertLess(ex, contaminated * 0.5)
+
+    def test_realized_vol_ex_earnings_masks_non_trading_day_earnings(self):
+        # Earnings on a weekend (not a trading day, absent from the dates list)
+        # still masks the trading days immediately before and after it. Put the
+        # print-day jump on a MONDAY and "earnings" on the preceding SUNDAY: the
+        # Monday is the trading day immediately after the weekend earnings, so its
+        # jump return is masked.
+        import datetime as _dt
+        dates, d = [], _dt.date(2026, 1, 1)
+        while len(dates) < 30:
+            if d.weekday() < 5:
+                dates.append(d.isoformat())
+            d += _dt.timedelta(days=1)
+        # Find a mid-series Monday to host the jump.
+        # Constrain so the jump return lands inside the last-20 window (29
+        # returns -> window is return indices 9..28) and mid-series.
+        monday_idx = next(i for i, dd in enumerate(dates)
+                          if _dt.date.fromisoformat(dd).weekday() == 0 and 11 <= i <= 24)
+        closes = [100.0 * (1.001 ** i) for i in range(30)]
+        closes[monday_idx] = closes[monday_idx - 1] * 1.12  # +12% Monday jump
+        for j in range(monday_idx + 1, 30):
+            closes[j] = closes[j - 1] * 1.001
+        sunday = (_dt.date.fromisoformat(dates[monday_idx]) - _dt.timedelta(days=1)).isoformat()
+        self.assertEqual(_dt.date.fromisoformat(sunday).weekday(), 6)  # Sunday, not a trading day
+        contaminated = I.realized_vol(closes, 20)
+        ex = I.realized_vol_ex_earnings(closes, dates, [sunday], 20)
+        self.assertIsNotNone(ex)
+        self.assertLess(ex, contaminated)
+
+    def test_realized_vol_ex_earnings_none_when_too_few(self):
+        closes = [100.0 * (1.001 ** i) for i in range(10)]
+        dates = [f"2026-01-{i + 1:02d}" for i in range(10)]
+        # 20-window on 9 returns -> None. Misaligned lists -> None. n<2 -> None.
+        self.assertIsNone(I.realized_vol_ex_earnings(closes, dates, [], 20))
+        self.assertIsNone(I.realized_vol_ex_earnings(closes, dates[:5], [], 5))
+        self.assertIsNone(I.realized_vol_ex_earnings(closes, dates, [], 1))
+
     def test_beta_of_self_is_one(self):
         import random; random.seed(7)
         p = [100.0]

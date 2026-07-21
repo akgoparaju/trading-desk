@@ -510,50 +510,50 @@ class TestSelectionMatrix(unittest.TestCase):
 
     def test_bullish_rich(self):
         chain = _chain()
-        rec, declined = opts.select_structures(chain, _NEAR_EXP, "bullish",
-                                               "rich_vs_realized", one_sigma=8.0)
+        rec, declined, tried = opts.select_structures(
+            chain, _NEAR_EXP, "bullish", "rich_vs_realized", one_sigma=8.0)
         names = self._names(rec)
         self.assertIn("bull_put_spread", names)
         self.assertIn("cash_secured_put", names)
 
     def test_bullish_cheap_long_call_vertical(self):
         chain = _chain()
-        rec, declined = opts.select_structures(chain, _NEAR_EXP, "bullish",
-                                               "cheap_vs_realized", one_sigma=8.0)
+        rec, declined, tried = opts.select_structures(
+            chain, _NEAR_EXP, "bullish", "cheap_vs_realized", one_sigma=8.0)
         names = self._names(rec)
         self.assertIn("long_call_vertical", names)
 
     def test_bearish_rich_bear_call_spread(self):
         chain = _chain()
-        rec, declined = opts.select_structures(chain, _NEAR_EXP, "bearish",
-                                               "rich_vs_realized", one_sigma=8.0)
+        rec, declined, tried = opts.select_structures(
+            chain, _NEAR_EXP, "bearish", "rich_vs_realized", one_sigma=8.0)
         self.assertIn("bear_call_spread", self._names(rec))
 
     def test_bearish_cheap_long_put_vertical(self):
         chain = _chain()
-        rec, declined = opts.select_structures(chain, _NEAR_EXP, "bearish",
-                                               "cheap_vs_realized", one_sigma=8.0)
+        rec, declined, tried = opts.select_structures(
+            chain, _NEAR_EXP, "bearish", "cheap_vs_realized", one_sigma=8.0)
         self.assertIn("long_put_vertical", self._names(rec))
 
     def test_neutral_rich_iron_condor(self):
         chain = _chain()
-        rec, declined = opts.select_structures(chain, _NEAR_EXP, "neutral",
-                                               "rich_vs_realized", one_sigma=8.0)
+        rec, declined, tried = opts.select_structures(
+            chain, _NEAR_EXP, "neutral", "rich_vs_realized", one_sigma=8.0)
         self.assertIn("iron_condor", self._names(rec))
 
     def test_neutral_cheap_declines_no_structure(self):
         # neutral x cheap/fair -> NO premium structure; a declined entry instead.
         chain = _chain()
-        rec, declined = opts.select_structures(chain, _NEAR_EXP, "neutral",
-                                               "cheap_vs_realized", one_sigma=8.0)
+        rec, declined, tried = opts.select_structures(
+            chain, _NEAR_EXP, "neutral", "cheap_vs_realized", one_sigma=8.0)
         self.assertEqual(rec, [])
         joined = " ".join(d["reason"] for d in declined).lower()
         self.assertIn("stand aside", joined)
 
     def test_neutral_fair_declines_no_structure(self):
         chain = _chain()
-        rec, declined = opts.select_structures(chain, _NEAR_EXP, "neutral",
-                                               "fair", one_sigma=8.0)
+        rec, declined, tried = opts.select_structures(
+            chain, _NEAR_EXP, "neutral", "fair", one_sigma=8.0)
         self.assertEqual(rec, [])
 
 
@@ -587,8 +587,8 @@ class TestLiquidityGate(unittest.TestCase):
 
     def test_illiquid_leg_moves_structure_to_declined(self):
         chain = _chain_with_illiquid()   # long-put 85 has oi 5.
-        rec, declined = opts.select_structures(chain, _NEAR_EXP, "bullish",
-                                               "rich_vs_realized", one_sigma=8.0)
+        rec, declined, tried = opts.select_structures(
+            chain, _NEAR_EXP, "bullish", "rich_vs_realized", one_sigma=8.0)
         # bull_put_spread needs the 85 long leg -> declined; CSP (only 90) survives.
         rec_names = {s["name"] for s in rec}
         dec_names = {d["name"] for d in declined}
@@ -597,8 +597,8 @@ class TestLiquidityGate(unittest.TestCase):
 
     def test_wide_spread_leg_declined(self):
         chain = _chain_with_wide_spread()   # short-put 90 spread 3.00.
-        rec, declined = opts.select_structures(chain, _NEAR_EXP, "bullish",
-                                               "rich_vs_realized", one_sigma=8.0)
+        rec, declined, tried = opts.select_structures(
+            chain, _NEAR_EXP, "bullish", "rich_vs_realized", one_sigma=8.0)
         dec_names = {d["name"] for d in declined}
         # both structures use the 90 short put -> both declined.
         self.assertIn("bull_put_spread", dec_names)
@@ -612,8 +612,8 @@ class TestLiquidityGate(unittest.TestCase):
 class TestHonestyGates(unittest.TestCase):
     def test_cheap_vs_realized_tags_credit_structures(self):
         chain = _chain()
-        rec, declined = opts.select_structures(chain, _NEAR_EXP, "bullish",
-                                               "cheap_vs_realized", one_sigma=8.0)
+        rec, declined, tried = opts.select_structures(
+            chain, _NEAR_EXP, "bullish", "cheap_vs_realized", one_sigma=8.0)
         # bullish x cheap -> long_call_vertical + bull_put_spread WITH warning.
         bps = next((s for s in rec if s["name"] == "bull_put_spread"), None)
         self.assertIsNotNone(bps)
@@ -626,7 +626,7 @@ class TestHonestyGates(unittest.TestCase):
         chain = _chain()
         rec, declined = opts.apply_event_gates(
             *opts.select_structures(chain, _NEAR_EXP, "bullish",
-                                    "rich_vs_realized", one_sigma=8.0),
+                                    "rich_vs_realized", one_sigma=8.0)[:2],
             days_to_earnings=14, ex_div_in_tenor=False)
         rec_names = {s["name"] for s in rec}
         dec_names = {d["name"] for d in declined}
@@ -641,7 +641,7 @@ class TestHonestyGates(unittest.TestCase):
         chain = _chain()
         rec, declined = opts.apply_event_gates(
             *opts.select_structures(chain, _NEAR_EXP, "bullish",
-                                    "rich_vs_realized", one_sigma=8.0),
+                                    "rich_vs_realized", one_sigma=8.0)[:2],
             days_to_earnings=60, ex_div_in_tenor=False)
         rec_names = {s["name"] for s in rec}
         self.assertIn("cash_secured_put", rec_names)
@@ -650,7 +650,7 @@ class TestHonestyGates(unittest.TestCase):
         chain = _chain()
         rec, declined = opts.apply_event_gates(
             *opts.select_structures(chain, _NEAR_EXP, "bearish",
-                                    "rich_vs_realized", one_sigma=8.0),
+                                    "rich_vs_realized", one_sigma=8.0)[:2],
             days_to_earnings=60, ex_div_in_tenor=True)
         # bear_call_spread has a short call leg -> early-assignment note.
         bcs = next((s for s in rec if s["name"] == "bear_call_spread"), None)
@@ -760,7 +760,7 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
         doc = self._read()
         self.assertEqual(doc["skill"], "options-strategy")
-        self.assertEqual(doc["rubric_version"], "1.0.0")
+        self.assertEqual(doc["rubric_version"], "1.1.0")
         self.assertEqual(doc["ticker"], "MU")
         self.assertEqual(doc["direction"], "bullish")
         self.assertEqual(doc["direction_source"], "flag")
@@ -944,6 +944,299 @@ class TestCLI(unittest.TestCase):
         self.assertTrue(doc["expected_moves"])
         self.assertEqual(doc["flow"]["pc_oi"], 1.29)
         self.assertEqual(doc["flow"]["pc_volume"], 0.93)
+
+
+# --------------------------------------------------------------------------- #
+# Wave 4B: skew_verdict (3 branches) + skew-informed routing.
+# --------------------------------------------------------------------------- #
+
+class TestSkewVerdict(unittest.TestCase):
+    def test_puts_rich_above_threshold(self):
+        # rr_25d = IV(25d put) - IV(25d call). > +0.04 -> puts_rich (downside skew).
+        self.assertEqual(opts.skew_verdict(0.22), "puts_rich")
+        self.assertEqual(opts.skew_verdict(0.05), "puts_rich")
+
+    def test_calls_rich_below_negative_threshold(self):
+        self.assertEqual(opts.skew_verdict(-0.05), "calls_rich")
+        self.assertEqual(opts.skew_verdict(-0.22), "calls_rich")
+
+    def test_balanced_within_threshold(self):
+        self.assertEqual(opts.skew_verdict(0.0), "balanced")
+        self.assertEqual(opts.skew_verdict(0.04), "balanced")   # boundary inclusive
+        self.assertEqual(opts.skew_verdict(-0.04), "balanced")
+
+    def test_unknown_when_none(self):
+        self.assertEqual(opts.skew_verdict(None), "unknown")
+
+    def test_custom_threshold(self):
+        self.assertEqual(opts.skew_verdict(0.05, threshold=0.10), "balanced")
+        self.assertEqual(opts.skew_verdict(0.12, threshold=0.10), "puts_rich")
+
+
+class TestSkewRouting(unittest.TestCase):
+    def _names(self, structures):
+        return {s["name"] for s in structures}
+
+    def test_puts_rich_cheap_prefers_selling_puts(self):
+        # bullish + cheap regime: base matrix leads with long_call_vertical (buy calls).
+        # With puts_rich skew, the routing PREFERS SELLING puts even in the cheap regime,
+        # so the bull_put_spread / CSP lead and appear.
+        chain = _chain()
+        rec, declined, tried = opts.select_structures(
+            chain, _NEAR_EXP, "bullish", "cheap_vs_realized", one_sigma=8.0,
+            skew_verdict_="puts_rich")
+        names = self._names(rec)
+        self.assertIn("bull_put_spread", names)
+        self.assertIn("cash_secured_put", names)
+        # the sold-puts structure(s) are ordered ahead of the bought-calls structure.
+        rec_order = [s["name"] for s in rec]
+        self.assertLess(rec_order.index("bull_put_spread"),
+                        rec_order.index("long_call_vertical")
+                        if "long_call_vertical" in rec_order else len(rec_order))
+
+    def test_calls_rich_cheap_prefers_selling_calls(self):
+        # bearish + cheap: base leads with long_put_vertical (buy puts). calls_rich skew
+        # PREFERS SELLING calls (bear_call_spread) first.
+        chain = _chain()
+        rec, declined, tried = opts.select_structures(
+            chain, _NEAR_EXP, "bearish", "cheap_vs_realized", one_sigma=8.0,
+            skew_verdict_="calls_rich")
+        rec_order = [s["name"] for s in rec]
+        self.assertIn("bear_call_spread", rec_order)
+        if "long_put_vertical" in rec_order:
+            self.assertLess(rec_order.index("bear_call_spread"),
+                            rec_order.index("long_put_vertical"))
+
+    def test_condor_widens_cheap_wing_on_puts_rich(self):
+        # neutral rich condor with puts_rich: sell the RICH put wing NEARER the money
+        # (~0.30Δ) and widen the cheap call wing (short call pushed toward ~0.20Δ). Base
+        # condor shorts are the SYMMETRIC 85 put / 115 call (~0.22Δ each); puts_rich
+        # routing sells the put nearer the money (85 -> 90) -- the asymmetry the skew asks
+        # for (the put wing tightens onto the rich premium, the call wing stays/widens).
+        chain = _chain()
+        base = opts.build_iron_condor(chain, _NEAR_EXP, 8.0)
+        base_sp = next(l for l in base["legs"]
+                       if l["side"] == "short" and l["type"] == "put")["strike"]
+
+        rec, declined, tried = opts.select_structures(
+            chain, _NEAR_EXP, "neutral", "rich_vs_realized", one_sigma=8.0,
+            skew_verdict_="puts_rich")
+        condor = next((s for s in rec if s["name"] == "iron_condor"), None)
+        self.assertIsNotNone(condor)
+        short_put = next(l for l in condor["legs"]
+                         if l["side"] == "short" and l["type"] == "put")
+        short_call = next(l for l in condor["legs"]
+                          if l["side"] == "short" and l["type"] == "call")
+        # the rich put wing is sold NEARER the money than in the symmetric base condor.
+        self.assertGreater(short_put["strike"], base_sp)   # 90 > base 85 (nearer money)
+        self.assertEqual(short_put["strike"], 90.0)        # 0.30Δ pick
+        # the put wing is now nearer the money than the (unmoved/widened) call wing:
+        # asymmetric distances from spot 100 -> the cheap call wing is the wider side.
+        self.assertLess(_SPOT - short_put["strike"], short_call["strike"] - _SPOT)
+
+
+# --------------------------------------------------------------------------- #
+# Wave 4B: candidate breadth (matrix expand + expiry/delta fallback + count).
+# --------------------------------------------------------------------------- #
+
+class TestCandidateBreadth(unittest.TestCase):
+    def test_bearish_rich_tries_at_least_two(self):
+        # goal 5a: bearish/rich now also tries a debit-put-vertical fallback -> >= 2 tried.
+        chain = _chain()
+        rec, declined, tried = opts.select_structures(
+            chain, _NEAR_EXP, "bearish", "rich_vs_realized", one_sigma=8.0)
+        self.assertGreaterEqual(tried, 2)
+        names = {s["name"] for s in rec}
+        # both a sell-calls credit and a buy-puts debit are candidates.
+        self.assertIn("bear_call_spread", names)
+        self.assertIn("long_put_vertical", names)
+
+    def test_candidates_tried_reported_in_module(self):
+        _write_bundle(self.dir, chain=_chain(),
+                      snapshot=_snapshot(iv_minus_rv=0.05),   # rich
+                      composite=_composite_doc(grade="D"),    # bearish
+                      tradeplan=_tradeplan_doc())
+        proc = self._run(extra=["--mode", "pipeline"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        doc = self._read()
+        self.assertIn("candidates_tried", doc)
+        self.assertGreaterEqual(doc["candidates_tried"], 2)
+        # the fixture ivs are all equal -> rr_25d 0.0 -> balanced (skew read is emitted).
+        self.assertEqual(doc["skew_verdict"], "balanced")
+        self.assertIn("skew_rr_25d", doc)
+
+    def test_expiry_fallback_when_primary_all_illiquid(self):
+        # Make EVERY near-expiry put illiquid so bull_put_spread + CSP both fail at the
+        # primary expiry; the far expiry is fully liquid -> the fallback fires and a
+        # structure is recommended at the NEXT listed expiry.
+        chain = _chain()
+        for c in chain:
+            if c["expiration"] == _NEAR_EXP and c["type"] == "put":
+                c["oi"] = 5
+        rec, declined, tried = opts.select_structures(
+            chain, _NEAR_EXP, "bullish", "rich_vs_realized", one_sigma=8.0,
+            all_expiries=[_NEAR_EXP, _FAR_EXP])
+        # the fallback disclosure decline is present, and something recovered at _FAR_EXP.
+        self.assertTrue(any("fallback" in d.get("name", "") for d in declined))
+        self.assertTrue(rec, "expiry fallback should recover a structure at the far expiry")
+        self.assertTrue(all(s["expiry"] == _FAR_EXP for s in rec))
+        # tried counts BOTH expiries' attempts (breadth visible).
+        self.assertGreaterEqual(tried, 4)
+
+    def test_delta_retry_on_illiquid_short(self):
+        # the 0.30Δ short put (strike 90) is illiquid; pick_short_by_delta retries the
+        # adjacent 0.25Δ pick (strike 85, |Δ|0.22, liquid) instead of the illiquid 90.
+        chain = _chain()
+        for c in chain:
+            if c["expiration"] == _NEAR_EXP and c["type"] == "put" and c["strike"] == 90.0:
+                c["oi"] = 5
+        short = opts.pick_short_by_delta(chain, _NEAR_EXP, "put", 0.30)
+        self.assertEqual(short["strike"], 85.0)   # retried to the liquid adjacent delta
+
+    def test_delta_retry_returns_primary_when_all_illiquid(self):
+        # if neither the primary nor the adjacent deltas are liquid, the primary is
+        # returned (breadth exhausted, not hidden -- the liquidity gate declines it).
+        chain = _chain()
+        for c in chain:
+            if c["expiration"] == _NEAR_EXP and c["type"] == "put":
+                c["oi"] = 5
+        short = opts.pick_short_by_delta(chain, _NEAR_EXP, "put", 0.30)
+        self.assertEqual(short["strike"], 90.0)   # falls back to the primary pick
+
+    def setUp(self):
+        import shutil
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _run(self, extra=None):
+        cmd = [sys.executable, SCRIPT, "--bundle", self.dir]
+        if extra:
+            cmd += extra
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    def _read(self):
+        with open(os.path.join(self.dir, "module_options.json")) as fh:
+            return json.load(fh)
+
+
+# --------------------------------------------------------------------------- #
+# Wave 4B: IV-crush simulation (priced via chain.bs_price, gated on crush_ev).
+# --------------------------------------------------------------------------- #
+
+def _crush_leg(strike, opt_type, side, mark, iv, expiration=_NEAR_EXP, oi=500):
+    """One structure leg + its matching contract (crush sim looks up iv on contracts)."""
+    leg = {"side": side, "type": opt_type, "strike": float(strike), "mark": float(mark)}
+    contract = {"expiration": expiration, "type": opt_type, "strike": float(strike),
+                "delta": 0.5, "mark": float(mark), "iv": iv, "oi": oi}
+    return leg, contract
+
+
+class TestCrushSim(unittest.TestCase):
+    def test_bs_price_is_actually_called_repriced_legs_differ(self):
+        # A long call bought at RICH pre-earnings iv (0.90) is repriced at the CRUSHED
+        # iv (0.90 * 0.62 = 0.558) with less time -> the repriced leg differs from entry.
+        from scripts import chain as chain_mod
+        entry = chain_mod.bs_price(100.0, 100.0, 36 / 365.0, 0.0, 0.90, "call")
+        crushed = chain_mod.bs_price(100.0, 100.0, 31 / 365.0, 0.0,
+                                     0.90 * opts.IV_CRUSH_FACTOR, "call")
+        self.assertNotAlmostEqual(entry, crushed, places=3)
+        self.assertLess(crushed, entry)   # crush + theta lowers the price
+
+    def test_long_premium_event_structure_negative_ev_declined(self):
+        # A long call bought rich into the print dies on the crush -> crush_ev < 0 ->
+        # the structure is DECLINED with the negative-crush-adjusted-EV reason.
+        from scripts import chain as chain_mod
+        entry = chain_mod.bs_price(100.0, 100.0, 36 / 365.0, 0.0, 0.90, "call")
+        leg, contract = _crush_leg(100.0, "call", "long", entry, 0.90)
+        st = {"name": "long_call", "type": "debit", "expiry": _NEAR_EXP, "legs": [leg]}
+        rec, declined = opts.apply_crush_gate(
+            [st], [], event_in_horizon=True, contracts=[contract], spot=100.0,
+            one_sigma=5.0, t_post_years=(36 - 5) / 365.0, r=0.0)
+        self.assertEqual(rec, [])   # declined out
+        self.assertTrue(any("crush" in d["reason"].lower() for d in declined))
+        self.assertLess(st["crush_ev"], 0)
+        self.assertFalse(st["survives_crush"])
+
+    def test_short_vol_event_structure_survives_crush(self):
+        # A short-vol credit spread PROFITS from the crush (sells rich vol pre-print,
+        # buys it back cheaper) -> crush_ev > 0 -> survives_crush True, kept.
+        sp_leg, sp_c = _crush_leg(90.0, "put", "short", 2.40, 0.55)
+        lp_leg, lp_c = _crush_leg(85.0, "put", "long", 1.50, 0.55)
+        st = {"name": "bull_put_spread", "type": "credit_spread", "expiry": _NEAR_EXP,
+              "legs": [sp_leg, lp_leg]}
+        rec, declined = opts.apply_crush_gate(
+            [st], [], event_in_horizon=True, contracts=[sp_c, lp_c], spot=100.0,
+            one_sigma=4.0, t_post_years=(36 - 5) / 365.0, r=0.0)
+        self.assertEqual(len(rec), 1)
+        self.assertTrue(st["survives_crush"])
+        self.assertGreater(st["crush_ev"], 0)
+
+    def test_non_event_structure_skips_crush_gate(self):
+        # NOT event_in_horizon -> the crush gate does not apply: crush_ev None,
+        # survives_crush True, and a note says the gate was not applied.
+        sp_leg, sp_c = _crush_leg(90.0, "put", "short", 2.40, 0.55)
+        lp_leg, lp_c = _crush_leg(85.0, "put", "long", 1.50, 0.55)
+        st = {"name": "bull_put_spread", "type": "credit_spread", "expiry": _NEAR_EXP,
+              "legs": [sp_leg, lp_leg]}
+        rec, declined = opts.apply_crush_gate(
+            [st], [], event_in_horizon=False, contracts=[sp_c, lp_c], spot=100.0,
+            one_sigma=4.0, t_post_years=None, r=0.0)
+        self.assertEqual(len(rec), 1)
+        self.assertIsNone(st["crush_ev"])
+        self.assertTrue(st["survives_crush"])
+        self.assertIn("not applied", st["crush_note"].lower())
+
+    def test_crush_ev_unpriceable_when_leg_iv_missing(self):
+        # a leg whose contract lacks iv cannot be crush-priced -> disclosed, not gated.
+        leg = {"side": "long", "type": "call", "strike": 100.0, "mark": 5.0}
+        contract = {"expiration": _NEAR_EXP, "type": "call", "strike": 100.0,
+                    "mark": 5.0, "oi": 500}   # no iv
+        st = {"name": "long_call", "type": "debit", "expiry": _NEAR_EXP, "legs": [leg]}
+        rec, declined = opts.apply_crush_gate(
+            [st], [], event_in_horizon=True, contracts=[contract], spot=100.0,
+            one_sigma=5.0, t_post_years=0.08, r=0.0)
+        self.assertEqual(len(rec), 1)         # not gated (unpriceable)
+        self.assertIsNone(st["crush_ev"])
+        self.assertTrue(st["survives_crush"])
+
+    def test_iv_crush_factor_disclosed_constant(self):
+        # the 0.62 factor is a labeled module constant (cited/provisional, falsifiable).
+        self.assertAlmostEqual(opts.IV_CRUSH_FACTOR, 0.62, places=4)
+        # the scenario probability weights are a symmetric set summing to 1.0.
+        self.assertAlmostEqual(sum(opts._CRUSH_SCENARIO_PROBS), 1.0, places=6)
+        self.assertEqual(len(opts._CRUSH_SCENARIO_SIGMAS), len(opts._CRUSH_SCENARIO_PROBS))
+
+
+class TestCrushGateCLI(unittest.TestCase):
+    def setUp(self):
+        import shutil
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _run(self, extra=None):
+        cmd = [sys.executable, SCRIPT, "--bundle", self.dir]
+        if extra:
+            cmd += extra
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    def _read(self):
+        with open(os.path.join(self.dir, "module_options.json")) as fh:
+            return json.load(fh)
+
+    def test_crush_fields_present_on_recommended(self):
+        # earnings inside the selected-expiry horizon -> recommended structures carry
+        # crush_ev + survives_crush (the crush sim ran through the CLI).
+        _write_bundle(self.dir, chain=_chain(),
+                      snapshot=_snapshot(iv_minus_rv=0.05,          # rich -> credit
+                                         earnings_date="2026-08-10"),  # < near expiry
+                      composite=_composite_doc(grade="B"),
+                      tradeplan=_tradeplan_doc(days_to_catalyst=25))
+        proc = self._run(extra=["--mode", "pipeline"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        doc = self._read()
+        for s in doc["recommended_structures"]:
+            self.assertIn("survives_crush", s)
+            self.assertIn("crush_ev", s)
 
 
 if __name__ == "__main__":

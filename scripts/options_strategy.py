@@ -48,7 +48,7 @@ if _REPO_ROOT not in sys.path:
 
 from scripts import chain as chain_mod
 
-RUBRIC_VERSION = "1.0.0"
+RUBRIC_VERSION = "1.1.0"
 SKILL_NAME = "options-strategy"
 
 # This module scores NO snapshot field directly (it reads snapshot facts only as
@@ -89,6 +89,56 @@ _CSP_ALIGNMENT_PCT = 0.02      # entry_1 within 2% of a listed put strike -> ali
 
 # -- Collar-alternative short-call delta ------------------------------------- #
 _COLLAR_CALL_DELTA = 0.20
+
+# -- Wave 4B: skew-informed routing ------------------------------------------ #
+# 25-delta risk-reversal threshold. rr_25d = IV(25Δ put) - IV(25Δ call): positive =
+# puts richer (downside skew / fear), negative = calls richer. 0.04 is a PROVISIONAL
+# default (equity RR typically spans 0.01-0.10); it is documented + falsifiable (see
+# SKILL.md). When |rr| exceeds the threshold, routing prefers SELLING the rich wing.
+_SKEW_THRESHOLD = 0.04
+# Per-side condor deltas when a wing is skew-rich: sell the rich wing NEARER the money
+# (harvest the richer premium) and push the CHEAP wing FURTHER out (widen it).
+_CONDOR_RICH_DELTA = 0.30      # rich wing short, nearer the money
+_CONDOR_CHEAP_DELTA = 0.20     # cheap wing short, further out (the widened wing)
+# Adjacent deltas retried when a delta-picked SHORT strike is illiquid (low OI).
+_DELTA_RETRIES = (0.25, 0.35)
+
+# -- Wave 4B: IV-crush simulation -------------------------------------------- #
+# Post-earnings implied-vol collapse factor. iv_post_crush = iv_leg * IV_CRUSH_FACTOR.
+# 0.62 is a CITED PROVISIONAL constant (review R4: avg post-print IV crush ~38.2% ->
+# residual 0.618 ~= 0.62), Philosophy-A. It is disclosed + falsifiable (see SKILL.md):
+# if the crush-EV gate declines structures that would have been profitable (too
+# aggressive) or passes structures that lose on realized crush (too lax), 0.62 is
+# refuted and re-set -- ideally calibrated from bracketing IV-history samples.
+IV_CRUSH_FACTOR = 0.62
+# Scenario spots for the crush sim: -2sigma, -1sigma, spot, +1sigma, +2sigma. The
+# probability weights are a simple SYMMETRIC discrete approximation of the standard
+# normal over those five buckets (sums to 1.0); documented Philosophy-A choice.
+_CRUSH_SCENARIO_SIGMAS = (-2.0, -1.0, 0.0, 1.0, 2.0)
+_CRUSH_SCENARIO_PROBS = (0.05, 0.24, 0.42, 0.24, 0.05)
+# Minimum post-event time-to-expiry (years) so the crushed leg still carries time
+# value in bs_price (a same-day expiry after the print collapses to intrinsic).
+_CRUSH_MIN_T = 1.0 / 365.0
+
+
+def skew_verdict(rr_25d, threshold=_SKEW_THRESHOLD):
+    """Classify the 25-delta risk-reversal (put IV - call IV) into a routing verdict.
+
+    rr_25d = IV(25Δ put) - IV(25Δ call) at the working expiry (chain.skew_25d):
+      rr >  +threshold -> "puts_rich"  (downside skew / fear; prefer SELLING puts);
+      rr <  -threshold -> "calls_rich" (prefer SELLING calls);
+      |rr| <= threshold -> "balanced";
+      rr is None        -> "unknown" (no skew read; routing falls back to balanced).
+
+    threshold default 0.04 is PROVISIONAL (documented + falsifiable in SKILL.md).
+    """
+    if rr_25d is None:
+        return "unknown"
+    if rr_25d > threshold:
+        return "puts_rich"
+    if rr_25d < -threshold:
+        return "calls_rich"
+    return "balanced"
 
 
 # --------------------------------------------------------------------------- #
@@ -323,6 +373,33 @@ def pick_by_delta(contracts, expiry, opt_type, target_delta):
     return min(legs, key=lambda c: (abs(abs(c["delta"]) - target_delta), c["strike"]))
 
 
+def pick_short_by_delta(contracts, expiry, opt_type, target_delta,
+                        retries=_DELTA_RETRIES):
+    """Delta-pick a SHORT strike; if the pick is illiquid (low OI), retry adjacent.
+
+    Wave 4B candidate-breadth: the primary pick is the strike whose |delta| is closest
+    to ``target_delta``. If that strike's OI is below the liquidity floor, retry at each
+    adjacent delta in ``retries`` (e.g. 0.25 / 0.35) and return the first liquid pick.
+    Falls back to the primary pick when no adjacent delta is liquid either (the liquidity
+    gate then declines it downstream -- breadth is exhausted, not hidden). Returns None
+    only when there are no contracts of that type at the expiry.
+    """
+    primary = pick_by_delta(contracts, expiry, opt_type, target_delta)
+    if primary is None:
+        return None
+    oi = primary.get("oi")
+    if oi is not None and oi >= _MIN_OI:
+        return primary
+    for alt in retries:
+        cand = pick_by_delta(contracts, expiry, opt_type, alt)
+        if cand is None:
+            continue
+        c_oi = cand.get("oi")
+        if c_oi is not None and c_oi >= _MIN_OI:
+            return cand
+    return primary
+
+
 def pick_long_put_below(contracts, expiry, short_strike):
     """The next lower listed put strike below ``short_strike`` (the long-put wing).
 
@@ -471,7 +548,7 @@ def _credit_spread(short_leg, long_leg, name, side):
 
 def build_bull_put_spread(contracts, expiry):
     """Bull put spread: short ~0.30Δ put, long the next lower listed put."""
-    short = pick_by_delta(contracts, expiry, "put", _SHORT_DELTA)
+    short = pick_short_by_delta(contracts, expiry, "put", _SHORT_DELTA)
     if short is None:
         return None
     long = pick_long_put_below(contracts, expiry, short["strike"])
@@ -482,7 +559,7 @@ def build_bull_put_spread(contracts, expiry):
 
 def build_bear_call_spread(contracts, expiry):
     """Bear call spread: short ~0.30Δ call, long the next higher listed call."""
-    short = pick_by_delta(contracts, expiry, "call", _SHORT_DELTA)
+    short = pick_short_by_delta(contracts, expiry, "call", _SHORT_DELTA)
     if short is None:
         return None
     long = pick_long_call_above(contracts, expiry, short["strike"])
@@ -503,10 +580,10 @@ def build_cash_secured_put(contracts, expiry, short_strike=None,
         if short is None or abs(short["strike"] - short_strike) > 1e-9:
             short = None
     else:
-        short = pick_by_delta(contracts, expiry, "put", _SHORT_DELTA)
+        short = pick_short_by_delta(contracts, expiry, "put", _SHORT_DELTA)
     if short is None:
         # fall back to the delta pick if the aligned strike is not listed.
-        short = pick_by_delta(contracts, expiry, "put", _SHORT_DELTA)
+        short = pick_short_by_delta(contracts, expiry, "put", _SHORT_DELTA)
     if short is None:
         return None
 
@@ -611,17 +688,23 @@ def build_long_put_vertical(contracts, expiry):
     return _debit_vertical(long, short, "long_put_vertical", "put")
 
 
-def build_iron_condor(contracts, expiry, one_sigma):
-    """Iron condor: short ~0.25Δ put + call, long wings 1-2 strikes further out.
+def build_iron_condor(contracts, expiry, one_sigma,
+                      put_short_delta=_CONDOR_SHORT_DELTA,
+                      call_short_delta=_CONDOR_SHORT_DELTA):
+    """Iron condor: short put + call by delta, long wings 1-2 strikes further out.
 
     net credit = (short put + short call) - (long put + long call) marks.
     max_loss = max wing width - credit. PoP ~ 1 - (|Δ short put| + |Δ short call|).
     HONESTY CHECK: if the profit-zone half-width (distance between the short strikes / 2)
     is less than the snapshot 1σ expected move, the full-profit probability is LOW and a
     warning + pop_full_profit_note fire.
+
+    Wave 4B: ``put_short_delta`` / ``call_short_delta`` default to ~0.25 each side, but
+    skew routing may set them per-side (sell the rich wing NEARER the money at ~0.30,
+    push the CHEAP wing FURTHER out at ~0.20 -- i.e. WIDEN the cheap wing).
     """
-    sp = pick_by_delta(contracts, expiry, "put", _CONDOR_SHORT_DELTA)
-    sc = pick_by_delta(contracts, expiry, "call", _CONDOR_SHORT_DELTA)
+    sp = pick_short_by_delta(contracts, expiry, "put", put_short_delta)
+    sc = pick_short_by_delta(contracts, expiry, "call", call_short_delta)
     if sp is None or sc is None:
         return None
     lp = pick_long_put_below(contracts, expiry, sp["strike"])
@@ -698,59 +781,138 @@ _NEUTRAL_DECLINE = ("no vol edge for neutral premium selling; realized exceeds i
                     "-- stand aside or trade direction with defined risk")
 
 
-def select_structures(contracts, expiry, direction, verdict, one_sigma):
-    """(recommended, declined). The direction x vol-verdict matrix, then liquidity gate.
+def _candidate_specs(direction, verdict, skew_v, one_sigma):
+    """Ordered (name, builder) specs for direction x verdict, SKEW-ROUTED (Wave 4B).
 
-    A structure whose builder returns None (a required strike not listed) or whose any
-    leg fails the liquidity gate is moved to ``declined`` with a reason. Cheap-vs-realized
-    tags every CREDIT structure with the premium-sellers-not-paid honesty warning.
+    Each builder is a callable ``fn(contracts, expiry) -> structure|None`` so the breadth
+    loop can re-run the SAME specs at a fallback expiry. Skew routing reorders/adds:
+      - bullish + puts_rich: prefer SELLING puts (bull-put spread / CSP) over buying calls
+        even in the cheap regime (harvest the rich put skew);
+      - bearish + calls_rich: prefer SELLING calls (bear-call spread) over buying puts;
+      - neutral condor: sell the rich wing nearer the money, WIDEN the cheap wing.
+    Bearish now always carries a debit-put-vertical fallback so breadth >= 2 (goal 5a).
     """
-    # Build the direction x verdict candidate list; each item is (structure|None, warn?).
-    candidates = []          # list of (name, structure_or_None)
-    fallback_declines = []   # declines the matrix asserts up-front (neutral cheap/fair)
+    puts_rich = skew_v == "puts_rich"
+    calls_rich = skew_v == "calls_rich"
 
-    cheap = verdict == "cheap_vs_realized"
+    def condor(c, e):
+        if puts_rich:      # put wing rich -> sell puts near, widen call wing
+            return build_iron_condor(c, e, one_sigma,
+                                     put_short_delta=_CONDOR_RICH_DELTA,
+                                     call_short_delta=_CONDOR_CHEAP_DELTA)
+        if calls_rich:     # call wing rich -> sell calls near, widen put wing
+            return build_iron_condor(c, e, one_sigma,
+                                     put_short_delta=_CONDOR_CHEAP_DELTA,
+                                     call_short_delta=_CONDOR_RICH_DELTA)
+        return build_iron_condor(c, e, one_sigma)
 
+    specs = []
     if direction == "bullish":
         if verdict in ("rich_vs_realized", "fair"):
-            candidates.append(build_bull_put_spread(contracts, expiry))
-            candidates.append(build_cash_secured_put(contracts, expiry))
+            specs = [("bull_put_spread", build_bull_put_spread),
+                     ("cash_secured_put", build_cash_secured_put)]
         else:  # cheap
-            candidates.append(build_long_call_vertical(contracts, expiry))
-            candidates.append(build_bull_put_spread(contracts, expiry))  # + warning
+            if puts_rich:
+                # put skew is rich -> sell puts FIRST even in the cheap regime.
+                specs = [("bull_put_spread", build_bull_put_spread),
+                         ("cash_secured_put", build_cash_secured_put),
+                         ("long_call_vertical", build_long_call_vertical)]
+            else:
+                specs = [("long_call_vertical", build_long_call_vertical),
+                         ("bull_put_spread", build_bull_put_spread)]
     elif direction == "bearish":
         if verdict in ("rich_vs_realized", "fair"):
-            candidates.append(build_bear_call_spread(contracts, expiry))
+            # goal 5a: bearish/rich also tries a debit-put-vertical fallback (>=2).
+            specs = [("bear_call_spread", build_bear_call_spread),
+                     ("long_put_vertical", build_long_put_vertical)]
         else:  # cheap
-            candidates.append(build_long_put_vertical(contracts, expiry))
-            candidates.append(build_bear_call_spread(contracts, expiry))  # + warning
+            if calls_rich:
+                # call skew is rich -> sell calls FIRST even in the cheap regime.
+                specs = [("bear_call_spread", build_bear_call_spread),
+                         ("long_put_vertical", build_long_put_vertical)]
+            else:
+                specs = [("long_put_vertical", build_long_put_vertical),
+                         ("bear_call_spread", build_bear_call_spread)]
     elif direction == "neutral":
         if verdict == "rich_vs_realized":
-            candidates.append(build_iron_condor(contracts, expiry, one_sigma))
-        else:  # cheap or fair -> NO premium structure
-            fallback_declines.append({"name": "neutral_premium",
-                                      "reason": _NEUTRAL_DECLINE})
+            specs = [("iron_condor", condor)]
+        # cheap or fair -> NO premium structure (handled as a fallback decline).
+    return specs
 
-    recommended = []
-    declined = list(fallback_declines)
 
-    for st in candidates:
+def _gate_and_collect(specs, contracts, expiry, cheap, recommended, declined):
+    """Run each spec at ``expiry``, liquidity-gate, sort into recommended/declined.
+
+    Returns the number of builder ATTEMPTS made (candidates_tried contribution). Mutates
+    ``recommended`` / ``declined`` in place. Cheap-vs-realized tags surviving credit
+    structures with the premium-sellers-not-paid honesty warning.
+    """
+    attempts = 0
+    for name, builder in specs:
+        attempts += 1
+        st = builder(contracts, expiry)
         if st is None:
-            declined.append({"name": "unavailable_structure",
+            declined.append({"name": name,
                              "reason": "a required strike is not listed on the chain"})
             continue
         ok, reason = _gate_legs(_leg_contracts(st))
         if not ok:
-            declined.append({"name": st["name"],
-                             "reason": f"liquidity: {reason}"})
+            declined.append({"name": st["name"], "reason": f"liquidity: {reason}"})
             continue
         if cheap and st.get("type") in ("credit_spread", "cash_secured_put",
                                         "iron_condor"):
             st.setdefault("warnings", []).append(
                 "realized > implied: premium sellers are NOT being paid for delivered vol")
         recommended.append(_attach_strikes(st))
+    return attempts
 
-    return recommended, declined
+
+def select_structures(contracts, expiry, direction, verdict, one_sigma,
+                      skew_verdict_="balanced", all_expiries=None):
+    """(recommended, declined, candidates_tried). Skew-routed matrix, then liquidity.
+
+    A structure whose builder returns None (a required strike not listed) or whose any
+    leg fails the liquidity gate is moved to ``declined`` with a reason. Cheap-vs-realized
+    tags every CREDIT structure with the premium-sellers-not-paid honesty warning.
+
+    Wave 4B candidate breadth:
+      - the direction x verdict matrix is SKEW-ROUTED (``skew_verdict_``) and bearish
+        carries a debit-put-vertical fallback so >= 2 candidates are tried;
+      - short strikes retry adjacent deltas when the delta pick is illiquid
+        (``pick_short_by_delta``);
+      - if EVERY candidate at ``expiry`` fails, the SAME specs are tried ONCE at the next
+        listed expiry (``all_expiries``), with a disclosure decline;
+      - ``candidates_tried`` counts total builder attempts so the breadth is visible.
+    """
+    cheap = verdict == "cheap_vs_realized"
+    specs = _candidate_specs(direction, verdict, skew_verdict_, one_sigma)
+
+    recommended = []
+    declined = []
+    candidates_tried = 0
+
+    if not specs and direction == "neutral":
+        # neutral x cheap/fair -> NO premium structure (asserted up-front).
+        declined.append({"name": "neutral_premium", "reason": _NEUTRAL_DECLINE})
+        return recommended, declined, candidates_tried
+
+    candidates_tried += _gate_and_collect(
+        specs, contracts, expiry, cheap, recommended, declined)
+
+    # Expiry fallback (goal 5b): if every candidate at the primary expiry failed, try
+    # the SAME specs ONCE at the next listed expiry after ``expiry``.
+    if not recommended and specs and all_expiries:
+        later = [e for e in all_expiries if e and e > expiry]
+        if later:
+            next_expiry = min(later)
+            declined.append({
+                "name": "primary_expiry_fallback",
+                "reason": (f"all candidates at {expiry} failed the liquidity gate -- "
+                           f"retrying at the next listed expiry {next_expiry}")})
+            candidates_tried += _gate_and_collect(
+                specs, contracts, next_expiry, cheap, recommended, declined)
+
+    return recommended, declined, candidates_tried
 
 
 def _attach_strikes(structure):
@@ -819,6 +981,118 @@ def _has_short_call(structure):
     """True if the structure has any short call leg."""
     return any(leg.get("side") == "short" and leg.get("type") == "call"
                for leg in structure.get("legs", []))
+
+
+# --------------------------------------------------------------------------- #
+# Wave 4B: IV-crush simulation (prices the post-earnings vol collapse via bs_price).
+# --------------------------------------------------------------------------- #
+
+def _leg_iv(contracts, leg, expiry):
+    """The chain IV for a structure leg (matched by expiry/type/strike), or None.
+
+    Structure leg records don't carry iv (they carry strike/delta/mark/oi), so the crush
+    sim looks the iv back up on the ORIGINAL contracts. Returns None when the leg's
+    contract has no iv -- the caller then cannot price the crush for that structure.
+    """
+    strike = leg.get("strike")
+    opt_type = leg.get("type")
+    for c in contracts:
+        if (c.get("expiration") == expiry and c.get("type") == opt_type
+                and c.get("strike") == strike):
+            return c.get("iv")
+    return None
+
+
+def crush_ev_for_structure(structure, contracts, spot, one_sigma, t_post_years, r,
+                           factor=IV_CRUSH_FACTOR):
+    """Crush-adjusted EV of a structure across ±1σ/±2σ scenarios, or None if unpriceable.
+
+    For each scenario spot ``S = spot + k*one_sigma`` (k in -2..+2), every leg is
+    RE-PRICED with ``chain.bs_price(S, K, T_post, r, iv_leg * factor, opt_type)`` --
+    i.e. the post-earnings IV is CRUSHED by ``factor`` and only ``t_post_years`` (DTE
+    after the print) remains. The scenario PnL is signed by side:
+        short leg PnL = entry_mark - repriced_price   (received premium, buy to close)
+        long  leg PnL = repriced_price - entry_mark   (paid premium, sell to close)
+    summed over legs, then ``crush_ev = Σ scenario_prob * PnL`` over the documented
+    symmetric weight set. Returns None when spot/one_sigma/a leg iv/a leg mark is missing
+    (the structure then cannot be crush-gated and is disclosed, not silently passed).
+    """
+    if spot is None or one_sigma is None or t_post_years is None:
+        return None
+    expiry = structure.get("expiry")
+    legs = structure.get("legs", [])
+    if not legs:
+        return None
+    t_post = max(t_post_years, _CRUSH_MIN_T)
+    r = r or 0.0
+
+    ev = 0.0
+    for sigma, prob in zip(_CRUSH_SCENARIO_SIGMAS, _CRUSH_SCENARIO_PROBS):
+        scen_spot = spot + sigma * one_sigma
+        pnl = 0.0
+        for leg in legs:
+            entry_mark = leg.get("mark")
+            iv = _leg_iv(contracts, leg, expiry)
+            strike = leg.get("strike")
+            opt_type = leg.get("type")
+            if entry_mark is None or iv is None or strike is None or opt_type is None:
+                return None  # cannot price this structure's crush honestly
+            priced = chain_mod.bs_price(scen_spot, strike, t_post, r,
+                                        iv * factor, opt_type)
+            if leg.get("side") == "short":
+                pnl += entry_mark - priced
+            else:
+                pnl += priced - entry_mark
+        ev += prob * pnl
+    return ev
+
+
+def apply_crush_gate(recommended, declined, event_in_horizon, contracts, spot,
+                     one_sigma, t_post_years, r):
+    """Crush-EV gate (Wave 4B): decline event-window structures with crush_ev <= 0.
+
+    Every surviving structure gets ``crush_ev`` + ``survives_crush``:
+      - event_in_horizon (earnings falls before the structure's expiry): compute the
+        crush-adjusted EV; a structure with ``crush_ev <= 0`` is DECLINED with reason
+        "negative crush-adjusted EV" (an event structure that dies on the crush is not
+        recommended); ``crush_ev`` unpriceable (missing iv/mark) -> disclosed, not gated.
+      - NOT event_in_horizon: the crush gate does not apply (no earnings in horizon);
+        ``crush_ev`` = None, ``survives_crush`` = True, with a note.
+    Returns (kept, declined).
+    """
+    kept = []
+    for st in recommended:
+        if not event_in_horizon:
+            st["crush_ev"] = None
+            st["survives_crush"] = True
+            st["crush_note"] = ("no earnings within the structure horizon -- "
+                                "crush-EV gate not applied")
+            kept.append(st)
+            continue
+
+        ev = crush_ev_for_structure(st, contracts, spot, one_sigma, t_post_years, r)
+        if ev is None:
+            # unpriceable (missing iv/mark): disclose, do not gate.
+            st["crush_ev"] = None
+            st["survives_crush"] = True
+            st["crush_note"] = ("crush-EV unpriceable (a leg lacks iv/mark) -- "
+                                "gate not applied; disclosed")
+            kept.append(st)
+            continue
+
+        st["crush_ev"] = _clean(ev)
+        st["survives_crush"] = ev > 0
+        st["crush_note"] = (
+            f"crush-adjusted EV = Σ prob×PnL over ±1σ/±2σ with iv×{_fmt(IV_CRUSH_FACTOR)} "
+            f"and {_fmt(_clean(t_post_years))}y post-event T = {_fmt(_clean(ev))}")
+        if ev > 0:
+            kept.append(st)
+        else:
+            declined.append({
+                "name": st["name"],
+                "reason": (f"negative crush-adjusted EV (crush_ev {_fmt(_clean(ev))} "
+                           f"<= 0 with iv×{_fmt(IV_CRUSH_FACTOR)} post-print)")})
+    return kept, declined
 
 
 # --------------------------------------------------------------------------- #
@@ -990,6 +1264,24 @@ def _days_to_earnings(snapshot, as_of):
     return (e - a).days
 
 
+def _dte(as_of, expiry):
+    """Calendar days from as_of to the working expiry (or None)."""
+    a, e = _parse_date(as_of), _parse_date(expiry)
+    if a is None or e is None:
+        return None
+    return (e - a).days
+
+
+def _risk_free(snapshot):
+    """Risk-free proxy for bs_price: macro.treasury_10y.value / 100, else 0.0."""
+    t = (snapshot.get("macro") or {}).get("treasury_10y")
+    val = t.get("value") if isinstance(t, dict) else t
+    try:
+        return float(val) / 100.0 if val is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def build_module(snapshot, direction, direction_source, mode, tradeplan):
     """Assemble the full module_options.json document from parsed inputs."""
     from scripts import build_snapshot as bs
@@ -1028,20 +1320,41 @@ def build_module(snapshot, direction, direction_source, mode, tradeplan):
 
     one_sigma = _one_sigma_for_expiry(snapshot, expiry) if expiry else None
 
+    # -- skew-informed routing (Wave 4B): 25d risk-reversal at the SELECTED expiry --
+    rr_25d = None
+    skew_v = "unknown"
+    if expiry is not None and spot:
+        rr_25d = chain_mod.skew_25d(snapshot["_contracts"], spot, expiry)
+        skew_v = skew_verdict(rr_25d)
+
     # -- structure selection + gates --------------------------------------
     global_warnings = []
     recommended, declined = [], []
+    candidates_tried = 0
     if expiry is not None:
-        recommended, declined = select_structures(
-            snapshot["_contracts"], expiry, direction, verdict_for_selection, one_sigma)
+        recommended, declined, candidates_tried = select_structures(
+            snapshot["_contracts"], expiry, direction, verdict_for_selection, one_sigma,
+            skew_verdict_=skew_v, all_expiries=expiries)
 
         # CSP alignment to the trade-plan entry_1 (pipeline).
         if entry_1 is not None:
             recommended = align_csp_to_entry(recommended, snapshot["_contracts"],
                                              expiry, entry_1)
 
-        # event gates.
+        # crush-EV gate (Wave 4B): decline event-window structures that die on the
+        # post-earnings IV crush. event-in-horizon = earnings falls before the expiry.
         days_to_earn = _days_to_earnings(snapshot, as_of)
+        dte = _dte(as_of, expiry)
+        event_in_horizon = (days_to_earn is not None and dte is not None
+                            and 0 <= days_to_earn <= dte)
+        t_post_years = ((dte - days_to_earn) / 365.0
+                        if (event_in_horizon and dte is not None) else None)
+        r = _risk_free(snapshot)
+        recommended, declined = apply_crush_gate(
+            recommended, declined, event_in_horizon, snapshot["_contracts"], spot,
+            one_sigma, t_post_years, r)
+
+        # event gates.
         exdiv = _ex_div_in_tenor(snapshot, as_of, expiry)
         recommended, declined = apply_event_gates(
             recommended, declined, days_to_earn, exdiv)
@@ -1091,10 +1404,13 @@ def build_module(snapshot, direction, direction_source, mode, tradeplan):
         "selected_expiry": expiry,
         "vol_dashboard": vol_dashboard,
         "term_structure": vol_dashboard["term_structure"],
+        "skew_verdict": skew_v,
+        "skew_rr_25d": _clean(rr_25d),
         "expected_moves": expected_moves,
         "flow": build_flow(snapshot),
         "recommended_structures": recommended,
         "declined": declined,
+        "candidates_tried": candidates_tried,
         "hedge_structure": hedge_structure,
         "liquidity_verdict": liquidity_verdict,
         "warnings_global": global_warnings,
@@ -1229,10 +1545,13 @@ def build_no_chain_module(snapshot, direction, direction_source, mode):
                           "atm_iv_by_expiry": [], "term_structure": "flat",
                           "skew_25d_30d": None, "disclosure": reason},
         "term_structure": "flat",
+        "skew_verdict": "unknown",
+        "skew_rr_25d": None,
         "expected_moves": [],
         "flow": {},
         "recommended_structures": [],
         "declined": [{"name": "all", "reason": reason}],
+        "candidates_tried": 0,
         "hedge_structure": None,
         "liquidity_verdict": "no chain -- options analysis unavailable",
         "warnings_global": [reason.upper()[:1] + reason[1:]],

@@ -39,7 +39,7 @@ if _REPO_ROOT not in sys.path:
 
 from scripts import chain, indicators
 
-SCHEMA_VERSION = "0.3.2"
+SCHEMA_VERSION = "0.3.3"
 
 # Files that MUST be present; their absence aborts the build.
 REQUIRED = ("global_quote", "overview", "daily_adjusted", "spy_daily_adjusted")
@@ -844,8 +844,22 @@ def _nearest_expiry(expiries_list, as_of_date, target_days):
 
 
 def build_options(chain_path, chain_path_manifest, price, next_earnings_date,
-                  rv20_ann, as_of_date, last_ohlcv_date=None):
-    """Options block from the on-disk chain (never loaded into LLM context)."""
+                  rv20_ann, as_of_date, last_ohlcv_date=None,
+                  rows=None, earn_q=None):
+    """Options block from the on-disk chain (never loaded into LLM context).
+
+    Wave 4B additions (deterministic, additive, null-safe):
+      - event_vol: chain.event_implied_vol on the bracketing expiries around
+        ``next_earnings_date`` -- the isolated earnings-day 1-sigma + the pre/post
+        IVs and expiries. Null when there is no earnings date, no bracketing
+        expiry pair, or a missing ATM IV on either side.
+      - rv20_ex_earnings: indicators.realized_vol_ex_earnings over the daily
+        closes/dates, masking returns within +/-1 session of any own-history
+        earnings print (the ``events.earnings_move_history`` quarter_end dates ==
+        the quarterlyEarnings reportedDates). Null when the chain/rows are absent
+        or too few unmasked returns remain. The vol gate can compare iv30 against
+        this cleaner ex-earnings RV; the contaminated rv20 is kept for continuity.
+    """
     contracts = chain.load_contracts(chain_path)
     spot = price.get("last")
     # QF3: filter to future expiries only so no expired expiry reaches
@@ -894,6 +908,29 @@ def build_options(chain_path, chain_path_manifest, price, next_earnings_date,
 
     iv_minus_rv = (iv30 - rv20_ann) if (iv30 is not None and rv20_ann is not None) else None
 
+    # Wave 4B: event-vol extraction around the next earnings print. Uses ALL
+    # contracts (event_implied_vol navigates expiries itself and finds the
+    # bracketing pair around next_earnings_date). Null-safe when no earnings date
+    # / no bracketing pair / missing ATM IV.
+    event_vol = (
+        chain.event_implied_vol(contracts, spot, next_earnings_date, as_of_date)
+        if (spot and next_earnings_date) else None
+    )
+
+    # Wave 4B: ex-earnings realized vol. The earnings dates are the own-history
+    # reaction quarter_end dates == quarterlyEarnings reportedDates (same source
+    # build_earnings_move_history reads for events.earnings_move_history).
+    rv20_ex_earnings = None
+    if rows:
+        closes = [r.get("adjusted_close") for r in rows]
+        dates = [r.get("date") for r in rows]
+        earnings_dates = []
+        if isinstance(earn_q, list):
+            earnings_dates = [q.get("reportedDate") for q in earn_q
+                              if isinstance(q, dict) and q.get("reportedDate")]
+        rv20_ex_earnings = indicators.realized_vol_ex_earnings(
+            closes, dates, earnings_dates, 20)
+
     return {
         "chain_file_path": chain_path_manifest,
         "chain_as_of": chain_as_of,
@@ -911,6 +948,8 @@ def build_options(chain_path, chain_path_manifest, price, next_earnings_date,
         "skew_25d_30d": skew,
         "rv20_for_iv_comparison": rv20_ann,
         "iv_minus_rv20": iv_minus_rv,
+        "event_vol": event_vol,                    # Wave 4B: isolated earnings-day vol
+        "rv20_ex_earnings": rv20_ex_earnings,      # Wave 4B: print-days masked RV
     }, contracts, iv30
 
 
@@ -1616,7 +1655,8 @@ def build_snapshot(bundle, ticker):
                 options, contracts, iv30 = build_options(
                     chain_path, chain_entry["path"], price, next_earnings_date,
                     technicals["rv20_ann"], as_of_date,
-                    last_ohlcv_date=technicals.get("last_ohlcv_date"))
+                    last_ohlcv_date=technicals.get("last_ohlcv_date"),
+                    rows=rows, earn_q=earn_q)
             except ValueError:
                 options, contracts, iv30 = None, None, None
 

@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased — 2026-07-21 · Wave 4B: event-vol-aware options (`options-v1.1.0`, PROVISIONAL)
+
+R4 — the options module goes event-vol-aware (Philosophy A). The options module is the expression
+layer (feeds `trade_plan.expression`), so no composite score moves. Snapshot schema **0.3.2 → 0.3.3**.
+Suite: 1446 passed.
+
+- **Black-Scholes pricer** (`chain.bs_price`, via `math.erf`, no scipy) — **verified against reference
+  values** (S=K=100,T=1,r=0,iv=0.2 → call 7.9656; put-call parity 7e-15; symmetry exact). This is new
+  infrastructure the codebase had none of.
+- **Event-vol extraction** (`chain.event_implied_vol`) — desk variance-additivity across the bracketing
+  expiries, both horizons measured from `as_of` (`iv_post²·T_post − iv_pre²·T_pre`), isolating the
+  earnings-day implied move. Real-data BE: 32.5% event move over the 7/24→7/31 print window.
+- **Ex-earnings RV** (`indicators.realized_vol_ex_earnings`) — strips print-day returns from the RV
+  lookback (annualized by √252, documented), so the vol gate can compare IV to a clean realized vol.
+- **IV-crush simulation** — re-prices each candidate leg at `iv_post = iv_leg × 0.62` (labeled
+  provisional constant, cited ~38% avg crush) at ±1σ/±2σ scenario spots; structure-level
+  `crush_ev = Σ prob×PnL`; **event-window structures with crush_ev ≤ 0 are declined** ("negative
+  crush-adjusted EV"). Vega math now determines structure survival, priced not narrated.
+- **Skew-informed routing** — `skew_verdict` (±0.04 provisional) at the selected working expiry routes
+  to selling the rich wing; condor widens the cheap wing. Real-data BE: rr 0.224 → puts_rich →
+  prefers selling puts.
+- **Candidate breadth** — matrix expansion + next-expiry fallback + adjacent-delta retry; emits
+  `candidates_tried`. The review's "declined ONE candidate then stood aside" becomes "tried N, all
+  declined for <reasons>." Real-data BE: candidates_tried 2, expiry-fallback fired, then honest
+  stand-aside on a genuinely illiquid chain.
+- Expired-expiry drop was already shipped (QF3). rubric → 1.1.0 PROVISIONAL; falsifier in the SKILL.
+
 ## Unreleased — 2026-07-21 · Wave 4A: technical regime + institutional levels (`technical-v1.1.0`, PROVISIONAL)
 
 R5 — regime-conditional technicals (Philosophy A). **Top-level weights UNCHANGED** (Trend 30 /

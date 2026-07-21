@@ -1,4 +1,4 @@
-import json, os, tempfile, unittest
+import json, math, os, tempfile, unittest
 from scripts import chain as C
 
 def mk(exp, k, t, mark=5.0, iv=0.5, delta=0.5, oi=100):
@@ -98,6 +98,105 @@ class TestChain(unittest.TestCase):
         # expiries() must be unchanged (not filter by date).
         cs = C.load_contracts(self._write(CHAIN))
         self.assertEqual(C.expiries(cs), ["2026-08-21", "2026-09-18"])
+
+    # -- Wave 4B: bs_price reference-value VERIFICATION ------------------------
+    # These are THE verification the pricer must pass before shipping. If (a)
+    # does not land on ~7.9656 the pricer is wrong.
+
+    def test_bs_price_textbook_atm_call(self):
+        # S=K=100, T=1, r=0, iv=0.2 -> standard textbook call ~= 7.9656.
+        call = C.bs_price(100, 100, 1, 0, 0.2, "call")
+        self.assertAlmostEqual(call, 7.9656, places=3)
+
+    def test_bs_price_put_call_symmetry_at_r0(self):
+        # At S=K and r=0 the call and put are equal (put-call symmetry).
+        call = C.bs_price(100, 100, 1, 0, 0.2, "call")
+        put = C.bs_price(100, 100, 1, 0, 0.2, "put")
+        self.assertAlmostEqual(call, put, places=10)
+
+    def test_bs_price_deep_itm_call_near_intrinsic(self):
+        # Deep-ITM call ~= forward-intrinsic (S - K*e^-rT) + small time value.
+        S, K, T, r, iv = 150, 100, 0.5, 0.03, 0.25
+        itm = C.bs_price(S, K, T, r, iv, "call")
+        fwd_intrinsic = S - K * math.exp(-r * T)
+        self.assertGreater(itm, fwd_intrinsic)          # >= forward intrinsic
+        self.assertLess(itm - fwd_intrinsic, 1.0)       # only a small excess
+
+    def test_bs_price_put_call_parity_arbitrary(self):
+        # call - put == S - K*e^(-rT) for an arbitrary parametrization.
+        S, K, T, r, iv = 120, 105, 0.75, 0.04, 0.35
+        call = C.bs_price(S, K, T, r, iv, "call")
+        put = C.bs_price(S, K, T, r, iv, "put")
+        self.assertAlmostEqual(call - put, S - K * math.exp(-r * T), places=9)
+
+    def test_bs_price_intrinsic_guards(self):
+        # T<=0 or iv<=0 -> intrinsic value (no time value).
+        self.assertAlmostEqual(C.bs_price(100, 90, 0, 0.05, 0.3, "call"), 10.0)
+        self.assertAlmostEqual(C.bs_price(100, 110, 0.5, 0.05, 0, "put"), 10.0)
+        # OTM at expiry -> zero intrinsic.
+        self.assertAlmostEqual(C.bs_price(100, 110, 0, 0.05, 0.3, "call"), 0.0)
+        self.assertAlmostEqual(C.bs_price(100, 90, -1, 0.05, 0.3, "put"), 0.0)
+
+    # -- Wave 4B: event_implied_vol -------------------------------------------
+
+    def _event_chain(self):
+        # 3 expiries; earnings 2026-09-25 -> pre=2026-09-18, post=2026-10-16.
+        return C.load_contracts(self._write([
+            mk("2026-08-14", 100, "call", iv=0.50),
+            mk("2026-08-14", 100, "put", iv=0.50),
+            mk("2026-09-18", 100, "call", iv=0.47),
+            mk("2026-09-18", 100, "put", iv=0.52),
+            mk("2026-10-16", 100, "call", iv=0.45),
+            mk("2026-10-16", 100, "put", iv=0.50),
+        ]))
+
+    def test_event_implied_vol_bracketing_and_variance_additivity(self):
+        cs = self._event_chain()
+        # WITH as_of: desk variance additivity, both horizons from today.
+        r = C.event_implied_vol(cs, 100.0, "2026-09-25", "2026-08-01")
+        self.assertIsNotNone(r)
+        self.assertEqual(r["exp_pre"], "2026-09-18")
+        self.assertEqual(r["exp_post"], "2026-10-16")
+        self.assertAlmostEqual(r["iv_pre"], (0.47 + 0.52) / 2)   # 0.495
+        self.assertAlmostEqual(r["iv_post"], (0.45 + 0.50) / 2)  # 0.475
+        # Hand: as_of 2026-08-01 -> pre 48d, post 76d. event_var =
+        # iv_post^2 * (76/365) - iv_pre^2 * (48/365); event_vol = sqrt(event_var).
+        t_pre = 48 / 365.0
+        t_post = 76 / 365.0
+        expected = math.sqrt(r["iv_post"] ** 2 * t_post - r["iv_pre"] ** 2 * t_pre)
+        self.assertAlmostEqual(r["event_implied_move"], expected, places=10)
+        # Isolating the pre-expiry diffusion makes the event move SMALLER than
+        # the naive pre-anchored gap approximation (the fallback).
+        fb = C.event_implied_vol(cs, 100.0, "2026-09-25")  # no as_of -> fallback
+        self.assertLess(r["event_implied_move"], fb["event_implied_move"])
+
+    def test_event_implied_vol_fallback_no_as_of(self):
+        cs = self._event_chain()
+        r = C.event_implied_vol(cs, 100.0, "2026-09-25")  # no as_of
+        t_gap = 28 / 365.0
+        expected = math.sqrt(r["iv_post"] ** 2 * t_gap)
+        self.assertAlmostEqual(r["event_implied_move"], expected, places=10)
+
+    def test_event_implied_vol_null_no_earnings_date(self):
+        cs = self._event_chain()
+        self.assertIsNone(C.event_implied_vol(cs, 100.0, None))
+
+    def test_event_implied_vol_null_no_bracketing_pair(self):
+        cs = self._event_chain()
+        # Earnings before ALL expiries -> no pre expiry -> None.
+        self.assertIsNone(C.event_implied_vol(cs, 100.0, "2026-08-01"))
+        # Earnings after ALL expiries -> no post expiry -> None.
+        self.assertIsNone(C.event_implied_vol(cs, 100.0, "2026-12-01"))
+
+    def test_event_implied_vol_null_missing_iv(self):
+        # Post expiry present but with no IV on either leg -> None.
+        cs = C.load_contracts(self._write([
+            mk("2026-09-18", 100, "call", iv=0.47),
+            mk("2026-09-18", 100, "put", iv=0.52),
+            {"expiration": "2026-10-16", "strike": "100", "type": "call", "mark": "5.0"},
+            {"expiration": "2026-10-16", "strike": "100", "type": "put", "mark": "5.0"},
+        ]))
+        self.assertIsNone(C.event_implied_vol(cs, 100.0, "2026-09-25"))
 
 if __name__ == "__main__":
     unittest.main()

@@ -152,6 +152,81 @@ def realized_vol(values: list[float], n: int) -> float | None:
     return statistics.stdev(window) * _ANNUALIZATION
 
 
+def realized_vol_ex_earnings(closes, dates, earnings_dates, n) -> float | None:
+    """Annualized realized volatility with earnings-print days masked out.
+
+    Wave 4B: the contaminated ``realized_vol`` includes the big print-day jump,
+    which inflates the "realized" number the vol gate compares IV against. This
+    strips it. ``closes`` and ``dates`` are PARALLEL oldest-first lists (one date
+    per close). A log-return r_t = ln(close_t / close_{t-1}) is attributed to day
+    ``dates[t]`` (the return-realizing day). A return is MASKED (dropped) when its
+    day falls within +/-1 TRADING SESSION of any earnings date -- i.e. the day
+    itself, the trading day immediately before, or the trading day immediately
+    after any date in ``earnings_dates``. "Trading session" here means adjacency
+    in the ``dates`` list (index +/-1), not calendar days, so weekends/holidays
+    do not widen the window.
+
+    ANNUALIZATION CONVENTION (documented Philosophy-A choice): the surviving
+    returns are annualized by ``sqrt(252)`` UNCONDITIONALLY -- the stripped days
+    are treated as NON-EVENTS (removed noise), not as missing calendar time. We
+    do NOT rescale the annualization factor for the dropped count.
+
+    Uses the last ``n`` SURVIVING returns (the window is applied AFTER masking).
+    Returns None when ``n < 2``, the input lists are misaligned/too short, or
+    fewer than ``n`` unmasked returns remain.
+    """
+    if n < 2:
+        return None
+    if not isinstance(closes, list) or not isinstance(dates, list):
+        return None
+    if len(closes) != len(dates) or len(closes) < 2:
+        return None
+
+    earn = {str(d)[:10] for d in (earnings_dates or []) if d}
+
+    # Indices in `dates` that are within +/-1 session of any earnings date.
+    # A session is list adjacency, so we find each earnings date's position (or
+    # the insertion neighborhood if the exact date is not a trading day) and mask
+    # that index and its immediate list-neighbors.
+    masked_days = set()
+    date_to_idx = {d: i for i, d in enumerate(dates)}
+    for ed in earn:
+        if ed in date_to_idx:
+            i = date_to_idx[ed]
+            for j in (i - 1, i, i + 1):
+                if 0 <= j < len(dates):
+                    masked_days.add(dates[j])
+        else:
+            # Earnings date not a trading day (weekend/holiday): mask the trading
+            # day immediately before and immediately after it in the series.
+            before = None
+            after = None
+            for i, d in enumerate(dates):
+                if d < ed:
+                    before = i
+                elif after is None:
+                    after = i
+                    break
+            for j in (before, after):
+                if j is not None:
+                    masked_days.add(dates[j])
+
+    # Build the surviving return series: r_t attributed to dates[t] (t = 1..).
+    surviving = []
+    for t in range(1, len(closes)):
+        c0, c1 = closes[t - 1], closes[t]
+        if c0 is None or c1 is None or c0 <= 0 or c1 <= 0:
+            continue
+        if dates[t] in masked_days:
+            continue
+        surviving.append(math.log(c1 / c0))
+
+    if len(surviving) < n:
+        return None
+    window = surviving[-n:]
+    return statistics.stdev(window) * _ANNUALIZATION
+
+
 def beta_corr(stock: list[float], bench: list[float]) -> dict | None:
     """Beta and correlation of ``stock`` vs ``bench``.
 

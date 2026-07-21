@@ -15,6 +15,7 @@ Contracts missing strike/expiration/type are skipped during load.
 """
 
 import json
+import math
 
 from scripts import indicators
 
@@ -393,4 +394,161 @@ def realized_for_comparison(closes: list[float]) -> dict:
     return {
         "rv20": indicators.realized_vol(closes, 20),
         "rv30": indicators.realized_vol(closes, 30),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Wave 4B: Black-Scholes pricer + event-vol extraction.
+#
+# The pricer exists so the options layer can PRICE the post-earnings IV crush
+# (re-value legs at a crushed iv / shorter DTE) rather than narrate it. It is
+# ~15 lines of stdlib (math.erf), and VERIFIED against textbook reference values
+# in tests -- it is the one new numerical primitive that must not ship unchecked.
+# event_implied_vol isolates the earnings-day variance from two bracketing
+# expiries by variance additivity, so an event name's iso'd move is measured, not
+# guessed from a single 30d IV.
+# --------------------------------------------------------------------------- #
+
+def _norm_cdf(x: float) -> float:
+    """Standard-normal CDF via the error function: 0.5*(1 + erf(x/sqrt(2)))."""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def bs_price(S, K, T, r, iv, opt_type):
+    """Black-Scholes European option price (no dividend), stdlib-only.
+
+    Uses the error-function normal CDF (no scipy):
+        norm_cdf(x) = 0.5 * (1 + erf(x / sqrt(2)))
+        d1 = (ln(S/K) + (r + iv^2/2) * T) / (iv * sqrt(T))
+        d2 = d1 - iv * sqrt(T)
+        call = S * N(d1) - K * e^(-rT) * N(d2)
+        put  = K * e^(-rT) * N(-d2) - S * N(-d1)   (equivalently, parity)
+
+    Reference-value anchor (VERIFIED in tests): S=K=100, T=1, r=0, iv=0.2 ->
+    call ~= 7.9656 (standard textbook). Put-call parity holds by construction:
+    call - put = S - K*e^(-rT).
+
+    Degenerate guard: when T <= 0 or iv <= 0 there is no time value, so the
+    price collapses to intrinsic value (max(0, S-K) for a call, max(0, K-S) for
+    a put). S, K must be positive for the log to be defined; a non-positive S or
+    K also returns intrinsic (clamped at 0). opt_type is "call" or "put"
+    (case-insensitive); anything else is treated as a call.
+    """
+    is_put = str(opt_type).lower() == "put"
+    intrinsic = max(0.0, (K - S) if is_put else (S - K))
+
+    # No time value: expired, zero/negative vol, or a non-positive S/K where the
+    # log-moneyness is undefined -> intrinsic value.
+    if T is None or iv is None or T <= 0 or iv <= 0 or S <= 0 or K <= 0:
+        return intrinsic
+
+    r = r or 0.0
+    vol_sqrt_t = iv * math.sqrt(T)
+    d1 = (math.log(S / K) + (r + 0.5 * iv * iv) * T) / vol_sqrt_t
+    d2 = d1 - vol_sqrt_t
+    disc_k = K * math.exp(-r * T)
+    if is_put:
+        return disc_k * _norm_cdf(-d2) - S * _norm_cdf(-d1)
+    return S * _norm_cdf(d1) - disc_k * _norm_cdf(d2)
+
+
+def _days_between_iso(start_iso: str, end_iso: str):
+    """Whole-day gap between two YYYY-MM-DD strings, or None if unparseable.
+
+    Local, datetime-free-import-safe: uses the stdlib date parser. Kept tiny so
+    chain.py's only date arithmetic (T-in-years for variance additivity) lives
+    here rather than reaching into build_snapshot.
+    """
+    from datetime import date
+
+    def _p(s):
+        try:
+            y, m, d = str(s)[:10].split("-")
+            return date(int(y), int(m), int(d))
+        except (ValueError, AttributeError, TypeError):
+            return None
+
+    a, b = _p(start_iso), _p(end_iso)
+    if a is None or b is None:
+        return None
+    return (b - a).days
+
+
+def event_implied_vol(contracts, spot, earnings_date, as_of_date=None):
+    """Isolate the earnings-day implied move from two bracketing expiries.
+
+    The bracketing pair is: the last expiry STRICTLY BEFORE ``earnings_date``
+    (the "pre" expiry, whose IV does NOT embed the earnings print) and the first
+    expiry ON OR AFTER ``earnings_date`` (the "post" expiry, whose IV DOES embed
+    the print). Standard desk variance-additivity extraction (Moontower): the
+    incremental total variance between the two horizons — measured from TODAY —
+    is the variance the market attributes to the [pre, post] window, which
+    brackets exactly one earnings print.
+
+        T_pre  = days(pre_expiry  - as_of) / 365
+        T_post = days(post_expiry - as_of) / 365
+        event_var = atm_iv_post^2 * T_post - atm_iv_pre^2 * T_pre
+        event_vol          = sqrt(max(0, event_var))   (isolated 1-sigma std-dev)
+        event_implied_move = event_vol
+
+    ``iv_post`` and ``iv_pre`` are ANNUALIZED vols over [today, post] and
+    [today, pre] respectively, so both variance terms MUST use horizons measured
+    from today (``as_of_date``) for the subtraction to be dimensionally sound —
+    that is what isolates the incremental (event-bearing) window variance.
+
+    ``as_of_date`` FALLBACK (chain.py standalone has no "today"): if ``as_of_date``
+    is None, degrades to the pre-anchored approximation (T_pre=0, T_post=T_gap) —
+    a coarser upper-ish estimate; the builder always passes the real as_of.
+
+    Returns {event_implied_move, iv_pre, iv_post, exp_pre, exp_post}, or None when
+    there is no earnings date, no bracketing pair, or a missing ATM IV on either
+    side.
+    """
+    if not earnings_date or spot is None:
+        return None
+
+    exps = expiries(contracts)
+    if not exps:
+        return None
+
+    ed = str(earnings_date)[:10]
+    pre = None
+    post = None
+    for e in exps:
+        if e < ed:
+            pre = e            # keep advancing -> last expiry strictly before
+        elif post is None:
+            post = e           # first expiry on/after earnings
+    if pre is None or post is None:
+        return None
+
+    iv_pre = atm_iv(contracts, spot, pre)
+    iv_post = atm_iv(contracts, spot, post)
+    if iv_pre is None or iv_post is None:
+        return None
+
+    aod = str(as_of_date)[:10] if as_of_date else None
+    t_pre = _days_between_iso(aod, pre) if aod else None
+    t_post = _days_between_iso(aod, post) if aod else None
+    if t_pre is not None and t_post is not None and t_post > 0:
+        # Desk variance-additivity: both horizons measured from today (as_of).
+        t_pre = max(0.0, t_pre) / 365.0
+        t_post = t_post / 365.0
+        event_var = iv_post * iv_post * t_post - iv_pre * iv_pre * t_pre
+    else:
+        # Fallback (no as_of): pre-anchored gap approximation.
+        gap_days = _days_between_iso(pre, post)
+        if gap_days is None or gap_days <= 0:
+            return None
+        event_var = iv_post * iv_post * (gap_days / 365.0)
+    event_var = max(0.0, event_var)
+    event_vol = math.sqrt(event_var)
+    event_implied_move = event_vol
+
+    return {
+        "event_implied_move": event_implied_move,
+        "iv_pre": iv_pre,
+        "iv_post": iv_post,
+        "exp_pre": pre,
+        "exp_post": post,
     }
