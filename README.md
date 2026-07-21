@@ -6,7 +6,11 @@ A Claude Code plugin that produces short (≈3-page) trade decision reports buil
 
 ## Status
 
-**Phases 1–4 shipped.** The full pipeline is wired end to end: the `market-snapshot` data engine (L1), the four evidence modules (technical, sentiment, risk, and a compressed fundamental pass), the `composite-score` decision layer (L3), the `trade-plan` + `options-strategy` execution layer, the `report-renderer` 3-page output with its blocking QC gate (L4), and the `full-trade-analysis` orchestrator (L5) that runs them all through phase gates. Acceptance validation V1–V6 (end-to-end runs across a handful of names to review grade distribution and calibrate the provisional weights/bands) is in progress.
+**v0.14.0 — the analysis-depth roadmap shipped.** The full pipeline is wired end to end: the `market-snapshot` data engine (L1), the four evidence modules (technical, sentiment, risk, fundamental), the `composite-score` decision layer (L3), the `trade-plan` + `options-strategy` execution layer, the `report-renderer` 3-page output + docket with its blocking QC gate (L4), and the `full-trade-analysis` orchestrator (L5) that runs them all through phase gates.
+
+0.14.0 deepened every evidence module to institutional-practice rubrics and added a scored **confidence layer** (see [Analysis depth & confidence](#analysis-depth--confidence)): event-aware risk, sentiment positioning dynamics, regime-conditional technicals, event-vol-aware options, and base-rate-anchored composite scenarios. **Every score-moving rubric is PROVISIONAL** — shipped with a versioned default and a *pre-registered falsifier*, to be ratified after a calibration set of 5–10 anchored names runs. Reports disclose this in the footer and confidence badge; nothing reads as settled that isn't.
+
+1.0.0 remains gated on the clean-environment install probe (V6 Part 3) and a non-Alpha-Vantage source validation (FMP).
 
 ## Install
 
@@ -86,6 +90,20 @@ Deep coverage is the **default** read, not an upgrade. Before scoring a ticker, 
 
 What coverage buys: a `company-context` module (business / competitive / cases / risks + a dated live tape of *what is moving the stock now*), every claim traced through a `findings[]` citation registry. That registry is **load-bearing for scoring** — the fundamental moat flag and the composite's conviction justifications cite its finding IDs (`C3`), and the moat CLI *exits* if a justification names none. Context is unscored itself; it grounds the dimensions that are scored.
 
+## Analysis depth & confidence
+
+Each evidence module scores against a versioned rubric with visible point arithmetic — every subscore's inputs and band are printed, and the LLM does zero scoring arithmetic. As of 0.14.0 the rubrics carry institutional-practice depth:
+
+- **Risk (`risk-v1.1.0`)** — event proximity and implied-move vs the ticker's *own* earnings-move history, plus a tail factor (overnight-gap kurtosis / p95), on top of the base volatility / drawdown / margin-of-safety / liquidity factors. Doctrine: risk is a gate/governor, never a reward input.
+- **Sentiment (`sentiment-v1.1.0`)** — 25Δ risk-reversal skew, days-to-cover, decay-weighted **news-heat** (scoring the news *dynamics*, not the vendor number), and insider **routine-vs-opportunistic** classification (Cohen/Malloy/Pomorski) when ≥24mo of history is available, falling back gracefully otherwise.
+- **Technical (`technical-v1.1.0`)** — regime guards (Wilder ADX, Weinstein stage) conditioning the momentum read, anchored VWAP levels in the S/R ladder, and Chaikin A/D + up/down-volume quality.
+- **Options (`options-v1.1.0`)** — event-vol extraction (variance additivity across the bracketing expiries), ex-earnings realized vol wired into the IV-vs-realized gate, an IV-crush simulation priced with an in-repo Black-Scholes model (verified against reference values), and skew-informed structure choice.
+- **Composite / trade-plan (`composite-v1.1.0`)** — scenario probabilities cross-checked against the ticker's empirical earnings base rate (a deviation flag when the view departs >25pp), an auto-tension line when the evidence dimensions disagree, and bull-target triangulation against coverage anchors.
+
+**Confidence layer (`confidence-v1.0.0`).** Every module and the composite carry a scored `confidence` badge — **HIGH / MEDIUM / LOW** — computed deterministically (never LLM-judged) as the *weakest link* of three axes: **source** (premium MCP vs degraded vs web-fallback), **depth** (is the rubric on its deep pass or a shallower one), and **staleness** (is the print fresh, or a weekend/stale/reused quote). A deep rubric on web-sourced data still reads MEDIUM; a fresh premium run on a not-yet-calibrated rubric reads MEDIUM until ratification. The badge is a first-class artifact, versioned and carried in the report footer — so "no usable data source" or "not yet calibrated" surfaces as a level, not buried in prose.
+
+**Provisional by design.** The 0.14.0 rubric weights and bands are *provisional defaults* — each ships with a pre-registered falsifier and is disclosed as unratified in the module note, the report footer, and the confidence depth axis, pending a calibration set. This is deliberate: the system tells you what it hasn't yet earned the right to assert.
+
 ## FSI integration (now load-bearing for full depth)
 
 The `equity-research` and `financial-analysis` skills from the claude-for-financial-services marketplace (`/plugin marketplace add anthropics/financial-services`) are **functionally load-bearing for the default deep read** — they produce the coverage the coverage-first pipeline initiates and reuses. When they are installed, trading-desk hands off to them for the initiation model, valuation, and quarterly `model-update`. When they are **absent**, the pipeline still runs — it drops to the compressed floor (snapshot-only fundamentals, `web_compressed` context) and discloses the reduced depth — and at runtime `full-trade-analysis` (and standalone `composite-score`) will **offer once, interactively, to install them**. It never auto-installs. The soft dependency is declared in `.claude-plugin/marketplace.json` (`allowCrossMarketplaceDependenciesOn`); nothing about the FSI plugins is required to run, but full depth needs them.
@@ -103,13 +121,15 @@ The `equity-research` and `financial-analysis` skills from the claude-for-financ
 | `trade-plan` | available |
 | `options-strategy` | available |
 | `report-renderer` | available |
+| `refresh-analysis` | available |
+| `scale-review` | available |
 | `full-trade-analysis` | available |
 
 Run the whole pipeline in one shot: **`full trade analysis NVDA`** — snapshot → evidence → composite → plan + options → 3-page report → thesis + re-score offer.
 
 ## Data & provenance
 
-Every number in a snapshot traces to a data-source endpoint or a public web source, each recorded with its retrieval timestamp under `meta.sources`; `meta.data_source` records the primary source (Alpha Vantage by default) and `meta.data_mode` records which of the three AV data modes produced it. The blocking QC gate reconciles internal consistency (market cap, P/E, net cash, MA ordering, ranges, spot-check tolerance, options freshness, staleness) and stamps an attestation into `meta.qc` — the same arithmetic checks double as the transcription audit for web-fallback runs. Snapshot schema version: **v0.2.1**.
+Every number in a snapshot traces to a data-source endpoint or a public web source, each recorded with its retrieval timestamp under `meta.sources`; `meta.data_source` records the primary source (Alpha Vantage by default), `meta.data_mode` records which of the three AV data modes produced it, and `meta.latest_trading_day` records the quote's own trading date (so a weekend/stale print is surfaced, not hidden). The blocking QC gate reconciles internal consistency (market cap, P/E, net cash, MA ordering, ranges, spot-check tolerance, options freshness, staleness) and stamps an attestation into `meta.qc` — the same arithmetic checks double as the transcription audit for web-fallback runs. The report's own QC gate additionally enforces that every judgment-flag justification cites a real coverage finding ID (grounding + referential integrity), so a set flag can never rest on an unfounded or fabricated citation. Snapshot schema version: **v0.3.3**.
 
 ## Development
 
