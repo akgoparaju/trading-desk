@@ -172,5 +172,41 @@ class TestIndicators(unittest.TestCase):
         self.assertEqual(I.jump_count_2sigma([]), 0)
 
 
+    # --- Wave 3A: news-heat EWMA half-life + z-score -----------------------
+    def test_halflife_weight_exact(self):
+        # 0 age -> full weight 1.0; one half-life -> 0.5; two -> 0.25.
+        self.assertAlmostEqual(I.halflife_weight(0, 3), 1.0)
+        self.assertAlmostEqual(I.halflife_weight(3, 3), 0.5)
+        self.assertAlmostEqual(I.halflife_weight(6, 3), 0.25)
+        self.assertAlmostEqual(I.halflife_weight(1.5, 3), 0.5 ** 0.5)
+        self.assertIsNone(I.halflife_weight(-1, 3))   # negative age
+        self.assertIsNone(I.halflife_weight(3, 0))    # non-positive half-life
+
+    def test_ewma_halflife_hand_computed(self):
+        # Two observations at ages 0 and 3 days (half-life 3), relevance 1.0.
+        # weights: 1.0 (age 0), 0.5 (age 3). scores: +1.0 and -1.0.
+        # ewma = (1.0*1.0 + (-1.0)*0.5) / (1.0 + 0.5) = 0.5 / 1.5 = 1/3.
+        w0 = I.halflife_weight(0, 3)
+        w3 = I.halflife_weight(3, 3)
+        pairs = [(1.0, 1.0 * w0), (-1.0, 1.0 * w3)]
+        self.assertAlmostEqual(I.ewma_halflife(pairs), (1.0 * w0 - 1.0 * w3) / (w0 + w3))
+        self.assertAlmostEqual(I.ewma_halflife(pairs), 1.0 / 3.0)
+        # all-zero weights / empty -> None
+        self.assertIsNone(I.ewma_halflife([]))
+        self.assertIsNone(I.ewma_halflife([(1.0, 0.0), (2.0, 0.0)]))
+        # A single fully-weighted observation returns itself.
+        self.assertAlmostEqual(I.ewma_halflife([(0.42, 1.0)]), 0.42)
+
+    def test_zscore_exact_and_guards(self):
+        # history [1,2,3,4,5]: mean 3, sample stdev sqrt(2.5). z(6) = 3/sqrt(2.5).
+        import statistics as S
+        hist = [1.0, 2.0, 3.0, 4.0, 5.0]
+        expected = (6.0 - 3.0) / S.stdev(hist)
+        self.assertAlmostEqual(I.zscore(6.0, hist), expected)
+        self.assertAlmostEqual(I.zscore(3.0, hist), 0.0)  # at the mean
+        self.assertIsNone(I.zscore(1.0, [1.0, 2.0, 3.0, 4.0]))  # < 5 points
+        self.assertIsNone(I.zscore(5.0, [5.0] * 6))             # zero stdev
+
+
 if __name__ == "__main__":
     unittest.main()

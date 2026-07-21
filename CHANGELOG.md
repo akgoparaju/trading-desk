@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased — 2026-07-21 · Wave 3A: sentiment positioning dynamics (`sentiment-v1.1.0`, PROVISIONAL)
+
+R3 — the positioning/flow/news signals a desk reads, scored (Philosophy A: provisional versioned
+defaults + pre-registered falsifier, ratify after B9). **Top-level weights UNCHANGED** (Street 25 /
+Revisions 20 / Smart-money 20 / Positioning 20 / Momentum 15) — only sub-components re-split, so
+score movement is small on a provisional wave. Snapshot schema **0.3.0 → 0.3.1**. Suite: 1322 passed.
+
+- **Positioning factor re-split** (SI 8/OI-P/C 6/IV 6 → SI+DTC 6 / OI-P/C 4 / volume-P/C 3 / skew 4 /
+  IV 3): scores the 25Δ risk-reversal skew (`sentiment.skew_25d_30d`, promoted from options),
+  volume-vs-OI P/C flow (`put_call_ratio_full_chain_volume`), and days-to-cover
+  (`sentiment.dtc = si% × shares / (adv/price)`; float-caveat disclosed).
+- **Smart-money factor** — insider sub-component gains Cohen/Malloy/Pomorski routine-vs-opportunistic
+  classification (`sentiment.insider_classification`) that activates **only with ≥24mo of per-insider
+  history** and otherwise **degrades gracefully to the unchanged v1.0.0 net-90d logic**. The
+  `INSIDER_TRANSACTIONS` fetch window is widened 90d → 36mo (SKILL) so future runs carry the history.
+- **Street-view factor** — folds in `news_heat`: an EWMA of relevance-weighted `ticker_sentiment_score`
+  over the news feed, **half-life 3d** (cited default; the feed was previously loaded and ignored).
+  This is the review's B17 "score the news DYNAMICS, not the vendor number." Real-data BE: news_heat
+  ewma **−0.62** — the Hunterbrook short cluster the review said was "collected then discarded" now
+  scores the lowest band.
+- **Disclosure + falsifier:** rubric → 1.1.0; module note stamps PROVISIONAL; falsifier recorded in the
+  SKILL. **Confidence stays MEDIUM** — sentiment SOURCE is structurally web-dependent (short_interest),
+  so a deeper rubric does not (and should not) promote the badge to HIGH. Honest by construction.
+- Real-data BE: sentiment 55 → 58.75, composite 45.28 → 45.88, **grade C held**; skew 0.22 (fear),
+  dtc 1.96 (liquid, not crowded), insider classifier gracefully inactive (63-day AV window).
+
 ## Unreleased — 2026-07-20 · Wave 2 Part A: event-aware risk DATA + disclosure (R1, scoring gated)
 
 The deterministic half of R1. The event/tail signals a desk actually uses are now COMPUTED and

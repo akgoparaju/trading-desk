@@ -453,7 +453,7 @@ class TestBuildSnapshotFull(unittest.TestCase):
         m = self.snap["meta"]
         self.assertEqual(m["ticker"], "MU")
         self.assertEqual(m["as_of_utc"], AS_OF)
-        self.assertEqual(m["schema_version"], "0.3.0")  # A1: bumped 0.2.2 -> 0.3.0
+        self.assertEqual(m["schema_version"], "0.3.1")  # Wave 3A: 0.3.0 -> 0.3.1
         self.assertEqual(m["missing"], [])
         self.assertIn("qc", m)
         self.assertTrue(len(m["sources"]) >= 4)
@@ -1333,10 +1333,229 @@ class TestA1EventAwareFields(unittest.TestCase):
         self.assertEqual(og["jump_count_2sigma"],
                          indicators.jump_count_2sigma(gaps))
 
-    def test_schema_version_is_0_3_0(self):
+    def test_schema_version_is_0_3_1(self):
         b = BundleBuilder(self.dir).build_full()
         snap = self._build(b)
-        self.assertEqual(snap["meta"]["schema_version"], "0.3.0")
+        self.assertEqual(snap["meta"]["schema_version"], "0.3.1")
+
+
+# --------------------------------------------------------------------------- #
+# Wave 3A: sentiment positioning dynamics — snapshot DATA layer.
+# news_heat (EWMA half-life 3d + volume z), dtc, skew promotion, insider CMP.
+# --------------------------------------------------------------------------- #
+class TestWave3ANewsHeat(unittest.TestCase):
+    """_news_heat: relevance-and-decay-weighted EWMA of ticker_sentiment_score."""
+
+    def test_ewma_hand_computed_half_life_3(self):
+        from scripts import build_snapshot as bs
+        # Two MU articles: age 0 (score +1.0) and age 3 (score -1.0), both
+        # relevance 1.0. Half-life 3 -> weights 1.0 and 0.5.
+        # ewma = (1.0*1.0 + (-1.0)*0.5)/(1.0+0.5) = 1/3.
+        news = {"feed": [
+            {"time_published": "20260716T120000", "ticker_sentiment": [
+                {"ticker": "MU", "ticker_sentiment_score": "1.0", "relevance_score": "1.0"}]},
+            {"time_published": "20260713T120000", "ticker_sentiment": [
+                {"ticker": "MU", "ticker_sentiment_score": "-1.0", "relevance_score": "1.0"}]},
+            # A non-MU article is skipped (does not mention the ticker).
+            {"time_published": "20260710T120000", "ticker_sentiment": [
+                {"ticker": "AAPL", "ticker_sentiment_score": "0.9", "relevance_score": "1.0"}]},
+        ]}
+        nh = bs._news_heat(news, "2026-07-16", "MU")
+        self.assertEqual(nh["half_life_days"], 3)
+        self.assertEqual(nh["n_articles"], 2)      # only MU-mentioning articles
+        self.assertAlmostEqual(nh["ewma"], 1.0 / 3.0, places=12)
+
+    def test_relevance_scales_weight(self):
+        from scripts import build_snapshot as bs
+        # Same age (0) so no decay; the +1 article has relevance 0.25, the -1 has
+        # relevance 1.0. ewma = (1*0.25 + (-1)*1.0)/(0.25+1.0) = -0.75/1.25 = -0.6.
+        news = {"feed": [
+            {"time_published": "20260716T090000", "ticker_sentiment": [
+                {"ticker": "MU", "ticker_sentiment_score": "1.0", "relevance_score": "0.25"}]},
+            {"time_published": "20260716T090000", "ticker_sentiment": [
+                {"ticker": "MU", "ticker_sentiment_score": "-1.0", "relevance_score": "1.0"}]},
+        ]}
+        nh = bs._news_heat(news, "2026-07-16", "MU")
+        self.assertAlmostEqual(nh["ewma"], -0.6, places=12)
+
+    def test_null_when_feed_absent_or_no_match(self):
+        from scripts import build_snapshot as bs
+        self.assertIsNone(bs._news_heat(None, "2026-07-16", "MU"))
+        self.assertIsNone(bs._news_heat({}, "2026-07-16", "MU"))
+        self.assertIsNone(bs._news_heat({"feed": []}, "2026-07-16", "MU"))
+        # feed present but no article mentions the ticker -> null block.
+        news = {"feed": [
+            {"time_published": "20260716T120000", "ticker_sentiment": [
+                {"ticker": "AAPL", "ticker_sentiment_score": "0.5", "relevance_score": "1.0"}]}]}
+        self.assertIsNone(bs._news_heat(news, "2026-07-16", "MU"))
+        self.assertIsNone(bs._news_heat(news, "2026-07-16", None))  # no ticker
+
+    def test_volume_z_null_below_five_days_then_computed(self):
+        from scripts import build_snapshot as bs
+        # < 5 distinct article dates -> volume_z is None.
+        def art(day, score="0.1"):
+            return {"time_published": f"2026070{day}T120000", "ticker_sentiment": [
+                {"ticker": "MU", "ticker_sentiment_score": score, "relevance_score": "1.0"}]}
+        few = {"feed": [art(1), art(2), art(3)]}
+        self.assertIsNone(bs._news_heat(few, "2026-07-09", "MU")["volume_z"])
+        # >= 5 distinct days AND varying per-day counts (non-zero stdev) -> the
+        # volume_z is a number: a recent 2-day spike vs the sparser earlier days.
+        many = {"feed": [art(1), art(2), art(3), art(5),
+                         art(8), art(8), art(9), art(9), art(9)]}
+        nh = bs._news_heat(many, "2026-07-09", "MU")
+        self.assertIsNotNone(nh["volume_z"])
+        self.assertGreater(nh["volume_z"], 0)   # trailing 3d is a positive spike
+
+    def test_full_bundle_news_heat_null_when_feed_lacks_ticker_sentiment(self):
+        # The standard build_full news fixture carries no ticker_sentiment ->
+        # news_heat degrades to a null block (n_articles would be 0).
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        b = BundleBuilder(d).build_full()
+        proc = _run_build(d)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        snap = json.load(open(os.path.join(d, f"snapshot_MU_{AS_OF_DATE}.json")))
+        self.assertIsNone(snap["sentiment"]["news_heat"])
+
+
+class TestWave3ADtcAndSkew(unittest.TestCase):
+    """dtc formula + null guards, and skew_25d_30d promotion into sentiment."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _build(self, b):
+        b.write_manifest()
+        proc = _run_build(self.dir)
+        self.assertEqual(proc.returncode, 0, f"stdout={proc.stdout}\nstderr={proc.stderr}")
+        out = os.path.join(self.dir, f"snapshot_MU_{AS_OF_DATE}.json")
+        with open(out) as fh:
+            return json.load(fh)
+
+    def test_dtc_formula_exact(self):
+        b = BundleBuilder(self.dir).build_full()
+        snap = self._build(b)
+        s = snap["sentiment"]
+        p = snap["price"]
+        # dtc = (si%/100 * shares_diluted_m*1e6) / (adv$ / last).
+        si_shares = (s["short_interest_pct"] / 100.0) * p["shares_diluted_m"] * 1e6
+        expected = si_shares / (p["adv_dollar_3m"] / p["last"])
+        self.assertAlmostEqual(s["dtc"], expected, places=6)
+
+    def test_dtc_null_when_short_interest_absent(self):
+        # No short_interest file -> si% null -> dtc null.
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        b.add_chain(); b.add_pc()
+        snap = self._build(b)
+        self.assertIsNone(snap["sentiment"]["short_interest_pct"])
+        self.assertIsNone(snap["sentiment"]["dtc"])
+
+    def test_skew_promoted_into_sentiment(self):
+        b = BundleBuilder(self.dir).build_full()
+        snap = self._build(b)
+        # sentiment.skew_25d_30d is the SAME value as options.skew_25d_30d.
+        self.assertIsNotNone(snap["options"]["skew_25d_30d"])
+        self.assertEqual(snap["sentiment"]["skew_25d_30d"],
+                         snap["options"]["skew_25d_30d"])
+
+    def test_skew_null_when_no_options(self):
+        # No chain -> options block None -> sentiment.skew_25d_30d null.
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        snap = self._build(b)
+        self.assertIsNone(snap["options"])
+        self.assertIsNone(snap["sentiment"]["skew_25d_30d"])
+
+
+class TestWave3AInsiderClassification(unittest.TestCase):
+    """Cohen/Malloy/Pomorski routine-vs-opportunistic classifier + graceful degrade."""
+
+    def test_active_with_36_month_history(self):
+        from scripts import build_snapshot as bs
+        # >= 24mo history. ROUT sells every July (2023/24/25 history) -> the
+        # 2026-07 sale is ROUTINE. OPP1 + OPP2 both SELL within 30d, no prior-July
+        # history -> OPPORTUNISTIC cluster. as_of 2026-07-30 so all 2026 rows are
+        # within the trailing 90d.
+        data = [
+            {"transaction_date": "2023-07-10", "executive": "ROUT",
+             "acquisition_or_disposal": "D", "shares": "100", "share_price": "50"},
+            {"transaction_date": "2024-07-12", "executive": "ROUT",
+             "acquisition_or_disposal": "D", "shares": "100", "share_price": "55"},
+            {"transaction_date": "2025-07-11", "executive": "ROUT",
+             "acquisition_or_disposal": "D", "shares": "100", "share_price": "60"},
+            {"transaction_date": "2026-07-05", "executive": "ROUT",
+             "acquisition_or_disposal": "D", "shares": "100", "share_price": "65"},
+            {"transaction_date": "2026-07-01", "executive": "OPP1",
+             "acquisition_or_disposal": "D", "shares": "200", "share_price": "64"},
+            {"transaction_date": "2026-07-20", "executive": "OPP2",
+             "acquisition_or_disposal": "D", "shares": "300", "share_price": "66"},
+        ]
+        ic = bs.build_insider_classification({"data": data}, "2026-07-30")
+        self.assertTrue(ic["classifier_active"])
+        self.assertEqual(ic["history_months"], 36)     # 2023-07 -> 2026-07
+        self.assertEqual(ic["n_insiders"], 3)
+        # ROUT's July 2026 sale tagged routine: routine_net = -100*65 = -6500.
+        self.assertAlmostEqual(ic["routine_net_usd"], -6500.0)
+        # Opportunistic net = -200*64 + -300*66 = -32600.
+        self.assertAlmostEqual(ic["opportunistic_net_usd"], -32600.0)
+        # OPP1 + OPP2 same side (D) within 30d -> cluster.
+        self.assertTrue(ic["opportunistic_cluster"])
+
+    def test_no_cluster_when_single_opportunistic_insider(self):
+        from scripts import build_snapshot as bs
+        # >=24mo history but only ONE opportunistic insider -> no cluster.
+        data = [
+            {"transaction_date": "2023-03-10", "executive": "A",
+             "acquisition_or_disposal": "A", "shares": "100", "share_price": "50"},
+            {"transaction_date": "2026-07-01", "executive": "SOLO",
+             "acquisition_or_disposal": "D", "shares": "200", "share_price": "64"},
+        ]
+        ic = bs.build_insider_classification({"data": data}, "2026-07-30")
+        self.assertTrue(ic["classifier_active"])
+        self.assertFalse(ic["opportunistic_cluster"])
+
+    def test_graceful_degrade_below_24_months(self):
+        from scripts import build_snapshot as bs
+        # A 63-day span (< 24mo) -> classifier inactive, splits + cluster null.
+        data = [
+            {"transaction_date": "2026-05-01", "executive": "X",
+             "acquisition_or_disposal": "A", "shares": "100", "share_price": "50"},
+            {"transaction_date": "2026-07-03", "executive": "Y",
+             "acquisition_or_disposal": "D", "shares": "40", "share_price": "60"},
+        ]
+        ic = bs.build_insider_classification({"data": data}, "2026-07-16")
+        self.assertFalse(ic["classifier_active"])
+        self.assertEqual(ic["history_months"], 2)   # May -> July
+        self.assertIsNone(ic["opportunistic_cluster"])
+        self.assertIsNone(ic["opportunistic_net_usd"])
+        self.assertIsNone(ic["routine_net_usd"])
+        self.assertEqual(ic["n_insiders"], 2)
+
+    def test_null_block_when_no_priced_rows(self):
+        from scripts import build_snapshot as bs
+        self.assertIsNone(bs.build_insider_classification(None, "2026-07-16"))
+        self.assertIsNone(bs.build_insider_classification({"data": []}, "2026-07-16"))
+        # Only RSU (blank price) rows -> no priced rows -> null block.
+        rsu = {"data": [{"transaction_date": "2026-07-01", "executive": "Z",
+                         "acquisition_or_disposal": "A", "shares": "500",
+                         "share_price": ""}]}
+        self.assertIsNone(bs.build_insider_classification(rsu, "2026-07-16"))
+
+    def test_full_bundle_insider_classification_graceful(self):
+        # The standard build_full insider fixture spans < 24 months -> the
+        # snapshot carries a graceful (inactive) classification block.
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        b = BundleBuilder(d).build_full()
+        proc = _run_build(d)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        snap = json.load(open(os.path.join(d, f"snapshot_MU_{AS_OF_DATE}.json")))
+        ic = snap["sentiment"]["insider_classification"]
+        self.assertIsNotNone(ic)
+        self.assertFalse(ic["classifier_active"])
+        self.assertIsNone(ic["opportunistic_net_usd"])
 
 
 if __name__ == "__main__":

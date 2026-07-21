@@ -251,6 +251,61 @@ def drawdown_episodes(values: list[float], threshold: float) -> int:
     return count
 
 
+def ewma_halflife(pairs: list[tuple[float, float]]) -> float | None:
+    """Half-life-decayed weighted mean of (value, age_days) observations.
+
+    Each observation carries an age in days; its decay weight is
+    ``0.5 ** (age_days / half_life)`` scaled by an optional per-observation
+    relevance weight folded into ``pairs`` by the caller. Here ``pairs`` are
+    ``(value, weight)`` tuples where ``weight`` already embeds both relevance
+    and the half-life decay term. Returns ``sum(value*weight)/sum(weight)``,
+    or None when the weight total is zero (no usable observations).
+
+    Kept generic (weights precomputed by the caller) so the decay policy --
+    half_life = 3 days for news_heat -- lives with the caller and this stays a
+    pure weighted mean. See ``_news_heat`` in build_snapshot.py.
+    """
+    num = 0.0
+    den = 0.0
+    for value, weight in pairs:
+        if value is None or weight is None or weight <= 0:
+            continue
+        num += value * weight
+        den += weight
+    if den <= 0:
+        return None
+    return num / den
+
+
+def halflife_weight(age_days: float, half_life: float) -> float | None:
+    """Exponential half-life decay weight: ``0.5 ** (age_days / half_life)``.
+
+    age_days may be 0 (weight 1.0) but not negative; half_life must be > 0.
+    Returns None on invalid input (negative age or non-positive half_life).
+    """
+    if half_life is None or half_life <= 0:
+        return None
+    if age_days is None or age_days < 0:
+        return None
+    return 0.5 ** (age_days / half_life)
+
+
+def zscore(value: float, history: list[float]) -> float | None:
+    """Standard z-score of ``value`` against ``history``: (value - mean)/stdev.
+
+    Uses the SAMPLE standard deviation (statistics.stdev). Returns None when
+    fewer than 5 history points are available (guard) or the stdev is zero
+    (degenerate / constant series -> no meaningful spread).
+    """
+    if len(history) < 5:
+        return None
+    mu = statistics.mean(history)
+    sd = statistics.stdev(history)
+    if sd == 0:
+        return None
+    return (value - mu) / sd
+
+
 def percentile_rank(value: float, history: list[float]) -> float | None:
     """Percentile rank of ``value`` within ``history``.
 

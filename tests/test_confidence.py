@@ -175,6 +175,23 @@ class TestDepthAxis(unittest.TestCase):
         d = C.compute_module(_sent_doc("1.0.0"), _snap())["depth"]
         self.assertEqual(d["level"], "MEDIUM")
 
+    def test_sentiment_rubric_110_still_medium_provisional(self):
+        # sentiment-v1.1.0 is positioning-aware BUT PROVISIONAL (unratified pending
+        # B9). Its explicit row keeps depth MEDIUM -- it does NOT auto-promote to
+        # HIGH via the "rubric past 1.0.0" fallthrough.
+        d = C.compute_module(_sent_doc("1.1.0"), _snap())["depth"]
+        self.assertEqual(d["level"], "MEDIUM")
+
+    def test_sentiment_rubric_110_overall_medium_source_cap(self):
+        # OVERALL badge for sentiment 1.1.0 on a clean premium fresh-print snapshot:
+        # source MEDIUM (short_interest web-by-design), depth MEDIUM (provisional),
+        # staleness HIGH -> min = MEDIUM. The source cap alone holds it at MEDIUM;
+        # sentiment must NEVER read HIGH regardless of depth.
+        block = C.compute_module(_sent_doc("1.1.0"), _snap())
+        self.assertEqual(block["source"]["level"], "MEDIUM")
+        self.assertEqual(block["depth"]["level"], "MEDIUM")
+        self.assertEqual(block["level"], "MEDIUM")
+
     def test_risk_rubric_100_medium(self):
         d = C.compute_module(_risk_doc("1.0.0"), _snap())["depth"]
         self.assertEqual(d["level"], "MEDIUM")
@@ -217,6 +234,8 @@ class TestDepthAxis(unittest.TestCase):
             C.DEPTH_TABLE["fundamental"]["compressed_snapshot_pass"][0], "MEDIUM")
         self.assertEqual(C.DEPTH_TABLE["technical"]["1.0.0"][0], "MEDIUM")
         self.assertEqual(C.DEPTH_TABLE["sentiment"]["1.0.0"][0], "MEDIUM")
+        # sentiment-v1.1.0 is PROVISIONAL -> stays MEDIUM (explicit row).
+        self.assertEqual(C.DEPTH_TABLE["sentiment"]["1.1.0"][0], "MEDIUM")
         self.assertEqual(C.DEPTH_TABLE["risk"]["1.0.0"][0], "MEDIUM")
         # risk-v1.1.0 is PROVISIONAL -> stays MEDIUM (explicit row, no auto-promote).
         self.assertEqual(C.DEPTH_TABLE["risk"]["1.1.0"][0], "MEDIUM")
@@ -412,7 +431,7 @@ class TestWhyDigitFree(unittest.TestCase):
         docs = [_tech_doc(), _risk_doc(), _sent_doc(),
                 _fund_doc("compressed_snapshot_pass"),
                 _fund_doc("coverage_anchored_pass"),
-                _tech_doc("1.1.0"), _risk_doc("1.1.0")]
+                _tech_doc("1.1.0"), _risk_doc("1.1.0"), _sent_doc("1.1.0")]
         modes = ["alpha_vantage", "av_free_degraded", "web_fallback"]
         latests = ["2026-07-20", "2026-07-17", None]
         for doc in docs:

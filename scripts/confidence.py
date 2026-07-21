@@ -129,8 +129,19 @@ DEPTH_TABLE = {
         "1.0.0": (MEDIUM, "pre-regime"),
     },
     "sentiment": {
-        # keyed on rubric_version; promotes to HIGH at rubric 1.1.0 (R3/B25)
+        # keyed on rubric_version.
+        # v1.0.0: pre-positioning-dynamics mechanical band scorer -> MEDIUM.
+        # v1.1.0: positioning-aware (news_heat/skew/DTC/volume-P/C + insider CMP)
+        #   BUT PROVISIONAL (unratified pending B9 calibration; falsifier pre-
+        #   registered). sentiment 1.1.0 stays MEDIUM while provisional -- it does
+        #   NOT auto-promote to HIGH via the generic "rubric past 1.0.0 -> HIGH"
+        #   fallthrough (this explicit row overrides it). But note this is moot for
+        #   the OVERALL badge: sentiment SOURCE is STRUCTURALLY CAPPED AT MEDIUM
+        #   (it scores short_interest, a web-transcribed input BY DESIGN -- see
+        #   _source_axis / _SOURCE_BY_DESIGN_WEB), so min(source, depth, staleness)
+        #   is MEDIUM at best REGARDLESS of depth. Do NOT promote sentiment to HIGH.
         "1.0.0": (MEDIUM, "pre-positioning-dynamics"),
+        "1.1.0": (MEDIUM, "provisional positioning-aware"),
     },
     "risk": {
         # keyed on rubric_version.

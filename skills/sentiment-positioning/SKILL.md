@@ -1,6 +1,6 @@
 ---
 name: sentiment-positioning
-description: Score a ticker's sentiment and positioning (street view, revisions momentum, smart money & insiders, options/short positioning, price momentum vs SPY) against a versioned rubric, off an existing market-snapshot bundle. Use when the user says "sentiment check [ticker]", "positioning", "what's the street saying", or when a report needs the sentiment evidence module. Consumes an existing snapshot bundle only (runs market-snapshot first if none exists). Rubric v1.0.0.
+description: Score a ticker's sentiment and positioning (street view + news heat, revisions momentum, smart money & insiders, options/short positioning incl. DTC/volume-P/C/skew, price momentum vs SPY) against a versioned rubric, off an existing market-snapshot bundle. Use when the user says "sentiment check [ticker]", "positioning", "what's the street saying", or when a report needs the sentiment evidence module. Consumes an existing snapshot bundle only (runs market-snapshot first if none exists). Rubric v1.1.0 (PROVISIONAL).
 ---
 
 # Sentiment & Positioning (Evidence Module)
@@ -13,6 +13,21 @@ Score the sentiment/positioning dimension for one ticker from an already-built s
 - **The three judgment flags are formed from snapshot text/context ONLY.** You read the snapshot's own news/ratings/insider evidence to set `--rating-actions`, `--inst-flow`, and `--insider-baseline`. You never invent an action, a fund flow, or an insider read the snapshot does not support. Each non-default flag carries a one-line justification.
 
 Trigger phrases: "sentiment check MU", "positioning for AAPL", "what's the street saying on NVDA".
+
+---
+
+## PROVISIONAL — sentiment-v1.1.0 (Wave 3A, unratified)
+
+**This rubric is provisional (Philosophy A).** v1.1.0 re-splits three factors IN PLACE to fold in new snapshot signals — **without changing any top-level weight** (Street 25 · Revisions 20 · Smart-money 20 · Positioning 20 · Momentum 15 are unchanged; only sub-component splits move, so score movement stays small):
+- **Positioning (stays 20)** → SI+DTC 6 · OI-P/C 4 · volume-P/C 3 · skew 4 · IV 3 (was SI 8 / OI-P/C 6 / IV 6). New: a **DTC** notch (−1 when `sentiment.dtc` > 10 & `si_trend` rising; +1 when `dtc` < 2), a **volume-P/C** flow band, and a **skew** band (`sentiment.skew_25d_30d` = 25Δ RR = IV(25Δ put) − IV(25Δ call); positive = put bid = fear).
+- **Smart-money (stays 20)** → insider (12) gains a **Cohen/Malloy/Pomorski routine-vs-opportunistic** classifier that ACTIVATES ONLY with ≥24 months of per-insider history (`insider_classification.classifier_active`); else it falls back to the **unchanged** v1.0.0 net-90d + baseline logic (graceful — no guessing where the data is thin).
+- **Street (stays 25)** → buy% 8 · PT-vs-price 8 · rating-actions 4 · **news_heat 5** (was buy% 10 / PT 10 / rating-actions 5). news_heat scores the **dynamics** of the raw news feed (`sentiment.news_heat.ewma`, half-life 3d, with a `volume_z` attention-spike notch), not the vendor number. A null `news_heat` renormalizes the street dimension over its available sub-components — it is **never** read as bearish.
+
+The bands are **cited provisional defaults**, unratified pending the B9 calibration set.
+
+**Falsifier (pre-registered):** _if across the B9 set the news_heat/skew/DTC sub-signals do not separate names with known positioning stress (rising DTC + put skew + negative news heat, e.g. BE) from calm names, OR the re-split swings a composite grade >1 letter where the top-level sentiment score barely moved, the bands are refuted and re-set._
+
+The module JSON stamps `rubric_version: "1.1.0"` and `module_note: "sentiment-v1.1.0 PROVISIONAL — positioning/news bands unratified pending B9; falsifier pre-registered"`. **Confidence stays honestly MEDIUM** — deeper rubric, but sentiment SOURCE is structurally capped at MEDIUM anyway (short interest is web-transcribed by design), so the badge does not rise. Surface the provisional status; do not overstate it.
 
 ---
 
@@ -106,5 +121,5 @@ Report to the user (and to any calling skill):
 - **Complacency guard.** In the positioning dimension, `short_interest_pct < 1.5%` combined with `rsi14 > 70` is scored as **complacency (2 pts), not a bullish signal** — a stock nobody is shorting while it is overbought has priced out the doubters, which is a crowded-long risk, not a squeeze setup. The guard fires *before* the normal short-interest bands, and its thresholds are STRICT: SI must be below 1.5 AND rsi14 above 70 — a 68-70 RSI or a 1.5-2% SI does NOT fire it (it lands in the normal `<2% → 6` band); do not describe near-misses as complacency in the brief. `rsi14` only *conditions* this guard here; it is scored in technical-analysis, never double-counted here (it is a GUARD field, not an INPUT field).
 - **13F lag is disclosed.** `--inst-flow` defaults to `unknown` (0 pts, "n/a — 13F not assessed; lag disclosed") precisely because 13F filings lag by up to 45 days. Only override `unknown` when the snapshot carries a real flow read, and say so in the justification.
 - **Judgment flags come from snapshot text/context, never invention.** `--rating-actions`, `--inst-flow`, and `--insider-baseline` are read off the snapshot's news/ratings/insider evidence. Each non-default value carries a one-line justification; an unjustifiable flag is a hard error and, more importantly, a fabrication you must not make.
-- **Rubric version travels with the numbers.** The rubric version (`1.0.0`) is printed in the module JSON and MUST appear in the brief footer, so any reader can tell which scoring rule produced the score.
+- **Rubric version travels with the numbers.** The rubric version (`1.1.0`, PROVISIONAL) is printed in the module JSON and MUST appear in the brief footer, so any reader can tell which scoring rule produced the score. When `module_note` is present (it is on v1.1.0), surface its provisional wording in the brief so a reader knows the positioning/news bands are unratified.
 - **Snapshot is read-only.** This module never edits `snapshot.json`.

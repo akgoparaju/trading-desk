@@ -39,7 +39,7 @@ if _REPO_ROOT not in sys.path:
 
 from scripts import chain, indicators
 
-SCHEMA_VERSION = "0.3.0"
+SCHEMA_VERSION = "0.3.1"
 
 # Files that MUST be present; their absence aborts the build.
 REQUIRED = ("global_quote", "overview", "daily_adjusted", "spy_daily_adjusted")
@@ -838,8 +838,17 @@ def _implied_move_next_earnings(contracts, spot, next_earnings_date, as_of_date)
 
 def build_sentiment(overview, price, pc_realtime, short_interest, news,
                     insider, contracts, iv30, iv_history, next_earnings_date,
-                    as_of_date):
-    """Sentiment block: ratings, PT, P/C, IV, insider flow. Text slots stay null."""
+                    as_of_date, ticker=None, options=None):
+    """Sentiment block: ratings, PT, P/C, IV, insider flow. Text slots stay null.
+
+    Wave 3A additions (all deterministic, additive, null-safe):
+      - news_heat: EWMA of ticker_sentiment_score x relevance_score over the
+        raw feed with half-life 3 days, plus an article-volume z-spike.
+      - dtc: days-to-cover from SI% + shares + ADV.
+      - skew_25d_30d: promoted from the options block for scorer locality.
+      - insider_classification: Cohen/Malloy/Pomorski routine-vs-opportunistic
+        (active only with >= 24 months of per-insider history; else graceful).
+    """
     ov = overview if isinstance(overview, dict) else {}
 
     def _rating(key):
@@ -885,25 +894,54 @@ def build_sentiment(overview, price, pc_realtime, short_interest, news,
                                                as_of_date) if contracts else None
 
     insider_net, insider_method = _insider_net_90d(insider, as_of_date)
+    insider_classification = build_insider_classification(insider, as_of_date)
 
     si = short_interest if isinstance(short_interest, dict) else {}
+    si_pct = num(si.get("short_interest_pct")) if si else None
+
+    # Days-to-cover (DTC): trailing-90d short interest as a share count divided
+    # by average daily SHARE volume (ADV$ / last). CAVEAT: shares_diluted_m is a
+    # DILUTED share count, not the shares-outstanding float SI% is typically
+    # struck against, so this DTC is a deterministic approximation, not the
+    # exchange-published days-to-cover. Null when any input is null/zero.
+    dtc = None
+    adv = price.get("adv_dollar_3m")
+    shares_m = price.get("shares_diluted_m")
+    if (si_pct and adv and last and shares_m
+            and si_pct > 0 and adv > 0 and last > 0 and shares_m > 0):
+        si_shares = (si_pct / 100.0) * shares_m * 1e6
+        avg_daily_shares = adv / last
+        if avg_daily_shares > 0:
+            dtc = si_shares / avg_daily_shares
+
+    # Promote the already-computed 25d/30d skew into the sentiment block for
+    # scorer locality (no recomputation -- read straight off the options block).
+    skew_25d_30d = None
+    if isinstance(options, dict):
+        skew_25d_30d = options.get("skew_25d_30d")
+
+    news_heat = _news_heat(news, as_of_date, ticker)
 
     return {
         "ratings": ratings,
         "consensus_pt": consensus_pt,
         "pt_vs_price_pct": pt_vs,
-        "short_interest_pct": num(si.get("short_interest_pct")) if si else None,
+        "short_interest_pct": si_pct,
         "si_trend": si.get("si_trend") if si else None,
         "si_as_of": si.get("as_of") if si else None,
+        "dtc": dtc,
         "put_call_ratio_full_chain": pc_full,
         "put_call_ratio_full_chain_volume": pc_full_volume,
         "put_call_ratio_realtime": pc_rt,
         "put_call_by_expiry": pc_by_expiry,
+        "skew_25d_30d": skew_25d_30d,
         "iv30": iv30,
         "iv_pctile_1yr": iv_pctile,
         "implied_move_next_earnings_pct": implied_move,
         "insider_net_90d_usd": insider_net,
         "insider_method": insider_method,
+        "insider_classification": insider_classification,
+        "news_heat": news_heat,
         "news_sentiment_summary": None,   # LLM slot
         "inst_flow_notes": None,          # LLM slot
     }
@@ -946,6 +984,229 @@ def _insider_net_90d(insider, as_of_date):
         total += sign * shares * price
         counted += 1
     return (total if counted else 0.0), method
+
+
+_NEWS_HALF_LIFE_DAYS = 3   # cited default: RavenPack/MSCI 2-5d news decay.
+
+
+def _parse_news_time(text):
+    """Parse an Alpha Vantage time_published stamp (YYYYMMDDTHHMMSS) to a date.
+
+    Only the leading YYYYMMDD is needed. Returns a date or None.
+    """
+    if not isinstance(text, str) or len(text) < 8:
+        return None
+    try:
+        return date(int(text[0:4]), int(text[4:6]), int(text[6:8]))
+    except (ValueError, TypeError):
+        return None
+
+
+def _news_heat(news, as_of_date, ticker):
+    """Sentiment-dynamics heat from the raw NEWS_SENTIMENT feed.
+
+    For each article in ``news["feed"]`` that mentions ``ticker`` (via its
+    ticker_sentiment array), take this ticker's ticker_sentiment_score weighted
+    by relevance_score AND a half-life-3-day time decay on the article's age
+    (as_of_date - time_published). Returns:
+
+        {ewma, volume_z, half_life_days, n_articles}
+
+    where ``ewma`` is the relevance-and-decay-weighted mean of the per-ticker
+    sentiment scores, ``volume_z`` is the z-score of the trailing ~3-day article
+    count vs the per-day counts across the feed (None when < 5 distinct days of
+    history), ``n_articles`` counts articles mentioning the ticker. Returns None
+    (a null block) when news is absent/empty or no article mentions the ticker.
+    """
+    if not isinstance(news, dict):
+        return None
+    feed = news.get("feed")
+    if not isinstance(feed, list) or not feed:
+        return None
+    if not ticker:
+        return None
+    tkr = ticker.upper()
+    end = _parse_date(as_of_date)
+
+    pairs = []             # (score, weight) for the EWMA
+    per_day = {}           # article date -> count (ticker-mentioning only)
+    n_articles = 0
+    for art in feed:
+        if not isinstance(art, dict):
+            continue
+        ts = art.get("ticker_sentiment")
+        if not isinstance(ts, list):
+            continue
+        match = None
+        for row in ts:
+            if isinstance(row, dict) and (row.get("ticker") or "").upper() == tkr:
+                match = row
+                break
+        if match is None:
+            continue
+        n_articles += 1
+        art_date = _parse_news_time(art.get("time_published"))
+        if art_date is not None:
+            per_day[art_date] = per_day.get(art_date, 0) + 1
+
+        score = num(match.get("ticker_sentiment_score"))
+        relevance = num(match.get("relevance_score"))
+        if score is None:
+            continue
+        if relevance is None or relevance < 0:
+            relevance = 0.0
+        # Time-decay weight (half-life 3d); undated articles get age 0 (no decay).
+        if end is not None and art_date is not None:
+            age_days = (end - art_date).days
+            if age_days < 0:
+                age_days = 0
+        else:
+            age_days = 0
+        decay = indicators.halflife_weight(age_days, _NEWS_HALF_LIFE_DAYS)
+        if decay is None:
+            decay = 1.0
+        weight = relevance * decay
+        pairs.append((score, weight))
+
+    if n_articles == 0:
+        return None
+
+    ewma = indicators.ewma_halflife(pairs)
+
+    # Volume z-spike: the trailing ~3-day article count vs the per-day counts
+    # across the feed. Guard < 5 distinct days of history -> None.
+    volume_z = None
+    if end is not None and len(per_day) >= 5:
+        recent_start = end - timedelta(days=3)
+        recent_count = sum(c for d, c in per_day.items() if d >= recent_start)
+        counts_hist = list(per_day.values())
+        volume_z = indicators.zscore(float(recent_count), [float(c) for c in counts_hist])
+
+    return {
+        "ewma": ewma,
+        "volume_z": volume_z,
+        "half_life_days": _NEWS_HALF_LIFE_DAYS,
+        "n_articles": n_articles,
+    }
+
+
+def build_insider_classification(insider, as_of_date):
+    """Cohen/Malloy/Pomorski routine-vs-opportunistic insider classification.
+
+    Retains the FULL per-insider row list (unlike _insider_net_90d, which only
+    keeps a 90d scalar). Groups priced rows by ``executive`` and:
+
+      - history_months: calendar-month span from the earliest to the latest
+        priced transaction across ALL insiders.
+      - ROUTINE trade (per Cohen/Malloy/Pomorski): the insider transacted in the
+        SAME calendar month in >= 2 of the 3 prior years (requires >= 24 months
+        of history to be meaningful); OPPORTUNISTIC otherwise.
+      - opportunistic_net_usd / routine_net_usd: signed sum(shares*price)
+        (D negative) over each class, restricted to the trailing 90 days.
+      - opportunistic_cluster: >= 2 DISTINCT opportunistic insiders trading the
+        SAME side (all A or all D) within any 30-day window.
+
+    GRACEFUL DEGRADE: when history_months < 24 the classifier cannot separate
+    routine from opportunistic, so ``classifier_active`` is False and the
+    opportunistic/routine splits + cluster flag are null (the scorer falls back
+    to insider_net_90d). Returns None (null block) when there are no priced rows.
+    """
+    if not isinstance(insider, dict):
+        return None
+    rows_raw = insider.get("data")
+    if not isinstance(rows_raw, list):
+        return None
+    end = _parse_date(as_of_date)
+
+    # Retain the full priced-row list with parsed fields.
+    rows = []
+    for r in rows_raw:
+        if not isinstance(r, dict):
+            continue
+        d = _parse_date(r.get("transaction_date"))
+        price = num(r.get("share_price"))
+        shares = num(r.get("shares"))
+        if d is None or price is None or price <= 0 or shares is None:
+            continue  # RSU grant/vest / unparseable -- excluded
+        side = "A" if (r.get("acquisition_or_disposal") or "").upper() == "A" else "D"
+        rows.append({
+            "executive": (r.get("executive") or "").strip(),
+            "date": d,
+            "shares": shares,
+            "price": price,
+            "side": side,
+        })
+
+    if not rows:
+        return None
+
+    n_insiders = len({r["executive"] for r in rows})
+
+    earliest = min(r["date"] for r in rows)
+    latest = max(r["date"] for r in rows)
+    history_months = (latest.year - earliest.year) * 12 + (latest.month - earliest.month)
+
+    # Group each insider's transaction (year, month) history for the CMP test.
+    by_insider = {}
+    for r in rows:
+        by_insider.setdefault(r["executive"], []).append((r["date"].year, r["date"].month))
+
+    def _is_routine(insider_name, txn_date):
+        """Same calendar month in >= 2 of the 3 prior years -> routine."""
+        hist = by_insider.get(insider_name, [])
+        prior_years = {txn_date.year - 1, txn_date.year - 2, txn_date.year - 3}
+        hits = len({y for (y, m) in hist if m == txn_date.month and y in prior_years})
+        return hits >= 2
+
+    if history_months < 24:
+        # Graceful: insufficient history to classify. Splits/cluster null.
+        return {
+            "classifier_active": False,
+            "opportunistic_cluster": None,
+            "opportunistic_net_usd": None,
+            "routine_net_usd": None,
+            "history_months": history_months,
+            "n_insiders": n_insiders,
+        }
+
+    # Active classifier: split trailing-90d flow into routine vs opportunistic.
+    start_90 = end - timedelta(days=90) if end is not None else None
+    opp_net = 0.0
+    rou_net = 0.0
+    opp_recent = []   # opportunistic trades in the 90d window, for clustering
+    for r in rows:
+        if start_90 is not None and (r["date"] < start_90 or r["date"] > end):
+            continue
+        signed = (1.0 if r["side"] == "A" else -1.0) * r["shares"] * r["price"]
+        if _is_routine(r["executive"], r["date"]):
+            rou_net += signed
+        else:
+            opp_net += signed
+            opp_recent.append(r)
+
+    # Cluster: >= 2 distinct opportunistic insiders SAME side within any 30d window.
+    opportunistic_cluster = False
+    opp_sorted = sorted(opp_recent, key=lambda x: x["date"])
+    for i, anchor in enumerate(opp_sorted):
+        window_end = anchor["date"] + timedelta(days=30)
+        names = set()
+        for other in opp_sorted[i:]:
+            if other["date"] > window_end:
+                break
+            if other["side"] == anchor["side"]:
+                names.add(other["executive"])
+        if len(names) >= 2:
+            opportunistic_cluster = True
+            break
+
+    return {
+        "classifier_active": True,
+        "opportunistic_cluster": opportunistic_cluster,
+        "opportunistic_net_usd": opp_net,
+        "routine_net_usd": rou_net,
+        "history_months": history_months,
+        "n_insiders": n_insiders,
+    }
 
 
 def _parse_earnings_calendar(payload):
@@ -1265,7 +1526,8 @@ def build_snapshot(bundle, ticker):
 
     sentiment = build_sentiment(overview, price, pc_realtime, short_interest,
                                 news, insider, contracts, iv30, iv_history,
-                                next_earnings_date, as_of_date)
+                                next_earnings_date, as_of_date,
+                                ticker=ticker, options=options)
 
     # A1: assemble events AFTER sentiment so events.implied_move reuses the
     # already-computed sentiment.implied_move_next_earnings_pct (no double chain

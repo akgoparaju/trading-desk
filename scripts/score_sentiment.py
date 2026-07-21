@@ -8,14 +8,27 @@ Python, and the version string travels with them into the module JSON and the
 brief footer. The LLM layer narrates; it does no scoring arithmetic.
 
 Scoring is over five dimensions (max 100 total):
-    1. Street view             (25) -- analyst buy% + PT-vs-price + rating-actions
-                                        judgment flag. SPEC §5.2: pt_vs_price < 0
+    1. Street view             (25) -- analyst buy% (8) + PT-vs-price (8) +
+                                        rating-actions judgment flag (4) +
+                                        news_heat (5). SPEC §5.2: pt_vs_price < 0
                                         caps the WHOLE dimension at 10/25.
     2. Revisions momentum      (20) -- 90-day EPS-revision band + up/down-count adj
-    3. Smart money & insiders  (20) -- 13F inst-flow judgment flag + insider net
-    4. Positioning & derivatives(20) -- short interest (with a COMPLACENCY GUARD)
-                                        + full-chain P/C + IV percentile
+    3. Smart money & insiders  (20) -- 13F inst-flow judgment flag (8) + insider
+                                        (12): Cohen/Malloy/Pomorski routine-vs-
+                                        opportunistic classification when active,
+                                        else graceful fallback to net-90d + baseline.
+    4. Positioning & derivatives(20) -- SI+DTC (6, with a COMPLACENCY GUARD) +
+                                        OI-P/C (4) + volume-P/C (3) + skew (4) +
+                                        IV percentile (3)
     5. Price momentum          (15) -- 12m + 3m relative-to-SPY + 6m absolute
+
+WAVE 3A (sentiment-v1.1.0, PROVISIONAL): factors 1/3/4 are re-split IN PLACE to
+fold in the new snapshot signals (news_heat, DTC, volume-P/C, skew, insider CMP)
+WITHOUT changing any top-level weight (still 25/20/20/20/15). Band SHAPES of the
+retained sub-components are held identical where possible -- only the point ceilings
+scale (e.g. buy% 10->8, IV 6->3). This keeps score movement small on a provisional
+wave. Positioning/news bands are unratified defaults pending B9; a falsifier is
+pre-registered in the SKILL.
 
 Design contract (project-wide, mirrors score_technical.py / score_risk.py):
 - The snapshot is READ-ONLY; this module never edits snapshot.json. No market data
@@ -61,18 +74,32 @@ if _REPO_ROOT not in sys.path:
 
 from scripts import build_snapshot, confidence
 
-RUBRIC_VERSION = "1.0.0"
+RUBRIC_VERSION = "1.1.0"
 SKILL_NAME = "sentiment-positioning"
+
+# sentiment-v1.1.0 PROVISIONAL module note: positioning/news bands are unratified
+# defaults pending B9 calibration; the falsifier is pre-registered in the SKILL.
+MODULE_NOTE = ("sentiment-v1.1.0 PROVISIONAL -- positioning/news bands unratified "
+               "pending B9; falsifier pre-registered")
 
 # The snapshot fields this rubric SCORES on. price.last and the ladder are shared
 # reference infrastructure and are intentionally NOT listed (see module docstring).
+# Wave 3A additions (all null-safe): sentiment.dtc, .put_call_ratio_full_chain_volume,
+# .skew_25d_30d, .news_heat, .insider_classification. si_trend is read ONLY to
+# condition the DTC notch direction (a guard for the SI+DTC branch), so it is NOT an
+# INPUT_FIELD.
 INPUT_FIELDS = {
     "sentiment.ratings",
     "sentiment.pt_vs_price_pct",
+    "sentiment.news_heat",
     "fundamentals.revisions_90d",
     "sentiment.insider_net_90d_usd",
+    "sentiment.insider_classification",
     "sentiment.short_interest_pct",
+    "sentiment.dtc",
     "sentiment.put_call_ratio_full_chain",
+    "sentiment.put_call_ratio_full_chain_volume",
+    "sentiment.skew_25d_30d",
     "sentiment.iv_pctile_1yr",
     "technicals.ret_3m",
     "technicals.ret_6m",
@@ -114,72 +141,133 @@ def _clean(x):
 
 
 # --------------------------------------------------------------------------- #
-# 1. Street view (max 25): buy% (10) + PT (10) + rating-actions flag (5)
+# 1. Street view (max 25): buy% (8) + PT (8) + rating-actions flag (4) +
+#    news_heat (5).   [v1.0.0 was buy% 10 / PT 10 / rating-actions 5.]
 #    SPEC §5.2 CAP: pt_vs_price_pct < 0 caps the WHOLE dimension at 10/25.
+#    v1.1.0 re-split: buy% ceiling 10->8, PT 10->8, rating-actions 5->4 (LLM
+#    judgment trimmed), 5 pts of ALGORITHMIC news_heat added. Band SHAPES held
+#    identical -- only the ceilings scale. news_heat is INTERNALLY renormalized: a
+#    null news_heat drops the sub-component and the dimension renormalizes over its
+#    OTHER available sub-components (do NOT zero -- a missing feed is not a bearish
+#    read).
 # --------------------------------------------------------------------------- #
 
-_RATING_ACTIONS_POINTS = {"positive": 5, "neutral": 3, "negative": 0}
+_RATING_ACTIONS_POINTS = {"positive": 4, "neutral": 2, "negative": 0}
 
 
 def score_street(sentiment, rating_actions, rating_actions_justification) -> dict:
-    """Analyst buy% (max 10) + PT-vs-price (max 10) + rating-actions (max 5).
+    """Analyst buy% (max 8) + PT-vs-price (max 8) + rating-actions (max 4) +
+    news_heat (max 5).
 
-    buy_pct = (strong_buy + buy)/n: >=0.70 -> 10; [0.50,0.70) -> 7;
-        [0.30,0.50) -> 4; <0.30 -> 2; null ratings or zero n -> 0 ("n/a").
-    PT (pt_vs_price_pct): >0.15 -> 10; (0.05,0.15] -> 7; [0,0.05] -> 4; <0 -> 0.
-    rating-actions judgment: positive +5 / neutral +3 / negative +0.
+    buy_pct = (strong_buy + buy)/n: >=0.70 -> 8; [0.50,0.70) -> 6 (0.7*8~5.6->6);
+        [0.30,0.50) -> 3; <0.30 -> 2; null ratings or zero n -> "n/a" (sub dropped).
+    PT (pt_vs_price_pct): >0.15 -> 8; (0.05,0.15] -> 6; [0,0.05] -> 3; <0 -> 0.
+    rating-actions judgment: positive +4 / neutral +2 / negative +0 (always
+        evaluable -- a flag is always supplied).
+    news_heat (news_heat.ewma): >+0.15 -> 5 (bullish heat); [-0.15,0.15] -> 3;
+        <-0.15 -> 1 (bearish heat); then -1 notch (floor 1) when news_heat.volume_z
+        > 2 (attention spike). Null news_heat -> sub dropped (renormalize, not zero).
 
     SPEC §5.2: pt_vs_price_pct < 0 -> the WHOLE street-view dimension is capped at
     10/25 (a below-price consensus target overrides an otherwise-bullish street).
     A NULL PT is "n/a" (0 pts) and does NOT trigger the cap.
+
+    RENORMALIZATION (v1.1.0): the street dimension's four sub-components carry a
+    per-sub max; a sub whose input is null (buy_pct null ratings; news_heat null
+    feed) is DROPPED and the dimension is rescaled to /25 over the sub-maxes that
+    remain. rating-actions and (present) PT are always in the denominator.
     """
     ratings = sentiment.get("ratings")
     pt = sentiment.get("pt_vs_price_pct")
+    news_heat = sentiment.get("news_heat")
 
     parts = []
-    evaluable = 0
+    # Each entry: (points, sub_max, present). A sub with present=False is dropped
+    # from BOTH numerator and denominator (renormalize, not zero).
+    subs = []
 
-    # -- analyst buy% ------------------------------------------------------
+    # -- analyst buy% (max 8) ----------------------------------------------
     n = ratings.get("n") if isinstance(ratings, dict) else None
     if isinstance(ratings, dict) and n:
-        evaluable += 1
         buy_pct = (ratings.get("strong_buy", 0) + ratings.get("buy", 0)) / n
         if buy_pct >= 0.70:
-            buy_pct_pts = 10
+            buy_pct_pts = 8
         elif buy_pct >= 0.50:
-            buy_pct_pts = 7
+            buy_pct_pts = 6
         elif buy_pct >= 0.30:
-            buy_pct_pts = 4
+            buy_pct_pts = 3
         else:  # < 0.30
             buy_pct_pts = 2
-        parts.append(f"buy_pct {buy_pct*100:.1f}% (n {_fmt(n)}) -> {buy_pct_pts}/10")
+        subs.append((buy_pct_pts, 8, True))
+        parts.append(f"buy_pct {buy_pct*100:.1f}% (n {_fmt(n)}) -> {buy_pct_pts}/8")
     else:
         buy_pct_pts = 0
-        parts.append("buy_pct: n/a (null ratings or zero n) (+0)")
+        subs.append((0, 8, False))
+        parts.append("buy_pct: n/a (null ratings or zero n) (dropped)")
 
-    # -- PT vs price -------------------------------------------------------
+    # -- PT vs price (max 8) -----------------------------------------------
     pt_below_price = False
     if pt is not None:
-        evaluable += 1
         if pt > 0.15:
-            pt_pts = 10
+            pt_pts = 8
         elif pt > 0.05:
-            pt_pts = 7
+            pt_pts = 6
         elif pt >= 0:
-            pt_pts = 4
+            pt_pts = 3
         else:  # < 0
             pt_pts = 0
             pt_below_price = True
-        parts.append(f"pt_vs_price_pct {_fmt(pt)} -> {pt_pts}/10")
+        subs.append((pt_pts, 8, True))
+        parts.append(f"pt_vs_price_pct {_fmt(pt)} -> {pt_pts}/8")
     else:
         pt_pts = 0
-        parts.append("pt_vs_price_pct: n/a (+0)")
+        subs.append((0, 8, False))
+        parts.append("pt_vs_price_pct: n/a (dropped)")
 
-    # -- rating-actions judgment flag --------------------------------------
+    # -- rating-actions judgment flag (max 4) ------------------------------
     ra_pts = _RATING_ACTIONS_POINTS[rating_actions]
-    parts.append(f"rating_actions {rating_actions} -> +{ra_pts}")
+    subs.append((ra_pts, 4, True))
+    parts.append(f"rating_actions {rating_actions} -> +{ra_pts}/4")
 
-    total = buy_pct_pts + pt_pts + ra_pts
+    # -- news_heat (max 5) -------------------------------------------------
+    ewma = news_heat.get("ewma") if isinstance(news_heat, dict) else None
+    if ewma is not None:
+        if ewma > 0.15:
+            nh_pts = 5
+            nh_label = "bullish heat"
+        elif ewma >= -0.15:
+            nh_pts = 3
+            nh_label = "neutral heat"
+        else:  # < -0.15
+            nh_pts = 1
+            nh_label = "bearish heat"
+        vz = news_heat.get("volume_z")
+        if vz is not None and vz > 2:
+            nh_pts = max(1, nh_pts - 1)
+            parts.append(
+                f"news_heat.ewma {_fmt(_clean(ewma))} -> {nh_label}, "
+                f"volume_z {_fmt(_clean(vz))} > 2 (attention spike) -1 -> {nh_pts}/5")
+        else:
+            parts.append(
+                f"news_heat.ewma {_fmt(_clean(ewma))} -> {nh_pts}/5 ({nh_label})")
+        subs.append((nh_pts, 5, True))
+    else:
+        nh_pts = 0
+        subs.append((0, 5, False))
+        parts.append("news_heat: n/a (null feed -> dropped, renormalized)")
+
+    # -- assemble with internal renormalization over PRESENT sub-maxes ------
+    present = [(p, m) for (p, m, ok) in subs if ok]
+    raw_pts = sum(p for p, _ in present)
+    raw_max = sum(m for _, m in present)
+    evaluable = raw_max > 0
+    if raw_max <= 0:
+        total = 0
+    elif raw_max == 25:
+        total = raw_pts
+    else:
+        total = _clean(raw_pts / raw_max * 25)
+        parts.append(f"street renormalized over sub-max {raw_max} -> {_fmt(total)}/25")
 
     # -- SPEC §5.2 dimension cap -------------------------------------------
     if pt_below_price and total > 10:
@@ -188,15 +276,16 @@ def score_street(sentiment, rating_actions, rating_actions_justification) -> dic
 
     return {
         "name": "street_view",
-        "points": min(25, total),
+        "points": _clean(min(25, total)),
         "max": 25,
         "arithmetic": "; ".join(parts),
         "inputs": {"buy_pct_points": buy_pct_pts, "pt_points": pt_pts,
-                   "rating_actions_points": ra_pts,
+                   "rating_actions_points": ra_pts, "news_heat_points": nh_pts,
                    "ratings": ratings, "pt_vs_price_pct": pt,
+                   "news_heat": news_heat,
                    "rating_actions": rating_actions,
                    "rating_actions_justification": rating_actions_justification},
-        "evaluable": evaluable > 0,
+        "evaluable": evaluable,
     }
 
 
@@ -271,20 +360,77 @@ _INST_FLOW_POINTS = {"accumulating": 8, "neutral": 5, "distributing": 2,
                      "unknown": 0}
 
 
+def _score_insider(sentiment, insider_baseline, insider_baseline_justification):
+    """Insider sub-score (max 12) with a Cohen/Malloy/Pomorski (CMP) classifier
+    that ACTIVATES ONLY when the snapshot carries enough per-insider history, else
+    a graceful fall-back to the v1.0.0 net-90d + baseline logic (UNCHANGED).
+
+    Returns (insider_pts, present, arithmetic_str, insider_net).
+
+    CMP path (sentiment.insider_classification.classifier_active is True):
+      - opportunistic net-SELLING cluster (opportunistic_cluster True AND
+        opportunistic_net_usd < 0) -> 2/12  (the review's "insider cluster at the
+        highs" signal).
+      - opportunistic net-BUYING (opportunistic_net_usd > 0) -> 12/12.
+      - routine-only / no opportunistic signal -> 8/12 (neutral).
+
+    GRACEFUL FALLBACK (classifier_active False OR insider_classification null): the
+    EXACT v1.0.0 rule -- insider_net_90d_usd >0 -> 12; <=0 baseline normal -> 8
+    (routine selling); <=0 baseline unusual -> 2; null -> "n/a" (sub dropped).
+    """
+    classification = sentiment.get("insider_classification")
+    insider = sentiment.get("insider_net_90d_usd")
+
+    # -- CMP classifier path (only when the data justifies it) -------------
+    if isinstance(classification, dict) and classification.get("classifier_active"):
+        opp_net = classification.get("opportunistic_net_usd")
+        cluster = classification.get("opportunistic_cluster")
+        if cluster and opp_net is not None and opp_net < 0:
+            return (2, True,
+                    f"insider CMP: opportunistic net-selling cluster "
+                    f"(opportunistic_net_usd {_fmt(_clean(opp_net))} < 0) -> 2/12",
+                    insider)
+        if opp_net is not None and opp_net > 0:
+            return (12, True,
+                    f"insider CMP: opportunistic net-buying "
+                    f"(opportunistic_net_usd {_fmt(_clean(opp_net))} > 0) -> 12/12",
+                    insider)
+        return (8, True,
+                "insider CMP: routine-only / no opportunistic signal -> 8/12",
+                insider)
+
+    # -- GRACEFUL FALLBACK: v1.0.0 net-90d + baseline logic, UNCHANGED ------
+    if insider is not None:
+        if insider > 0:
+            return (12, True,
+                    f"insider_net_90d_usd {_fmt(_clean(insider))} > 0 -> 12 "
+                    f"(classifier inactive: graceful net-90d fallback)",
+                    insider)
+        if insider_baseline == "unusual":
+            return (2, True,
+                    f"insider_net_90d_usd {_fmt(_clean(insider))} <= 0, baseline "
+                    f"unusual -> 2 (graceful net-90d fallback)",
+                    insider)
+        return (8, True,
+                f"insider_net_90d_usd {_fmt(_clean(insider))} <= 0, baseline "
+                f"normal -> 8 (routine selling; graceful net-90d fallback)",
+                insider)
+    return (0, False, "insider_net_90d_usd: n/a (+0)", insider)
+
+
 def score_smart_money(sentiment, inst_flow, inst_flow_justification,
                       insider_baseline, insider_baseline_justification) -> dict:
-    """13F inst-flow judgment flag (max 8) + insider net-90d (max 12).
+    """13F inst-flow judgment flag (max 8) + insider (max 12).
 
     inst-flow: accumulating 8 / neutral 5 / distributing 2 / unknown 0
         ("n/a -- 13F not assessed; lag disclosed").
-    insider (insider_net_90d_usd): >0 -> 12; <=0 with baseline normal (default) ->
-        8 (routine selling); <=0 with baseline unusual -> 2; null -> 0.
+    insider (max 12): CMP routine-vs-opportunistic classification when
+        insider_classification.classifier_active; else graceful fallback to the
+        v1.0.0 insider_net_90d_usd + baseline logic (see _score_insider).
 
-    unknown inst-flow AND null insider -> whole dimension not evaluable
+    unknown inst-flow AND no insider signal -> whole dimension not evaluable
     (renormalized out), since neither component carries a real signal.
     """
-    insider = sentiment.get("insider_net_90d_usd")
-
     parts = []
     evaluable = 0
 
@@ -296,26 +442,14 @@ def score_smart_money(sentiment, inst_flow, inst_flow_justification,
         evaluable += 1
         parts.append(f"inst_flow {inst_flow} -> +{inst_pts}")
 
-    # -- insider net 90d ---------------------------------------------------
-    if insider is not None:
+    # -- insider (CMP with graceful degrade) -------------------------------
+    insider_pts, insider_present, insider_str, insider = _score_insider(
+        sentiment, insider_baseline, insider_baseline_justification)
+    if insider_present:
         evaluable += 1
-        if insider > 0:
-            insider_pts = 12
-            parts.append(f"insider_net_90d_usd {_fmt(_clean(insider))} > 0 -> 12")
-        elif insider_baseline == "unusual":
-            insider_pts = 2
-            parts.append(
-                f"insider_net_90d_usd {_fmt(_clean(insider))} <= 0, baseline "
-                f"unusual -> 2")
-        else:  # normal (default)
-            insider_pts = 8
-            parts.append(
-                f"insider_net_90d_usd {_fmt(_clean(insider))} <= 0, baseline "
-                f"normal -> 8 (routine selling)")
-    else:
-        insider_pts = 0
-        parts.append("insider_net_90d_usd: n/a (+0)")
+    parts.append(insider_str)
 
+    classification = sentiment.get("insider_classification")
     total = inst_pts + insider_pts
     return {
         "name": "smart_money_insiders",
@@ -324,6 +458,7 @@ def score_smart_money(sentiment, inst_flow, inst_flow_justification,
         "arithmetic": "; ".join(parts),
         "inputs": {"inst_flow_points": inst_pts, "insider_points": insider_pts,
                    "insider_net_90d_usd": insider,
+                   "insider_classification": classification,
                    "inst_flow": inst_flow,
                    "inst_flow_justification": inst_flow_justification,
                    "insider_baseline": insider_baseline,
@@ -333,33 +468,50 @@ def score_smart_money(sentiment, inst_flow, inst_flow_justification,
 
 
 # --------------------------------------------------------------------------- #
-# 4. Positioning & derivatives (max 20): SI (8) + P/C (6) + IV pctile (6)
+# 4. Positioning & derivatives (max 20): SI+DTC (6) + OI-P/C (4) + volume-P/C (3)
+#    + skew (4) + IV pctile (3).   [v1.0.0 was SI 8 / OI-P/C 6 / IV 6.]
 #    COMPLACENCY GUARD evaluated FIRST (uses technicals.rsi14 -- a GUARD field).
+#    v1.1.0 re-split: SI ceiling 8->6 (plus a DTC notch), OI-P/C 6->4, IV 6->3;
+#    ADDS volume-P/C (3) and skew (4). Retained band SHAPES held identical -- only
+#    the ceilings scale; the DTC notch and the two new signals are additive.
 # --------------------------------------------------------------------------- #
 
 def score_positioning(sentiment, rsi14) -> dict:
-    """Short interest (max 8) + full-chain P/C (max 6) + IV percentile (max 6).
+    """SI+DTC (max 6) + OI-P/C (max 4) + volume-P/C (max 3) + skew (max 4) +
+    IV percentile (max 3).
 
-    SI (short_interest_pct, PERCENT units e.g. 26.23): COMPLACENCY GUARD FIRST --
-        si < 1.5 AND rsi14 > 70 -> 2 ("complacency guard: SI <1.5% with RSI >70":
-        low SI + overbought = complacency, not a bullish setup). Else bands:
-        si < 2 -> 6; [2,8] -> 8; (8,15] -> 5; >15 -> 3; null si -> 0.
-    P/C (put_call_ratio_full_chain, OI-based): [0.7,1.1] -> 6; <0.7 -> 3
-        ("call-heavy froth"); >1.1 -> 4 ("hedged/bearish tilt"); null -> 0.
-    IV pctile (iv_pctile_1yr): <25 -> 6 (note "hedges cheap -- cross-ref
-        options-strategy"); [25,75] -> 4; >75 -> 2; null -> 0.
+    SI+DTC (6): COMPLACENCY GUARD FIRST -- si < 1.5 AND rsi14 > 70 -> 2
+        ("complacency guard: SI <1.5% with RSI >70"). Else the v1.0.0 SI% band
+        scaled 8->6 (si<2 -> 4 (was 6); [2,8] -> 6 (was 8); (8,15] -> 4 (was 5);
+        >15 -> 2 (was 3)), THEN a DTC notch: -1 when sentiment.dtc > 10 AND si_trend
+        rising (squeeze/crowded-short risk); +1 when dtc < 2. Notch floors at 1,
+        caps at 6. si_trend only CONDITIONS the notch direction.
+    OI-P/C (4): the v1.0.0 put_call_ratio_full_chain band scaled 6->4: [0.7,1.1] ->
+        4; <0.7 -> 2 ("call-heavy froth"); >1.1 -> 3 ("hedged/bearish tilt").
+    volume-P/C (3): put_call_ratio_full_chain_volume (FLOW vs OI=structural):
+        [0.7,1.3] -> 3; extreme (<0.5 call-froth or >2.0 hedged) -> 1; else 2.
+    skew (4): skew_25d_30d (25Delta RR = IV(25d put) - IV(25d call); POSITIVE = put
+        IV richer = fear/hedging demand, NEGATIVE = call chase): |skew| < 0.03 -> 4
+        (balanced); [0.03,0.08] -> 2 (moderate hedging demand); > 0.08 -> 1 (extreme
+        put bid = fear, or negative = call chase).
+    IV pctile (iv_pctile_1yr): <25 -> 3 (note "hedges cheap"); [25,75] -> 2; >75 ->
+        1. [v1.0.0 was /6: 6/4/2 -> now /3: 3/2/1.]
 
-    rsi14 CONDITIONS the guard but is SCORED only in technical-analysis (it is a
-    GUARD_FIELD here, not an INPUT_FIELD).
+    Each sub-component null -> "n/a" (+0); rsi14 CONDITIONS the guard but is SCORED
+    only in technical-analysis (GUARD_FIELD, not INPUT_FIELD).
     """
     si = sentiment.get("short_interest_pct")
+    dtc = sentiment.get("dtc")
+    si_trend = sentiment.get("si_trend")
     pc = sentiment.get("put_call_ratio_full_chain")
+    pcv = sentiment.get("put_call_ratio_full_chain_volume")
+    skew = sentiment.get("skew_25d_30d")
     iv = sentiment.get("iv_pctile_1yr")
 
     parts = []
     evaluable = 0
 
-    # -- short interest (complacency guard first) --------------------------
+    # -- SI + DTC (max 6; complacency guard first) -------------------------
     if si is not None:
         evaluable += 1
         if si < 1.5 and rsi14 is not None and rsi14 > 70:
@@ -367,67 +519,126 @@ def score_positioning(sentiment, rsi14) -> dict:
             parts.append(
                 f"short_interest_pct {_fmt(si)} -> 2 (complacency guard: "
                 f"SI <1.5% with RSI >70, rsi14 {_fmt(rsi14)})")
-        elif si < 2:
-            si_pts = 6
-            parts.append(f"short_interest_pct {_fmt(si)} < 2 -> 6")
-        elif si <= 8:
-            si_pts = 8
-            parts.append(f"short_interest_pct {_fmt(si)} in [2,8] -> 8")
-        elif si <= 15:
-            si_pts = 5
-            parts.append(f"short_interest_pct {_fmt(si)} in (8,15] -> 5")
-        else:  # > 15
-            si_pts = 3
-            parts.append(f"short_interest_pct {_fmt(si)} > 15 -> 3")
+        else:
+            if si < 2:
+                si_pts = 4
+                parts.append(f"short_interest_pct {_fmt(si)} < 2 -> 4/6")
+            elif si <= 8:
+                si_pts = 6
+                parts.append(f"short_interest_pct {_fmt(si)} in [2,8] -> 6/6")
+            elif si <= 15:
+                si_pts = 4
+                parts.append(f"short_interest_pct {_fmt(si)} in (8,15] -> 4/6")
+            else:  # > 15
+                si_pts = 2
+                parts.append(f"short_interest_pct {_fmt(si)} > 15 -> 2/6")
+            # DTC notch (only when the complacency guard did NOT fire).
+            if dtc is not None:
+                si_rising = (si_trend or "").lower() == "rising"
+                if dtc > 10 and si_rising:
+                    si_pts = max(1, si_pts - 1)
+                    parts.append(
+                        f"dtc {_fmt(_clean(dtc))} > 10 & si_trend rising -> -1 notch "
+                        f"(squeeze/crowded-short risk) -> {si_pts}/6")
+                elif dtc < 2:
+                    si_pts = min(6, si_pts + 1)
+                    parts.append(
+                        f"dtc {_fmt(_clean(dtc))} < 2 -> +1 notch -> {si_pts}/6")
     else:
         si_pts = 0
         parts.append("short_interest_pct: n/a (+0)")
 
-    # -- full-chain put/call ratio (OI-based) ------------------------------
+    # -- OI-based full-chain put/call ratio (max 4) ------------------------
     if pc is not None:
         evaluable += 1
         if 0.7 <= pc <= 1.1:
-            pc_pts = 6
-            parts.append(f"put_call_ratio_full_chain {_fmt(pc)} in [0.7,1.1] -> 6")
+            pc_pts = 4
+            parts.append(f"put_call_ratio_full_chain {_fmt(pc)} in [0.7,1.1] -> 4/4")
         elif pc < 0.7:
+            pc_pts = 2
+            parts.append(
+                f"put_call_ratio_full_chain {_fmt(pc)} < 0.7 -> 2/4 (call-heavy froth)")
+        else:  # > 1.1
             pc_pts = 3
             parts.append(
-                f"put_call_ratio_full_chain {_fmt(pc)} < 0.7 -> 3 (call-heavy froth)")
-        else:  # > 1.1
-            pc_pts = 4
-            parts.append(
-                f"put_call_ratio_full_chain {_fmt(pc)} > 1.1 -> 4 "
+                f"put_call_ratio_full_chain {_fmt(pc)} > 1.1 -> 3/4 "
                 f"(hedged/bearish tilt)")
     else:
         pc_pts = 0
         parts.append("put_call_ratio_full_chain: n/a (+0)")
 
-    # -- IV percentile -----------------------------------------------------
+    # -- volume-based full-chain put/call ratio (FLOW; max 3) --------------
+    if pcv is not None:
+        evaluable += 1
+        if 0.7 <= pcv <= 1.3:
+            pcv_pts = 3
+            parts.append(
+                f"put_call_ratio_full_chain_volume {_fmt(pcv)} in [0.7,1.3] -> 3/3")
+        elif pcv < 0.5 or pcv > 2.0:
+            pcv_pts = 1
+            parts.append(
+                f"put_call_ratio_full_chain_volume {_fmt(pcv)} extreme "
+                f"(<0.5 call-froth or >2.0 hedged) -> 1/3")
+        else:
+            pcv_pts = 2
+            parts.append(
+                f"put_call_ratio_full_chain_volume {_fmt(pcv)} -> 2/3")
+    else:
+        pcv_pts = 0
+        parts.append("put_call_ratio_full_chain_volume: n/a (+0)")
+
+    # -- 25d/30d skew (25Delta RR = IV(25d put) - IV(25d call); max 4) -----
+    if skew is not None:
+        evaluable += 1
+        askew = abs(skew)
+        if askew < 0.03:
+            skew_pts = 4
+            parts.append(f"skew_25d_30d {_fmt(_clean(skew))} |.|<0.03 -> 4/4 (balanced)")
+        elif askew <= 0.08:
+            skew_pts = 2
+            parts.append(
+                f"skew_25d_30d {_fmt(_clean(skew))} |.| in [0.03,0.08] -> 2/4 "
+                f"(moderate hedging demand)")
+        else:  # |skew| > 0.08
+            skew_pts = 1
+            parts.append(
+                f"skew_25d_30d {_fmt(_clean(skew))} |.|>0.08 -> 1/4 "
+                f"(extreme put bid = fear, or negative = call chase)")
+    else:
+        skew_pts = 0
+        parts.append("skew_25d_30d: n/a (+0)")
+
+    # -- IV percentile (max 3) ---------------------------------------------
     if iv is not None:
         evaluable += 1
         if iv < 25:
-            iv_pts = 6
+            iv_pts = 3
             parts.append(
-                f"iv_pctile_1yr {_fmt(iv)} < 25 -> 6 "
+                f"iv_pctile_1yr {_fmt(iv)} < 25 -> 3/3 "
                 f"(hedges cheap -- cross-ref options-strategy)")
         elif iv <= 75:
-            iv_pts = 4
-            parts.append(f"iv_pctile_1yr {_fmt(iv)} in [25,75] -> 4")
-        else:  # > 75
             iv_pts = 2
-            parts.append(f"iv_pctile_1yr {_fmt(iv)} > 75 -> 2")
+            parts.append(f"iv_pctile_1yr {_fmt(iv)} in [25,75] -> 2/3")
+        else:  # > 75
+            iv_pts = 1
+            parts.append(f"iv_pctile_1yr {_fmt(iv)} > 75 -> 1/3")
     else:
         iv_pts = 0
         parts.append("iv_pctile_1yr: n/a (+0)")
 
-    total = si_pts + pc_pts + iv_pts
+    total = si_pts + pc_pts + pcv_pts + skew_pts + iv_pts
     return {
         "name": "positioning_derivatives",
         "points": _clean(total),
         "max": 20,
         "arithmetic": "; ".join(parts),
-        "inputs": {"si_points": si_pts, "pc_points": pc_pts, "iv_points": iv_pts,
-                   "short_interest_pct": si, "put_call_ratio_full_chain": pc,
+        "inputs": {"si_points": si_pts, "pc_points": pc_pts,
+                   "pcv_points": pcv_pts, "skew_points": skew_pts,
+                   "iv_points": iv_pts,
+                   "short_interest_pct": si, "dtc": dtc, "si_trend": si_trend,
+                   "put_call_ratio_full_chain": pc,
+                   "put_call_ratio_full_chain_volume": pcv,
+                   "skew_25d_30d": skew,
                    "iv_pctile_1yr": iv, "rsi14_guard": rsi14},
         "evaluable": evaluable > 0,
     }
@@ -701,6 +912,7 @@ def build_module(snapshot, rating_actions, rating_actions_justification,
     doc = {
         "skill": SKILL_NAME,
         "rubric_version": RUBRIC_VERSION,
+        "module_note": MODULE_NOTE,
         "ticker": meta.get("ticker"),
         "as_of": build_snapshot._as_of_date(meta.get("as_of_utc")),
         "score": scored["score"],
