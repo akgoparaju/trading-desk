@@ -1047,6 +1047,51 @@ def check_capital_action_governed(report_text, docs):
                    "buy directive (composite action demoted / absent)")
 
 
+# Regex to locate a Size row in a Markdown pipe-table (the render emits exactly
+# "| Size | <value> |").  Used by check_size_governed to find the row to inspect.
+_SIZE_ROW_RE = re.compile(r"\|\s*Size\s*\|([^|\n]+)\|", re.IGNORECASE)
+
+
+def check_size_governed(report_text, docs):
+    """FAIL if the contract is capital-INELIGIBLE yet the trade-plan Size row
+    does not carry the 'no new risk now' governed framing.
+
+    Enforces the G5b prescription: when ``capital_eligible`` is False the Size
+    row MUST lead with "no new risk now" so it cannot be read as "deploy N% now"
+    while capital is blocked.  The sizing numbers themselves are unaffected —
+    they are the conditional entry-ladder sizes.
+
+    SKIP when: module_composite absent (cannot build contract), ``capital_eligible``
+    is not False (True or unknown — nothing to govern), or no Size row is present
+    in the report (delta reports / older bundles).
+    """
+    name = "size_governed"
+    composite = docs.get("module_composite") if isinstance(docs, dict) else None
+    if not isinstance(composite, dict):
+        return _result(name, None,
+                       "SKIP: module_composite absent — no contract to build")
+    contract = decision_contract.build_contract(docs)
+    if contract.get("capital_eligible") is not False:
+        return _result(name, None,
+                       "SKIP: capital_eligible is not False "
+                       f"({contract.get('capital_eligible')}) — nothing to govern")
+    m = _SIZE_ROW_RE.search(report_text)
+    if not m:
+        return _result(name, None,
+                       "SKIP: no Size row found in report — delta or older bundle")
+    size_cell = m.group(1).strip()
+    if "no new risk now" not in size_cell:
+        blockers = contract.get("capital_blockers") or []
+        return _result(name, False,
+                       f"capital is INELIGIBLE (blockers: "
+                       f"{', '.join(blockers) or 'none'}) but the Size row "
+                       f"presents deployable risk framing without 'no new risk now': "
+                       f"'{size_cell}'")
+    return _result(name, True,
+                   "capital INELIGIBLE and the Size row carries 'no new risk now' "
+                   "governed framing")
+
+
 # C\d+ token regex (finding citation): same pattern as _FINDING_REF_RE above
 # but compiled once here for use in check_judgment_flag_citations.
 _CID_RE = re.compile(r"C\d+")
@@ -1252,6 +1297,9 @@ def run_report_qc(bundle, report_path, delta=False, previous=None):
         # an ineligible bundle may not carry a bare buy directive on the governing
         # call (BUY|ACCUMULATE ⇒ capital_eligible).
         check_capital_action_governed(report_text, docs),
+        # G5b: the trade-plan Size row must not present deployable risk framing
+        # while capital is INELIGIBLE (size_governed ⇒ capital_eligible).
+        check_size_governed(report_text, docs),
     ]
 
 

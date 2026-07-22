@@ -364,9 +364,17 @@ def build_composite_table(composite):
     return table + "\n\n" + sens_line
 
 
-def build_tradeplan_table(tradeplan):
+def build_tradeplan_table(tradeplan, contract=None):
     """Trade plan table: don't-chase, entries, exits, invalidation, size, hedge,
-    expression."""
+    expression.
+
+    When ``contract`` is a dict and ``contract['capital_eligible']`` is False the
+    Size row is governed: it leads with "no new risk now — <action_unowned>" and
+    frames the numbers as conditional on the hurdle-clearing entry ladder.  This
+    prevents the row from reading as "deploy now" while capital is blocked.  The
+    sizing NUMBERS (recommended_pct / cap_pct / f_star) are unchanged — they are
+    the conditional entry-ladder sizes, not an instruction to deploy.
+    """
     sp = tradeplan.get("stock_plan", {}) or {}
     expr = tradeplan.get("expression", {}) or {}
     rows = []
@@ -398,9 +406,24 @@ def build_tradeplan_table(tradeplan):
                  f"{fl.get('metric', '')} {fl.get('threshold', '')}"])
 
     sz = sp.get("sizing", {}) or {}
-    rows.append(["Size",
-                 f"recommended {_pct(sz.get('recommended_pct'))}, "
-                 f"cap {_pct(sz.get('cap_pct'))}, f* {_pct(sz.get('f_star'))}"])
+    # G5b: when capital is INELIGIBLE, govern the Size row framing so it cannot
+    # be read as "deploy now".  The numbers (recommended/cap/f*) are unchanged —
+    # they are the CONDITIONAL sizes for the hurdle-clearing entry ladder.
+    if isinstance(contract, dict) and contract.get("capital_eligible") is False:
+        action_unowned = contract.get("action_unowned") or "WAIT"
+        size_value = (
+            f"no new risk now — {action_unowned}; "
+            f"conditional {_pct(sz.get('recommended_pct'))} at the "
+            f"hurdle-clearing entry ladder, "
+            f"cap {_pct(sz.get('cap_pct'))}, "
+            f"f* {_pct(sz.get('f_star'))}"
+        )
+    else:
+        size_value = (
+            f"recommended {_pct(sz.get('recommended_pct'))}, "
+            f"cap {_pct(sz.get('cap_pct'))}, f* {_pct(sz.get('f_star'))}"
+        )
+    rows.append(["Size", size_value])
 
     hedge = sp.get("hedge", {}) or {}
     if hedge.get("required"):
@@ -464,7 +487,7 @@ def build_page1(snapshot, composite, tradeplan, contract=None):
         "",
         "### Trade Plan",
         "",
-        build_tradeplan_table(tradeplan),
+        build_tradeplan_table(tradeplan, contract),
         "",
         build_event_playbook(snapshot, tradeplan),
     ])

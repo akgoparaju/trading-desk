@@ -51,6 +51,20 @@ Spec: `docs/specs/2026-07-21-G1-G4-capital-trust-spec.md`. Bar: no guesses, data
   the four blockers, WAIT_FOR_EVENT / HOLD_NO_ADD, hurdle-clearing 332.232; the composite "Accumulate" no
   longer stands as the call; full report QC (incl. number_provenance + capital_action_governed) PASSES.
   +12 tests; full suite **1614 pass / 26 skip**.
+- **G5b — govern the Size row presentation.** The trade-plan Size row previously rendered
+  `"recommended 4.0%, cap 4.0%, f* 65.7%"` even when `capital_eligible=False`, contradicting the
+  WAIT capital status by implying "deploy now". Fix: `build_tradeplan_table(tradeplan, contract=None)`
+  gains a `contract` parameter; when `capital_eligible is False` the Size row leads with
+  `"no new risk now — <action_unowned>; conditional <recommended_pct> at the hurdle-clearing entry
+  ladder, cap <cap_pct>, f* <f_star>"` — framing the numbers as conditional rather than an
+  immediate deployment instruction. Sizing MATH is unchanged (the numbers are the same conditional
+  entry-ladder sizes). `build_page1` passes `contract` to `build_tradeplan_table`. New QC check
+  `report_qc.check_size_governed` (registered in `run_report_qc` beside `capital_action_governed`)
+  FAILs when `capital_eligible=False` yet the Size row lacks `"no new risk now"`; SKIPs when
+  eligible / composite absent / no Size row. **Real-GOOG validation:** Size row now reads
+  `"no new risk now — WAIT_FOR_EVENT; conditional 4.0% at the hurdle-clearing entry ladder, cap
+  4.0%, f* 65.7%"`; `size_governed` PASS; `number_provenance` PASS. +11 tests; full suite
+  **1625 pass / 26 skip**.
 
 ## Unreleased — 2026-07-21 · Outstanding-tasks O5 / O11 / O4
 

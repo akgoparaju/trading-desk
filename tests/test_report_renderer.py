@@ -2131,5 +2131,282 @@ class TestPage1CapitalGovernanceE2E(unittest.TestCase):
             self.assertIs(res["passed"], True)
 
 
+# --------------------------------------------------------------------------- #
+# G5b: build_tradeplan_table size-row governance.
+# --------------------------------------------------------------------------- #
+
+class TestBuildTradeplanTableSizeGovernance(unittest.TestCase):
+    """build_tradeplan_table: Size row governed when ineligible, verbatim when not."""
+
+    def _make_tradeplan(self):
+        """Minimal tradeplan dict with sizing fields that render as 4.0%, 4.0%, 65.7%."""
+        return {
+            "stock_plan": {
+                "dont_chase": {"above": 350.0, "convention": "5% above top entry"},
+                "entries": [],
+                "exits": {},
+                "invalidation": {
+                    "technical_leg": {"level": 300.0, "condition": "weekly close below"},
+                    "fundamental_leg": {"metric": "revenue growth", "threshold": "< 10%"},
+                },
+                "sizing": {
+                    "recommended_pct": 0.04,
+                    "cap_pct": 0.04,
+                    "f_star": 0.6571,
+                },
+                "hedge": {"required": False},
+            },
+            "expression": {"recommended_for_profile": "stock core"},
+        }
+
+    def _ineligible_contract(self):
+        return {
+            "capital_eligible": False,
+            "capital_blockers": ["EV_BELOW_HURDLE"],
+            "action_unowned": "WAIT_FOR_EVENT",
+        }
+
+    def _eligible_contract(self):
+        return {
+            "capital_eligible": True,
+            "capital_blockers": [],
+            "action_unowned": "ACCUMULATE_ON_WEAKNESS",
+        }
+
+    def test_ineligible_size_row_contains_no_new_risk_now(self):
+        """When capital_eligible is False, Size row must contain 'no new risk now'."""
+        tp = self._make_tradeplan()
+        table = rr.build_tradeplan_table(tp, self._ineligible_contract())
+        # Extract the Size row value from the rendered Markdown table.
+        import re
+        m = re.search(r"\|\s*Size\s*\|([^|\n]+)\|", table, re.IGNORECASE)
+        self.assertIsNotNone(m, "Size row not found in table")
+        cell = m.group(1).strip()
+        self.assertIn("no new risk now", cell)
+
+    def test_ineligible_size_row_contains_conditional_and_pct(self):
+        """Governed Size row preserves the sizing numbers framed as conditional."""
+        tp = self._make_tradeplan()
+        table = rr.build_tradeplan_table(tp, self._ineligible_contract())
+        import re
+        m = re.search(r"\|\s*Size\s*\|([^|\n]+)\|", table, re.IGNORECASE)
+        self.assertIsNotNone(m, "Size row not found in table")
+        cell = m.group(1).strip()
+        # Must contain all three sizing numbers.
+        self.assertIn("4.0%", cell)   # recommended_pct 0.04
+        self.assertIn("65.7%", cell)  # f_star 0.6571
+        # Must frame them as conditional.
+        self.assertIn("conditional", cell)
+        # Must carry the action_unowned label.
+        self.assertIn("WAIT_FOR_EVENT", cell)
+
+    def test_eligible_size_row_is_verbatim_original(self):
+        """When capital_eligible is True, Size row is the unchanged original format."""
+        tp = self._make_tradeplan()
+        table_eligible = rr.build_tradeplan_table(tp, self._eligible_contract())
+        table_no_contract = rr.build_tradeplan_table(tp)
+        import re
+        def _size_cell(table):
+            m = re.search(r"\|\s*Size\s*\|([^|\n]+)\|", table, re.IGNORECASE)
+            return m.group(1).strip() if m else None
+        cell_eligible = _size_cell(table_eligible)
+        cell_none = _size_cell(table_no_contract)
+        # Both must produce the original "recommended X%, cap Y%, f* Z%" format.
+        self.assertIsNotNone(cell_eligible)
+        self.assertIsNotNone(cell_none)
+        self.assertIn("recommended 4.0%", cell_eligible)
+        self.assertIn("cap 4.0%", cell_eligible)
+        self.assertIn("f* 65.7%", cell_eligible)
+        # And match each other (no contract == eligible contract for the Size row).
+        self.assertEqual(cell_eligible, cell_none)
+        # Must NOT contain governed framing.
+        self.assertNotIn("no new risk now", cell_eligible)
+
+    def test_none_contract_size_row_is_verbatim_original(self):
+        """contract=None -> original row (backward-compat for older bundles)."""
+        tp = self._make_tradeplan()
+        table = rr.build_tradeplan_table(tp, None)
+        import re
+        m = re.search(r"\|\s*Size\s*\|([^|\n]+)\|", table, re.IGNORECASE)
+        self.assertIsNotNone(m)
+        cell = m.group(1).strip()
+        self.assertIn("recommended 4.0%", cell)
+        self.assertNotIn("no new risk now", cell)
+
+
+# --------------------------------------------------------------------------- #
+# G5b: check_size_governed QC check.
+# --------------------------------------------------------------------------- #
+
+class TestCheckSizeGoverned(unittest.TestCase):
+    """check_size_governed: FAIL / PASS / SKIP conditions."""
+
+    # Minimal composite that makes build_contract produce capital_eligible=False.
+    # ev_at_current (0.05) < hurdle_total (0.12) -> EV_BELOW_HURDLE blocker.
+    def _ineligible_docs(self):
+        comp = _composite_doc()
+        comp["ev"]["ev_at_current"] = 0.05   # below hurdle -> blocker fires
+        return {
+            "module_composite": comp,
+            "module_tradeplan": _tradeplan_doc(),
+            "module_fundamental": _fundamental_doc(),
+            "snapshot": _snapshot_doc(),
+        }
+
+    def _eligible_docs(self):
+        # ev_at_current (0.175) > hurdle (0.12) -> no blockers -> eligible.
+        return {
+            "module_composite": _composite_doc(),
+            "module_tradeplan": _tradeplan_doc(),
+            "module_fundamental": _fundamental_doc(),
+            "snapshot": _snapshot_doc(),
+        }
+
+    def _bare_size_row_report(self):
+        """Report text with an ungoverned Size row (bare 'recommended X%')."""
+        return (
+            "## Page 1 — Decision\n\n"
+            "### The Call\n\n"
+            "CAPITAL STATUS: WAIT — capital is INELIGIBLE\n\n"
+            "### Trade Plan\n\n"
+            "| Plan Row | Value |\n"
+            "| --- | --- |\n"
+            "| Size | recommended 4.0%, cap 4.0%, f* 28.0% |\n"
+        )
+
+    def _governed_size_row_report(self):
+        """Report text with a governed Size row ('no new risk now')."""
+        return (
+            "## Page 1 — Decision\n\n"
+            "### The Call\n\n"
+            "CAPITAL STATUS: WAIT — capital is INELIGIBLE\n\n"
+            "### Trade Plan\n\n"
+            "| Plan Row | Value |\n"
+            "| --- | --- |\n"
+            "| Size | no new risk now — WAIT_FOR_EVENT; conditional 4.0% at the "
+            "hurdle-clearing entry ladder, cap 4.0%, f* 28.0% |\n"
+        )
+
+    def _eligible_report(self):
+        """Report text with the standard (ungoverned) Size row for an eligible bundle."""
+        return (
+            "## Page 1 — Decision\n\n"
+            "### The Call\n\n"
+            "### Trade Plan\n\n"
+            "| Plan Row | Value |\n"
+            "| --- | --- |\n"
+            "| Size | recommended 4.0%, cap 4.0%, f* 28.0% |\n"
+        )
+
+    def test_fail_ineligible_with_bare_recommended_size_row(self):
+        """FAIL: ineligible bundle + bare 'recommended X%' Size row."""
+        res = rq.check_size_governed(self._bare_size_row_report(),
+                                     self._ineligible_docs())
+        self.assertIs(res["passed"], False)
+        self.assertIn("no new risk now", res["detail"])
+
+    def test_pass_ineligible_with_governed_size_row(self):
+        """PASS: ineligible bundle + Size row containing 'no new risk now'."""
+        res = rq.check_size_governed(self._governed_size_row_report(),
+                                     self._ineligible_docs())
+        self.assertIs(res["passed"], True)
+        self.assertIn("no new risk now", res["detail"])
+
+    def test_skip_when_eligible(self):
+        """SKIP: capital_eligible is True -> nothing to govern."""
+        res = rq.check_size_governed(self._eligible_report(),
+                                     self._eligible_docs())
+        self.assertIsNone(res["passed"])
+        self.assertIn("SKIP", res["detail"])
+
+    def test_skip_when_composite_absent(self):
+        """SKIP: module_composite absent -> cannot build contract."""
+        res = rq.check_size_governed(self._bare_size_row_report(), {})
+        self.assertIsNone(res["passed"])
+        self.assertIn("SKIP", res["detail"])
+
+    def test_skip_when_no_size_row(self):
+        """SKIP: ineligible bundle but report has no Size row (delta / old bundle)."""
+        report_no_size = (
+            "## Page 1 — Decision\n\n"
+            "### The Call\n\n"
+            "CAPITAL STATUS: WAIT\n"
+        )
+        res = rq.check_size_governed(report_no_size, self._ineligible_docs())
+        self.assertIsNone(res["passed"])
+        self.assertIn("SKIP", res["detail"])
+
+
+# --------------------------------------------------------------------------- #
+# G5b: E2E render of ineligible bundle confirms governed Size row and QC PASS.
+# --------------------------------------------------------------------------- #
+
+class TestSizeGovernanaceE2E(unittest.TestCase):
+    """End-to-end: an INELIGIBLE bundle renders a governed Size row and
+    check_size_governed PASSES; an ELIGIBLE bundle renders the original row."""
+
+    def _ineligible_bundle(self, d):
+        """Bundle whose contract is capital_eligible=False (mirrors the GOOG case:
+        all four blockers including EV_BELOW_HURDLE + EARNINGS_WITHIN_1_DAY)."""
+        comp = _composite_doc()
+        comp["score"] = 65.4294
+        comp["grade"] = "B"
+        comp["action"] = "Hold/Accumulate-on-weakness"
+        comp["dimensions"][0]["score"] = 90
+        comp["dimensions"][0]["contribution"] = 22.5
+        comp["confidence"] = {"level": "LOW", "why": "wide scenario spread"}
+        comp["ev"]["ev_at_current"] = 0.05   # below hurdle -> EV_BELOW_HURDLE
+        tp = _tradeplan_doc()
+        fund = _fundamental_doc()
+        fund["subscores"][1]["inputs"] = {
+            "anchors": {"dcf_base": 145.47, "comps_low": 294.0, "comps_high": 436.0}}
+        fund["subscores"][1]["arithmetic"] = (
+            "disagreement 0.86 > 0.25 -> WIDEN band")
+        _mk_bundle(d, composite_override=comp, tradeplan_override=tp)
+        snap = _snapshot_doc()
+        snap["events"]["days_to_event"] = 1   # -> EARNINGS_WITHIN_1_DAY
+        with open(os.path.join(d, "snapshot_MU_2026-07-16.json"), "w") as fh:
+            json.dump(snap, fh)
+        with open(os.path.join(d, "module_fundamental.json"), "w") as fh:
+            json.dump(fund, fh)
+
+    def test_ineligible_render_size_row_is_governed_and_qc_passes(self):
+        """Ineligible bundle: Size row is governed; check_size_governed PASS."""
+        with tempfile.TemporaryDirectory() as d:
+            self._ineligible_bundle(d)
+            rc, out, err = _render(d)
+            self.assertEqual(rc, 0, err)
+            report = _find_report(d)
+            text = _read_file(report)
+            # The Size row must carry the governed framing.
+            self.assertIn("no new risk now", text,
+                          "expected 'no new risk now' in Size row for ineligible bundle")
+            # Sizing numbers (conditional) must still appear.
+            self.assertIn("4.0%", text)
+            # QC check must PASS.
+            docs = rr.load_bundle(d)
+            res = rq.check_size_governed(text, docs)
+            self.assertIs(res["passed"], True,
+                          f"check_size_governed unexpectedly failed: {res['detail']}")
+
+    def test_eligible_render_size_row_is_verbatim_original(self):
+        """Eligible bundle (no blockers): Size row is the original format."""
+        with tempfile.TemporaryDirectory() as d:
+            _mk_bundle(d)   # default fixture: ev_at_current=0.175 > hurdle=0.12
+            rc, out, err = _render(d)
+            self.assertEqual(rc, 0, err)
+            report = _find_report(d)
+            text = _read_file(report)
+            # Must NOT contain governed framing.
+            self.assertNotIn("no new risk now", text)
+            # Must contain original "recommended X%..." format.
+            self.assertIn("recommended 4.0%", text)
+            # QC check must SKIP (eligible).
+            docs = rr.load_bundle(d)
+            res = rq.check_size_governed(text, docs)
+            self.assertIsNone(res["passed"],
+                              f"expected SKIP for eligible bundle, got: {res}")
+
+
 if __name__ == "__main__":
     unittest.main()
