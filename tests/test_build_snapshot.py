@@ -1822,5 +1822,162 @@ class TestWave4ATechnicals(unittest.TestCase):
         self.assertIsNotNone(t["vwap_52wk_high"])
 
 
+# --------------------------------------------------------------------------- #
+# Track O4 — sector-relative RS: SECTOR_ETF map + build_benchmark sector returns
+# --------------------------------------------------------------------------- #
+
+class TestSectorEtfMap(unittest.TestCase):
+    """O4.1: overview.Sector (GICS-aligned) -> SPDR Select Sector ETF, or None.
+
+    The map is VERIFIED (AV COMPANY_OVERVIEW Sector is GICS-aligned; live bundles
+    returned COMMUNICATION SERVICES / TECHNOLOGY / INDUSTRIALS). Unknown/None ->
+    None (disclosed absence; NEVER guess an ETF)."""
+
+    def test_sector_etf_maps_verified_gics_sectors(self):
+        from scripts import build_snapshot as bs
+        self.assertEqual(bs.resolve_sector_etf("COMMUNICATION SERVICES"), "XLC")
+        self.assertEqual(bs.resolve_sector_etf("TECHNOLOGY"), "XLK")
+        self.assertEqual(bs.resolve_sector_etf("INDUSTRIALS"), "XLI")
+        self.assertEqual(bs.resolve_sector_etf("technology"), "XLK")
+
+    def test_sector_etf_omits_unknown_sector(self):
+        from scripts import build_snapshot as bs
+        self.assertIsNone(bs.resolve_sector_etf("SOME UNLISTED SECTOR"))
+        self.assertIsNone(bs.resolve_sector_etf(None))
+
+    def test_sector_etf_alias_rows(self):
+        # The verified alias rows (GICS renames / common vendor variants). Only
+        # these aliases exist -- no invented ones.
+        from scripts import build_snapshot as bs
+        self.assertEqual(bs.resolve_sector_etf("INFORMATION TECHNOLOGY"), "XLK")
+        self.assertEqual(bs.resolve_sector_etf("CONSUMER CYCLICAL"), "XLY")
+        self.assertEqual(bs.resolve_sector_etf("CONSUMER DEFENSIVE"), "XLP")
+        self.assertEqual(bs.resolve_sector_etf("FINANCIAL"), "XLF")
+        self.assertEqual(bs.resolve_sector_etf("HEALTHCARE"), "XLV")
+        self.assertEqual(bs.resolve_sector_etf("BASIC MATERIALS"), "XLB")
+
+    def test_sector_etf_strips_whitespace(self):
+        from scripts import build_snapshot as bs
+        self.assertEqual(bs.resolve_sector_etf("  Technology  "), "XLK")
+
+
+class TestBuildBenchmarkSector(unittest.TestCase):
+    """O4.2: build_benchmark emits sector returns when sector_rows given, and is
+    byte-identical to today when they are absent (graceful disclosed absence)."""
+
+    def _rows(self, closes):
+        return [{"adjusted_close": float(c)} for c in closes]
+
+    def test_build_benchmark_adds_sector_returns(self):
+        from scripts import build_snapshot as bs
+        from scripts import indicators
+        # 300 bars so the 12m (252) window is populated for stock + sector.
+        stock = self._rows([90.0 + 0.10 * i for i in range(300)])
+        spy = self._rows([400.0 + 0.20 * i for i in range(300)])
+        sector = self._rows([50.0 + 0.05 * i for i in range(300)])
+        res = bs.build_benchmark(stock, spy, sector_rows=sector, sector_etf="XLK")
+
+        self.assertEqual(res["sector_etf"], "XLK")
+        sec_adj = [r["adjusted_close"] for r in sector]
+        stk_adj = [r["adjusted_close"] for r in stock]
+        for w, key in ((bs._W1M, "sector_ret_1m"), (bs._W3M, "sector_ret_3m"),
+                       (bs._W6M, "sector_ret_6m"), (bs._W12M, "sector_ret_12m")):
+            self.assertAlmostEqual(res[key], indicators.pct_return(sec_adj, w),
+                                   places=12)
+        # rel_sector_ret_Nm = stock_ret_Nm - sector_ret_Nm (3m and 6m).
+        stock_ret_3m = indicators.pct_return(stk_adj, bs._W3M)
+        sector_ret_3m = indicators.pct_return(sec_adj, bs._W3M)
+        self.assertAlmostEqual(res["rel_sector_ret_3m"],
+                               stock_ret_3m - sector_ret_3m, places=12)
+        stock_ret_6m = indicators.pct_return(stk_adj, bs._W6M)
+        sector_ret_6m = indicators.pct_return(sec_adj, bs._W6M)
+        self.assertAlmostEqual(res["rel_sector_ret_6m"],
+                               stock_ret_6m - sector_ret_6m, places=12)
+
+    def test_build_benchmark_unchanged_without_sector_rows(self):
+        from scripts import build_snapshot as bs
+        stock = self._rows([90.0 + 0.10 * i for i in range(300)])
+        spy = self._rows([400.0 + 0.20 * i for i in range(300)])
+        res = bs.build_benchmark(stock, spy)
+        # NONE of the sector keys appear -> benchmark block byte-identical to today.
+        for key in ("sector_etf", "sector_ret_1m", "sector_ret_3m",
+                    "sector_ret_6m", "sector_ret_12m",
+                    "rel_sector_ret_3m", "rel_sector_ret_6m"):
+            self.assertNotIn(key, res)
+
+    def test_build_benchmark_sector_none_etf_still_omits(self):
+        # sector_rows None (even with an etf label) -> no sector keys emitted.
+        from scripts import build_snapshot as bs
+        stock = self._rows([90.0 + 0.10 * i for i in range(300)])
+        spy = self._rows([400.0 + 0.20 * i for i in range(300)])
+        res = bs.build_benchmark(stock, spy, sector_rows=None, sector_etf="XLK")
+        self.assertNotIn("sector_etf", res)
+        self.assertNotIn("sector_ret_3m", res)
+
+
+class TestSectorDailyOptionalSource(unittest.TestCase):
+    """O4.2 wiring: sector_daily_adjusted is an OPTIONAL source (in COVERS, NOT in
+    REQUIRED). A bundle carrying it surfaces sector returns in benchmark; a bundle
+    without it builds fine (missing sector data must NEVER fail a snapshot)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def test_sector_daily_not_required(self):
+        from scripts import build_snapshot as bs
+        self.assertNotIn("sector_daily_adjusted", bs.REQUIRED)
+
+    def test_sector_daily_in_covers_as_benchmark(self):
+        from scripts import build_snapshot as bs
+        self.assertIn("sector_daily_adjusted", bs.COVERS)
+        self.assertEqual(bs.COVERS["sector_daily_adjusted"], ["benchmark"])
+
+    def test_bundle_without_sector_builds_and_omits_sector_returns(self):
+        # The standard build_full bundle has NO sector_daily_adjusted -> the
+        # benchmark block has no sector keys, build still succeeds.
+        BundleBuilder(self.dir).build_full()
+        proc = _run_build(self.dir)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(self.dir,
+                               f"snapshot_MU_{AS_OF_DATE}.json")) as fh:
+            snap = json.load(fh)
+        bm = snap["benchmark"]
+        self.assertNotIn("sector_ret_3m", bm)
+        self.assertNotIn("sector_etf", bm)
+
+    def test_bundle_with_sector_surfaces_sector_returns(self):
+        # Add a sector_daily_adjusted file (XLK for the TECHNOLOGY overview) and
+        # wire the overview Sector so resolve_sector_etf finds XLK.
+        b = BundleBuilder(self.dir)
+        b.add_global_quote()
+        # overview with Sector = TECHNOLOGY -> resolve_sector_etf -> XLK.
+        ov = {
+            "Symbol": b.ticker, "Sector": "TECHNOLOGY",
+            "MarketCapitalization": f"{b.mktcap:.0f}",
+            "SharesOutstanding": f"{b.shares:.0f}", "EPS": "6.00",
+            "PERatio": f"{b.last / 6.0:.4f}", "52WeekHigh": "140.00",
+            "52WeekLow": "60.00", "Beta": "1.30",
+        }
+        b._add("overview", "overview.json", ov, "COMPANY_OVERVIEW")
+        b.add_daily(); b.add_spy()
+        b.add_income(); b.add_balance(); b.add_cashflow(); b.add_earnings()
+        # A sector series (reuse a distinct deterministic walk).
+        sector_rows = _walk(320, seed=303, start=180.0)
+        b._add("sector_daily_adjusted", "sector_daily.json",
+               _daily_json(sector_rows), "TIME_SERIES_DAILY_ADJUSTED")
+        b.write_manifest()
+        proc = _run_build(self.dir)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(self.dir,
+                               f"snapshot_MU_{AS_OF_DATE}.json")) as fh:
+            snap = json.load(fh)
+        bm = snap["benchmark"]
+        self.assertEqual(bm["sector_etf"], "XLK")
+        self.assertIsNotNone(bm["sector_ret_3m"])
+        self.assertIsNotNone(bm["rel_sector_ret_3m"])
+        self.assertIsNotNone(bm["rel_sector_ret_6m"])
+
+
 if __name__ == "__main__":
     unittest.main()

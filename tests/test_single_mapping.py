@@ -43,6 +43,19 @@ class TestSingleMapping(unittest.TestCase):
             self.assertFalse(guards & mod.INPUT_FIELDS,
                              f"{name} scores its own guard fields")
 
+    def test_rel_sector_field_scored_only_in_technical(self):
+        # Track O4: sector-relative RS scores ONLY in technical. SPY-relative RS
+        # (benchmark.spy_ret_*) already scores in sentiment; the NEW sector-relative
+        # field is a distinct fact that must not double-count.
+        self.assertIn("benchmark.rel_sector_ret_3m",
+                      score_technical.INPUT_FIELDS)
+        self.assertNotIn("benchmark.rel_sector_ret_3m",
+                         score_sentiment.INPUT_FIELDS)
+        self.assertIn("benchmark.rel_sector_ret_6m",
+                      score_technical.INPUT_FIELDS)
+        self.assertNotIn("benchmark.rel_sector_ret_6m",
+                         score_sentiment.INPUT_FIELDS)
+
 
 if __name__ == "__main__":
     unittest.main()

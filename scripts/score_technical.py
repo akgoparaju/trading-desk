@@ -7,10 +7,11 @@ report can never silently drift: the numbers a brief cites all originate here, i
 Python, and the version string travels with them into the module JSON and the
 brief footer. The LLM layer narrates; it does no scoring arithmetic.
 
-Scoring is over four dimensions (max 100 total). TOP-LEVEL WEIGHTS ARE UNCHANGED
-from v1.0.0 (Trend 30 / Momentum 25 / Structure 25 / Volume 20); rubric v1.1.0
-(Wave 4A, R5/B28) enriches the SUB-splits and adds a regime GUARD -- it does NOT
-re-weight the four dimensions:
+Scoring is over four CORE dimensions (max 100 total) PLUS an OPTIONAL fifth factor
+(v1.2.0). TOP-LEVEL WEIGHTS of the four cores ARE UNCHANGED from v1.0.0 (Trend 30 /
+Momentum 25 / Structure 25 / Volume 20); rubric v1.1.0 (Wave 4A, R5/B28) enriches
+the SUB-splits and adds a regime GUARD; rubric v1.2.0 (Track O4) adds the sector-RS
+factor -- neither re-weights the four cores:
     1. Trend structure    (30)  -- price/MA stack + MA slopes
     2. Momentum           (25)  -- RSI band (+ optional divergence adj) + MACD
                                    state, REGIME-CONDITIONED by adx14 + stage
@@ -33,6 +34,17 @@ re-weight the four dimensions:
                                    accumulation/distribution quality. Null sub-
                                    components renormalize WITHIN the factor (the
                                    factor is NOT zeroed).
+    5. Sector-relative RS (_RS_MAX, v1.2.0, PROVISIONAL) -- blend of
+                                   rel_sector_ret_3m/6m (stock minus its GICS-sector
+                                   SPDR ETF, minted by build_snapshot). A NEW scored
+                                   factor: when the benchmark carries the rel_sector
+                                   legs it JOINS the present_max renormalization (the
+                                   0-100 denominator grows by _RS_MAX); when they are
+                                   ABSENT the factor is OMITTED and the score is
+                                   byte-for-byte identical to v1.1.0 (graceful
+                                   identity). Bands are unratified pending B9;
+                                   falsifier pre-registered. SPY-relative RS is
+                                   scored in SENTIMENT, not here (single mapping).
 
 REGIME AS GUARD (v1.1.0, PROVISIONAL): adx14 + stage are GUARD/modulator fields
 (``GUARD_FIELDS``) -- they change how many points an existing momentum sub-score
@@ -79,22 +91,29 @@ if _REPO_ROOT not in sys.path:
 
 from scripts import build_snapshot, chain, confidence, levels
 
-RUBRIC_VERSION = "1.1.0"
+RUBRIC_VERSION = "1.2.0"
 SKILL_NAME = "technical-analysis"
 
-# Module note stamped on every doc: rubric v1.1.0 is PROVISIONAL (Wave 4A / R5 /
-# B28) -- the regime guard thresholds (adx/stage) and the A/D + upvol volume-
-# quality bands are unratified pending B9 calibration; a falsifier is pre-
-# registered in the SKILL.
-MODULE_NOTE = ("technical-v1.1.0 PROVISIONAL -- regime guard + volume-quality "
-               "bands unratified pending B9; falsifier pre-registered")
+# Module note stamped on every doc: rubric v1.2.0 is PROVISIONAL. The v1.1.0
+# provisional pieces (regime guard adx/stage + A/D + upvol volume-quality bands)
+# remain; v1.2.0 (Track O4) ADDS a PROVISIONAL sector-relative RS factor
+# (score_rel_strength) whose bands are unratified pending B9 calibration. A
+# falsifier is pre-registered (this note + the SKILL): if the B9 calibration set
+# shows the sector-RS points do not separate forward winners from losers (or
+# invert), the bands are wrong -- revise or retract the factor.
+MODULE_NOTE = ("technical-v1.2.0 PROVISIONAL -- regime guard + volume-quality "
+               "bands AND the new sector-relative RS factor unratified pending "
+               "B9; falsifier pre-registered")
 
 # The snapshot fields this rubric SCORES on (earns points from). price.last and
 # the ladder are shared reference infrastructure and are intentionally NOT listed
 # (see module docstring). v1.1.0 adds ad_line_slope + upvol_ratio (the new SCORED
-# volume-quality sub-components). The anchored-VWAP fields (vwap_52wk_high /
-# vwap_earnings) are NOT here: they feed the shared ladder (levels.py), not a
-# scored branch directly.
+# volume-quality sub-components). v1.2.0 (Track O4) adds benchmark.rel_sector_ret_3m
+# + _6m (the SCORED sector-relative RS legs). These are the SECTOR-relative facts;
+# SPY-relative RS (benchmark.spy_ret_*) is scored in the SENTIMENT module, so the
+# two are DISJOINT (single-mapping governance; test_single_mapping asserts it). The
+# anchored-VWAP fields (vwap_52wk_high / vwap_earnings) are NOT here: they feed the
+# shared ladder (levels.py), not a scored branch directly.
 INPUT_FIELDS = {
     "technicals.ma50",
     "technicals.ma200",
@@ -107,6 +126,8 @@ INPUT_FIELDS = {
     "technicals.ret_15d",
     "technicals.ad_line_slope",
     "technicals.upvol_ratio",
+    "benchmark.rel_sector_ret_3m",
+    "benchmark.rel_sector_ret_6m",
 }
 
 # Fields that only MODULATE (guard/cap) a scoring branch -- they earn NO points
@@ -610,6 +631,92 @@ def score_volume(last, tech) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# 5. Sector-relative relative strength (max _RS_MAX) -- v1.2.0 (Track O4)
+# --------------------------------------------------------------------------- #
+
+# The sector-RS factor's full mark. It is a NEW scored factor (not a re-split of an
+# existing dimension): when present it JOINS the present_max renormalization (the
+# denominator grows by _RS_MAX); when absent the technical score is byte-for-byte
+# identical to v1.1.0 (graceful-identity contract). The band POINTS below are
+# PROVISIONAL -- documented monotone defaults, unratified pending B9 calibration; a
+# falsifier is pre-registered (module note + SKILL).
+_RS_MAX = 10.0
+
+# Provisional band thresholds on the 3m/6m blend and their point values (monotone,
+# all within [0, _RS_MAX]). rel >= +0.10 full; +0.03..+0.10 upper-partial;
+# -0.03..+0.03 half; < -0.03 -> 0.
+_RS_FULL_THRESH = 0.10
+_RS_UPPER_THRESH = 0.03
+_RS_HALF_THRESH = -0.03
+_RS_UPPER_PTS = 7.5   # upper-partial (outperforming, not yet decisively)
+_RS_HALF_PTS = 5.0    # in-line with sector (half marks)
+
+
+def score_rel_strength(benchmark) -> dict:
+    """Sector-relative RS factor (max ``_RS_MAX``), PROVISIONAL (Track O4 / v1.2.0).
+
+    Scores the blend ``rel = 0.5*rel_sector_ret_3m + 0.5*rel_sector_ret_6m`` using
+    whichever legs are present (if only one is present it IS the blend; if BOTH are
+    absent the factor is NOT evaluable and drops out of the renormalization). The
+    two ``rel_sector_ret_*`` fields are stock-minus-sector returns minted by
+    build_snapshot.build_benchmark (Track O4). SPY-relative RS is scored ELSEWHERE
+    (sentiment); this is the sector-relative fact, declared ONLY in this module's
+    INPUT_FIELDS.
+
+    Bands (MONOTONE, PROVISIONAL -- unratified pending B9; falsifier pre-registered):
+      rel >= +0.10 -> full _RS_MAX; +0.03 <= rel < +0.10 -> _RS_UPPER_PTS;
+      -0.03 <= rel < +0.03 -> _RS_HALF_PTS (in-line); rel < -0.03 -> 0.
+    """
+    bench = benchmark if isinstance(benchmark, dict) else {}
+    rel3 = bench.get("rel_sector_ret_3m")
+    rel6 = bench.get("rel_sector_ret_6m")
+
+    legs = [v for v in (rel3, rel6) if v is not None]
+    if not legs:
+        # Both legs absent -> factor NOT evaluable (graceful: drops out entirely).
+        return {
+            "name": "rel_strength_sector",
+            "points": None,
+            "max": _RS_MAX,
+            "arithmetic": ("sector-RS: n/a (no rel_sector_ret_3m/6m) "
+                           "[PROVISIONAL v1.2.0]"),
+            "inputs": {"rel_sector_ret_3m": rel3, "rel_sector_ret_6m": rel6,
+                       "blend": None},
+            "evaluable": False,
+        }
+
+    blend = sum(legs) / len(legs)   # 0.5/0.5 when both present; the single leg else
+    if blend >= _RS_FULL_THRESH:
+        pts = _RS_MAX
+        band = f">= +{_RS_FULL_THRESH:g} full"
+    elif blend >= _RS_UPPER_THRESH:
+        pts = _RS_UPPER_PTS
+        band = f"+{_RS_UPPER_THRESH:g}..+{_RS_FULL_THRESH:g} upper-partial"
+    elif blend >= _RS_HALF_THRESH:
+        pts = _RS_HALF_PTS
+        band = f"{_RS_HALF_THRESH:g}..+{_RS_UPPER_THRESH:g} in-line (half)"
+    else:
+        pts = 0.0
+        band = f"< {_RS_HALF_THRESH:g} underperforming"
+
+    arithmetic = (
+        f"rel = 0.5*rel_sector_ret_3m + 0.5*rel_sector_ret_6m "
+        f"(3m {_fmt(rel3)}, 6m {_fmt(rel6)}) = {_fmt(_clean(blend))} "
+        f"-> {band} -> {_fmt(_clean(pts))}/{_fmt(_RS_MAX)} "
+        f"[PROVISIONAL v1.2.0 -- bands unratified pending B9]")
+
+    return {
+        "name": "rel_strength_sector",
+        "points": _clean(pts),
+        "max": _RS_MAX,
+        "arithmetic": arithmetic,
+        "inputs": {"rel_sector_ret_3m": rel3, "rel_sector_ret_6m": rel6,
+                   "blend": _clean(blend)},
+        "evaluable": True,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # trend_claim (mechanical label)
 # --------------------------------------------------------------------------- #
 
@@ -642,12 +749,20 @@ def _clean(x):
     return round(xf, 4)
 
 
-def score(last, tech, ladder, divergence, justification) -> dict:
-    """Assemble the four subscores and the (possibly renormalized) 0-100 score.
+def score(last, tech, ladder, divergence, justification, benchmark=None) -> dict:
+    """Assemble the subscores and the (possibly renormalized) 0-100 score.
 
     A dimension whose ``evaluable`` is False (all its scored inputs null) is
     EXCLUDED from the max total and the score is rescaled to 0-100 over the
     remaining max, with ``renormalized: true`` recorded.
+
+    Track O4 / v1.2.0: the sector-relative RS factor (``score_rel_strength``) is a
+    NEW scored factor threaded via the trailing ``benchmark`` param. It JOINS the
+    present_max renormalization ONLY when the snapshot carries
+    ``rel_sector_ret_3m``/``_6m`` (the factor is evaluable). When ``benchmark`` is
+    None or lacks those fields, the factor is COMPLETELY OMITTED (not a zeroed row)
+    and the score is BYTE-FOR-BYTE identical to v1.1.0 -- the graceful-identity
+    contract, pinned in tests.
     """
     subs = [
         score_trend(last, tech),
@@ -655,6 +770,13 @@ def score(last, tech, ladder, divergence, justification) -> dict:
         score_structure(ladder, last),
         score_volume(last, tech),
     ]
+
+    # Track O4: append the sector-RS factor ONLY when it is evaluable (its benchmark
+    # legs are present). An absent factor is dropped entirely so the published
+    # subscores + max total are unchanged from v1.1.0 (graceful identity).
+    rs = score_rel_strength(benchmark)
+    if rs.get("evaluable"):
+        subs.append(rs)
 
     included = [s for s in subs if s.get("evaluable", True)]
     raw_max = sum(s["max"] for s in included)
@@ -717,10 +839,14 @@ def build_module(snapshot, rows, contracts, divergence, justification,
     price = snapshot.get("price", {}) if isinstance(snapshot, dict) else {}
     tech = snapshot.get("technicals", {}) if isinstance(snapshot, dict) else {}
     meta = snapshot.get("meta", {}) if isinstance(snapshot, dict) else {}
+    # Track O4: the snapshot's benchmark block carries the sector-relative RS legs
+    # when a sector series was fetched; None-safe (absent -> RS factor omitted).
+    benchmark = snapshot.get("benchmark", {}) if isinstance(snapshot, dict) else {}
     last = price.get("last")
 
     ladder = levels.build_ladder(snapshot, rows, contracts=contracts)
-    scored = score(last, tech, ladder, divergence, justification)
+    scored = score(last, tech, ladder, divergence, justification,
+                   benchmark=benchmark)
 
     doc = {
         "skill": SKILL_NAME,

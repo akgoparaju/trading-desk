@@ -125,6 +125,7 @@ For results that arrive in context: save the payload **VERBATIM** to `raw/<key>.
 2. `COMPANY_OVERVIEW` symbol=`<T>` → (`overview`)
 3. `TIME_SERIES_DAILY_ADJUSTED` symbol=`<T>`, outputsize=full → (`daily_adjusted`). NEVER use raw `TIME_SERIES_DAILY` — split-adjusted series is mandatory for multi-year stats.
 4. `TIME_SERIES_DAILY_ADJUSTED` symbol=SPY, outputsize=full → (`spy_daily_adjusted`)
+4b. **Sector benchmark (`sector_daily_adjusted`, OPTIONAL — Track O4).** After `overview` (call 2) is fetched, resolve the ticker's GICS-sector SPDR Select Sector ETF with `resolve_sector_etf(overview.Sector)` (in `scripts/build_snapshot.py` — uppercases/strips the `Sector` string; returns e.g. `XLK` for `TECHNOLOGY`, `XLC` for `COMMUNICATION SERVICES`, or **None** for an unknown/absent sector). **If it returns an ETF:** `TIME_SERIES_DAILY_ADJUSTED` symbol=`<ETF>`, outputsize=full → (`sector_daily_adjusted`). **If it returns None: SKIP this call** — the sector benchmark is a **disclosed absence** (the builder omits `sector_ret_*`/`rel_sector_ret_*` from the benchmark block and never fails). Never guess an ETF for an unrecognized sector. This series feeds the sector-relative RS factor (technical-v1.2.0).
 5. `INCOME_STATEMENT` symbol=`<T>` → (`income_statement`)
 6. `BALANCE_SHEET` symbol=`<T>` → (`balance_sheet`)
 7. `CASH_FLOW` symbol=`<T>` → (`cash_flow`)

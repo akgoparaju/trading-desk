@@ -65,7 +65,56 @@ COVERS = {
     "web_spot_check": ["price"],
     "short_interest": ["sentiment"],
     "web_fundamentals": ["fundamentals", "valuation"],
+    # OPTIONAL (Track O4): the ticker's GICS-sector SPDR Select Sector ETF daily
+    # series, for sector-relative RS. NOT in REQUIRED -- missing sector data must
+    # never fail a snapshot (disclosed absence: the sector benchmark drops out).
+    "sector_daily_adjusted": ["benchmark"],
 }
+
+# --------------------------------------------------------------------------- #
+# Track O4 -- GICS sector -> SPDR Select Sector ETF (for sector-relative RS).
+# --------------------------------------------------------------------------- #
+#
+# VERIFIED: AV COMPANY_OVERVIEW's ``Sector`` field is GICS-aligned (live bundles
+# returned "COMMUNICATION SERVICES", "TECHNOLOGY", "INDUSTRIALS"). This map is the
+# canonical GICS -> SPDR Select Sector correspondence, with the documented alias
+# rows (GICS renames / common vendor variants) folded in. It is intentionally
+# EXHAUSTIVE over the eleven Select-Sector SPDRs plus verified aliases; an
+# UNKNOWN sector (or None) resolves to None -- the sector benchmark is OMITTED
+# (disclosed absence), NEVER guessed. Keys are uppercased.
+SECTOR_ETF = {
+    "TECHNOLOGY": "XLK",
+    "INFORMATION TECHNOLOGY": "XLK",
+    "COMMUNICATION SERVICES": "XLC",
+    "CONSUMER DISCRETIONARY": "XLY",
+    "CONSUMER CYCLICAL": "XLY",
+    "CONSUMER STAPLES": "XLP",
+    "CONSUMER DEFENSIVE": "XLP",
+    "ENERGY": "XLE",
+    "FINANCIALS": "XLF",
+    "FINANCIAL": "XLF",
+    "FINANCE": "XLF",
+    "HEALTH CARE": "XLV",
+    "HEALTHCARE": "XLV",
+    "INDUSTRIALS": "XLI",
+    "MATERIALS": "XLB",
+    "BASIC MATERIALS": "XLB",
+    "REAL ESTATE": "XLRE",
+    "UTILITIES": "XLU",
+}
+
+
+def resolve_sector_etf(sector):
+    """Map an overview ``Sector`` string to its SPDR Select Sector ETF, or None.
+
+    Uppercases + strips the input. Returns the mapped ETF symbol, or None for an
+    unknown/None sector (the sector benchmark is then omitted -- a DISCLOSED
+    absence; this function NEVER guesses an ETF for an unrecognized sector).
+    """
+    if not sector or not isinstance(sector, str):
+        return None
+    return SECTOR_ETF.get(sector.strip().upper())
+
 
 # Trading-day windows.
 _W1M, _W3M, _W6M, _W12M = 21, 63, 126, 252
@@ -521,12 +570,22 @@ def build_technicals(rows, series_source=None, next_earnings_date=None,
     return block
 
 
-def build_benchmark(stock_rows, spy_rows):
-    """Benchmark block: SPY returns + beta/corr of stock vs SPY."""
+def build_benchmark(stock_rows, spy_rows, sector_rows=None, sector_etf=None):
+    """Benchmark block: SPY returns + beta/corr of stock vs SPY.
+
+    Track O4: when ``sector_rows`` is provided (the ticker's GICS-sector SPDR
+    ETF daily series), ALSO emit ``sector_etf``, ``sector_ret_{1m,3m,6m,12m}``
+    (via ``indicators.pct_return`` on the sector's adjusted-close series, the SAME
+    windows SPY uses), and ``rel_sector_ret_3m`` / ``rel_sector_ret_6m`` =
+    stock_ret_Nm - sector_ret_Nm (stock returns computed the same way SPY's are,
+    off ``stock_rows``). When ``sector_rows`` is None, NONE of these keys are
+    emitted -- the block is byte-identical to the pre-O4 benchmark (disclosed
+    absence: missing sector data drops the sector benchmark, never fails).
+    """
     spy_adj = [r["adjusted_close"] for r in spy_rows if r["adjusted_close"] is not None]
     stock_adj = [r["adjusted_close"] for r in stock_rows if r["adjusted_close"] is not None]
     bc = indicators.beta_corr(stock_adj, spy_adj)
-    return {
+    block = {
         "spy_ret_1m": indicators.pct_return(spy_adj, _W1M),
         "spy_ret_3m": indicators.pct_return(spy_adj, _W3M),
         "spy_ret_6m": indicators.pct_return(spy_adj, _W6M),
@@ -535,6 +594,28 @@ def build_benchmark(stock_rows, spy_rows):
         "corr": bc["corr"] if bc else None,
         "beta_n_days": bc["n_days"] if bc else None,
     }
+
+    if sector_rows is not None:
+        sector_adj = [r["adjusted_close"] for r in sector_rows
+                      if r["adjusted_close"] is not None]
+        sector_ret_3m = indicators.pct_return(sector_adj, _W3M)
+        sector_ret_6m = indicators.pct_return(sector_adj, _W6M)
+        stock_ret_3m = indicators.pct_return(stock_adj, _W3M)
+        stock_ret_6m = indicators.pct_return(stock_adj, _W6M)
+        block["sector_etf"] = sector_etf
+        block["sector_ret_1m"] = indicators.pct_return(sector_adj, _W1M)
+        block["sector_ret_3m"] = sector_ret_3m
+        block["sector_ret_6m"] = sector_ret_6m
+        block["sector_ret_12m"] = indicators.pct_return(sector_adj, _W12M)
+        # Relative RS: stock return minus sector return (None if either leg absent).
+        block["rel_sector_ret_3m"] = (
+            stock_ret_3m - sector_ret_3m
+            if stock_ret_3m is not None and sector_ret_3m is not None else None)
+        block["rel_sector_ret_6m"] = (
+            stock_ret_6m - sector_ret_6m
+            if stock_ret_6m is not None and sector_ret_6m is not None else None)
+
+    return block
 
 
 def _sum4(reports, key):
@@ -1593,6 +1674,9 @@ def build_snapshot(bundle, ticker):
     overview = load_key("overview")
     daily = load_daily_key("daily_adjusted")
     spy = load_daily_key("spy_daily_adjusted")
+    # Track O4 OPTIONAL: the GICS-sector SPDR ETF daily series (absent -> None ->
+    # the sector benchmark drops out; never a REQUIRED-file failure).
+    sector_daily = load_daily_key("sector_daily_adjusted")
 
     for name, obj in (("global_quote", quote), ("overview", overview),
                       ("daily_adjusted", daily), ("spy_daily_adjusted", spy)):
@@ -1610,6 +1694,21 @@ def build_snapshot(bundle, ticker):
         raise BuildError(f"daily series parse failure: {exc}")
     if not rows:
         raise BuildError("daily_adjusted parsed to zero rows")
+
+    # Track O4 OPTIONAL sector series: resolve the ETF from the overview Sector and
+    # parse the sector daily file if present. Absent/unresolved -> None (the sector
+    # benchmark drops out; a parse hiccup on this OPTIONAL series must not fail the
+    # whole build, so it degrades to None rather than raising).
+    sector_etf = resolve_sector_etf(
+        overview.get("Sector") if isinstance(overview, dict) else None)
+    sector_rows = None
+    if sector_daily is not None and sector_etf is not None:
+        try:
+            parsed_sector = parse_daily_rows(sector_daily)
+        except BuildError:
+            parsed_sector = None
+        if parsed_sector:
+            sector_rows = parsed_sector
 
     income = load_key("income_statement")
     balance = load_key("balance_sheet")
@@ -1652,7 +1751,8 @@ def build_snapshot(bundle, ticker):
     technicals = build_technicals(rows, series_source=series_source,
                                   next_earnings_date=next_earnings_date,
                                   earn_q=earn_q)
-    benchmark = build_benchmark(rows, spy_rows)
+    benchmark = build_benchmark(rows, spy_rows, sector_rows=sector_rows,
+                                sector_etf=sector_etf if sector_rows else None)
     fundamentals = build_fundamentals(income, balance, cashflow, earnings,
                                       estimates, overview, as_of_date)
     # Gap-fill from cited web sources ONLY where the statement path found nothing;
@@ -1702,9 +1802,14 @@ def build_snapshot(bundle, ticker):
     # web_fundamentals is a fallback-only source (absent in the normal AV path);
     # its presence/use is disclosed via fundamentals.web_transcribed_fields, so we
     # do NOT report its absence as a "missing" expected source (that would be noise
-    # on every standard-mode build).
+    # on every standard-mode build). sector_daily_adjusted (Track O4) is the same:
+    # an OPTIONAL source whose presence/absence is disclosed IN-BAND via the
+    # benchmark block's sector_etf / sector_ret_* keys (present only when a sector
+    # series was fetched AND the sector resolved). It is absent by design on any
+    # build without sector data, so listing it in meta.missing would be noise.
+    _MISSING_DISCLOSURE_EXCLUDED = ("web_fundamentals", "sector_daily_adjusted")
     optional_keys = [k for k in COVERS
-                     if k not in REQUIRED and k != "web_fundamentals"]
+                     if k not in REQUIRED and k not in _MISSING_DISCLOSURE_EXCLUDED]
     missing = [k for k in optional_keys if k not in present_keys]
 
     snapshot = {

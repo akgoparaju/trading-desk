@@ -227,6 +227,19 @@ class TestDepthAxis(unittest.TestCase):
         self.assertEqual(d["level"], "HIGH")
         self.assertEqual(d["why"], "regime-conditional depth")
 
+    def test_technical_120_depth_stays_high_discloses_sector_rs(self):
+        # Track O4: technical bumps to v1.2.0 (adds the PROVISIONAL sector-RS
+        # factor). The DEPTH TIER does NOT change (still HIGH -- promotion is a
+        # separate gated task); the why-tag DISCLOSES the new provisional factor.
+        d = C.compute_module(_tech_doc("1.2.0"), _snap())["depth"]
+        self.assertEqual(d["level"], "HIGH")
+        self.assertIn("sector", d["why"].lower())
+
+    def test_technical_120_overall_high_on_premium_fresh(self):
+        # Same end-to-end HIGH as 1.1.0: source HIGH + depth HIGH + staleness HIGH.
+        block = C.compute_module(_tech_doc("1.2.0"), _snap())
+        self.assertEqual(block["level"], "HIGH")
+
     def test_technical_110_overall_high_on_premium_fresh(self):
         # The OVERALL badge for technical 1.1.0 on a clean premium fresh-print
         # snapshot: source HIGH (AV premium, not web-capped) + depth HIGH
@@ -253,6 +266,10 @@ class TestDepthAxis(unittest.TestCase):
         self.assertEqual(C.DEPTH_TABLE["technical"]["1.1.0"][0], "HIGH")
         self.assertEqual(C.DEPTH_TABLE["technical"]["1.1.0"][1],
                          "regime-conditional depth")
+        # technical-v1.2.0 (Track O4): tier UNCHANGED (still HIGH); the why-tag
+        # discloses the new PROVISIONAL sector-RS factor.
+        self.assertEqual(C.DEPTH_TABLE["technical"]["1.2.0"][0], "HIGH")
+        self.assertIn("sector", C.DEPTH_TABLE["technical"]["1.2.0"][1].lower())
         self.assertEqual(C.DEPTH_TABLE["sentiment"]["1.0.0"][0], "MEDIUM")
         # sentiment-v1.1.0 is PROVISIONAL -> stays MEDIUM (explicit row).
         self.assertEqual(C.DEPTH_TABLE["sentiment"]["1.1.0"][0], "MEDIUM")
@@ -451,7 +468,8 @@ class TestWhyDigitFree(unittest.TestCase):
         docs = [_tech_doc(), _risk_doc(), _sent_doc(),
                 _fund_doc("compressed_snapshot_pass"),
                 _fund_doc("coverage_anchored_pass"),
-                _tech_doc("1.1.0"), _risk_doc("1.1.0"), _sent_doc("1.1.0")]
+                _tech_doc("1.1.0"), _risk_doc("1.1.0"), _sent_doc("1.1.0"),
+                _tech_doc("1.2.0")]
         modes = ["alpha_vantage", "av_free_degraded", "web_fallback"]
         latests = ["2026-07-20", "2026-07-17", None]
         for doc in docs:

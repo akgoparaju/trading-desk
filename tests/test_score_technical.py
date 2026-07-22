@@ -478,6 +478,133 @@ class TestVolumeExtension(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# Track O4 — sector-relative RS factor (score_rel_strength), technical-v1.2.0
+# --------------------------------------------------------------------------- #
+
+class TestRelStrength(unittest.TestCase):
+    """O4.3: score_rel_strength blends rel_sector_ret_3m/6m and scores a MONOTONE
+    band (PROVISIONAL, unratified pending B9). Factor absent when both legs null."""
+
+    def test_rel_strength_bands(self):
+        # Full mark at rel >= +0.10.
+        self.assertEqual(
+            st.score_rel_strength({"rel_sector_ret_3m": 0.15,
+                                   "rel_sector_ret_6m": 0.15})["points"],
+            st._RS_MAX)
+        # Half at rel == 0.0 (strictly between 0 and _RS_MAX).
+        mid = st.score_rel_strength({"rel_sector_ret_3m": 0.0,
+                                     "rel_sector_ret_6m": 0.0})["points"]
+        self.assertTrue(0 < mid < st._RS_MAX)
+        # Zero when clearly underperforming (rel < -0.03).
+        self.assertEqual(
+            st.score_rel_strength({"rel_sector_ret_3m": -0.20,
+                                   "rel_sector_ret_6m": -0.20})["points"],
+            0)
+
+    def test_rel_strength_monotone_bands(self):
+        # Points are non-increasing as rel falls across the four bands.
+        full = st.score_rel_strength({"rel_sector_ret_3m": 0.12,
+                                      "rel_sector_ret_6m": 0.12})["points"]
+        upper = st.score_rel_strength({"rel_sector_ret_3m": 0.05,
+                                       "rel_sector_ret_6m": 0.05})["points"]
+        half = st.score_rel_strength({"rel_sector_ret_3m": 0.0,
+                                      "rel_sector_ret_6m": 0.0})["points"]
+        low = st.score_rel_strength({"rel_sector_ret_3m": -0.10,
+                                     "rel_sector_ret_6m": -0.10})["points"]
+        self.assertGreaterEqual(full, upper)
+        self.assertGreaterEqual(upper, half)
+        self.assertGreaterEqual(half, low)
+        # every band value in [0, _RS_MAX]
+        for v in (full, upper, half, low):
+            self.assertGreaterEqual(v, 0)
+            self.assertLessEqual(v, st._RS_MAX)
+
+    def test_rel_strength_blends_available_leg(self):
+        # Only 3m present -> blend uses the present leg; only 6m present likewise.
+        only3 = st.score_rel_strength({"rel_sector_ret_3m": 0.15})
+        self.assertEqual(only3["points"], st._RS_MAX)
+        self.assertTrue(only3["evaluable"])
+        only6 = st.score_rel_strength({"rel_sector_ret_6m": 0.15})
+        self.assertEqual(only6["points"], st._RS_MAX)
+        self.assertTrue(only6["evaluable"])
+
+    def test_rel_strength_absent_when_both_legs_null(self):
+        # Both legs absent -> factor NOT evaluable (drops out of present_max).
+        sub = st.score_rel_strength({})
+        self.assertFalse(sub["evaluable"])
+        sub2 = st.score_rel_strength(None)
+        self.assertFalse(sub2["evaluable"])
+
+    def test_rel_strength_provisional_stamp(self):
+        sub = st.score_rel_strength({"rel_sector_ret_3m": 0.15,
+                                     "rel_sector_ret_6m": 0.15})
+        self.assertIn("PROVISIONAL", sub["arithmetic"])
+
+    def test_rel_strength_factor_shape(self):
+        sub = st.score_rel_strength({"rel_sector_ret_3m": 0.15,
+                                     "rel_sector_ret_6m": 0.15})
+        for key in ("name", "points", "max", "arithmetic", "inputs", "evaluable"):
+            self.assertIn(key, sub)
+        self.assertEqual(sub["max"], st._RS_MAX)
+
+
+class TestTechnicalGracefulIdentity(unittest.TestCase):
+    """O4.3 graceful-identity: with benchmark=None (or no benchmark arg, or a
+    benchmark lacking the rel_sector fields), the technical score is byte-for-byte
+    identical to the pre-O4 (v1.1.0) score -- the sector-RS factor drops out of the
+    present_max renormalization entirely."""
+
+    def _fixture(self):
+        tech = _tech()
+        ladder = _ladder([(97.0, "ma50"), (110.0, "swing_high")])
+        return tech, ladder
+
+    def test_score_identical_none_vs_omitted(self):
+        tech, ladder = self._fixture()
+        omitted = st.score(last=110.0, tech=tech, ladder=ladder,
+                           divergence="none", justification=None)
+        explicit_none = st.score(last=110.0, tech=tech, ladder=ladder,
+                                 divergence="none", justification=None,
+                                 benchmark=None)
+        self.assertEqual(json.dumps(omitted, sort_keys=True),
+                         json.dumps(explicit_none, sort_keys=True))
+
+    def test_score_identical_benchmark_without_rel_fields(self):
+        # A benchmark block that has SPY returns but NO rel_sector fields -> the
+        # RS factor stays absent -> identical to the no-benchmark score.
+        tech, ladder = self._fixture()
+        baseline = st.score(last=110.0, tech=tech, ladder=ladder,
+                            divergence="none", justification=None)
+        spy_only = st.score(last=110.0, tech=tech, ladder=ladder,
+                            divergence="none", justification=None,
+                            benchmark={"spy_ret_3m": 0.05, "spy_ret_12m": 0.10})
+        self.assertEqual(json.dumps(baseline, sort_keys=True),
+                         json.dumps(spy_only, sort_keys=True))
+        # sanity: max total still 100 (RS factor NOT included).
+        self.assertEqual(sum(s["max"] for s in baseline["subscores"]), 100)
+        self.assertFalse(baseline["renormalized"])
+
+    def test_score_with_rel_fields_adds_factor(self):
+        # When rel_sector fields ARE present, the RS factor is included: the score
+        # differs (a fifth scored factor participates) and present_max grows by
+        # _RS_MAX.
+        tech, ladder = self._fixture()
+        baseline = st.score(last=110.0, tech=tech, ladder=ladder,
+                            divergence="none", justification=None)
+        with_rs = st.score(last=110.0, tech=tech, ladder=ladder,
+                          divergence="none", justification=None,
+                          benchmark={"rel_sector_ret_3m": 0.15,
+                                     "rel_sector_ret_6m": 0.15})
+        # the RS factor appears as a fifth subscore and lifts the denominator.
+        self.assertEqual(len(with_rs["subscores"]), 5)
+        self.assertEqual(sum(s["max"] for s in with_rs["subscores"]),
+                         100 + st._RS_MAX)
+        # a full-mark RS on top of a strong tech read is still <= 100.
+        self.assertLessEqual(with_rs["score"], 100)
+        self.assertGreaterEqual(with_rs["score"], 0)
+
+
+# --------------------------------------------------------------------------- #
 # trend_claim (mechanical)
 # --------------------------------------------------------------------------- #
 
@@ -564,7 +691,7 @@ class TestCLI(unittest.TestCase):
         with open(out) as fh:
             doc = json.load(fh)
         self.assertEqual(doc["skill"], "technical-analysis")
-        self.assertEqual(doc["rubric_version"], "1.1.0")
+        self.assertEqual(doc["rubric_version"], "1.2.0")
         self.assertIn("PROVISIONAL", doc["module_note"])
         self.assertEqual(doc["ticker"], "MU")
         self.assertIn("as_of", doc)
@@ -648,13 +775,21 @@ class TestInputFields(unittest.TestCase):
     def test_input_fields_exact(self):
         # v1.1.0 adds the two SCORED volume-quality fields (ad_line_slope,
         # upvol_ratio). adx14 + stage are GUARDS, not here (see GUARD_FIELDS).
+        # v1.2.0 (Track O4) adds the two SCORED sector-relative RS fields.
         self.assertEqual(st.INPUT_FIELDS, {
             "technicals.ma50", "technicals.ma200",
             "technicals.ma50_slope_20d", "technicals.ma200_slope_20d",
             "technicals.rsi14", "technicals.macd", "technicals.macd_signal",
             "technicals.vol_20d_vs_90d", "technicals.ret_15d",
             "technicals.ad_line_slope", "technicals.upvol_ratio",
+            "benchmark.rel_sector_ret_3m", "benchmark.rel_sector_ret_6m",
         })
+
+    def test_rel_sector_fields_in_input_fields(self):
+        # Track O4: the scored sector-RS inputs are declared here (and ONLY here --
+        # test_single_mapping asserts they are not in score_sentiment.INPUT_FIELDS).
+        self.assertIn("benchmark.rel_sector_ret_3m", st.INPUT_FIELDS)
+        self.assertIn("benchmark.rel_sector_ret_6m", st.INPUT_FIELDS)
 
     def test_guard_fields_exact(self):
         # adx14 + stage MODULATE momentum but earn no points -> guard fields.
@@ -683,13 +818,18 @@ class TestInputFields(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 class TestRubricAndNote(unittest.TestCase):
-    def test_rubric_version_is_110(self):
-        self.assertEqual(st.RUBRIC_VERSION, "1.1.0")
+    def test_rubric_version_is_120(self):
+        # Track O4 bumps technical to v1.2.0 (adds the PROVISIONAL sector-RS factor).
+        self.assertEqual(st.RUBRIC_VERSION, "1.2.0")
 
     def test_module_note_is_provisional(self):
         self.assertIn("PROVISIONAL", st.MODULE_NOTE)
         self.assertIn("B9", st.MODULE_NOTE)
         self.assertIn("falsifier", st.MODULE_NOTE)
+
+    def test_module_note_discloses_sector_rs(self):
+        # The note must disclose the new v1.2.0 sector-RS factor as provisional.
+        self.assertIn("sector", st.MODULE_NOTE.lower())
 
 
 if __name__ == "__main__":

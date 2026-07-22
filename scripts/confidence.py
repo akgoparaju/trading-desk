@@ -140,6 +140,16 @@ DEPTH_TABLE = {
         #   falsifier, not by suppressing the depth badge.
         "1.0.0": (MEDIUM, "pre-regime"),
         "1.1.0": (HIGH, "regime-conditional depth"),
+        # v1.2.0 (Track O4): adds a PROVISIONAL sector-relative RS factor. The
+        # DEPTH TIER is UNCHANGED from 1.1.0 -- still HIGH (the regime-depth pass
+        # already landed; adding one more provisional factor does not lower the
+        # depth badge, and promoting anything is a SEPARATE gated task). This
+        # explicit row exists only to DISCLOSE the new provisional factor in the
+        # why-tag (it overrides the generic "rubric past 1.0.0 -> HIGH" fallthrough
+        # so the disclosure travels). The sector-RS bands are unratified pending B9;
+        # that provisional status travels in the module_note + SKILL falsifier, not
+        # by suppressing this depth badge (same reasoning as the 1.1.0 row).
+        "1.2.0": (HIGH, "regime-conditional depth; sector-RS provisional"),
     },
     "sentiment": {
         # keyed on rubric_version.
