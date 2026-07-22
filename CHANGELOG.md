@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased — 2026-07-22 · O14 adjusted-financials bridge + O17 valuation reconciliation
+## 0.16.0 — 2026-07-22 · O14 + O17 FSI-transcription (adjusted financials + valuation reconciliation)
+
+The FSI initiation already computes the clean EPS + driver scenarios; this release transcribes them into the
+scored pipeline (mirroring `valuation_anchors.json`) instead of ignoring them. **O14** — `adjusted_financials.json`
+→ `score_fundamental --adjusted` normalizes scored ROE + forward-P/E onto the FSI's clean figures (GAAP-vs-core
+disclosed). **O17** — `scenario_drivers.json` + `valuation_reconcile.py` → driver-scenario disclosure, a reverse-DCF
+(GOOG: $351 implies ~8.1% perpetual growth vs 3% base), and a DCF-vs-comps disagreement state that GOVERNS the
+composite (UNRESOLVED_CONFLICT caps variant→some + prevents an A grade). Both artifacts OPTIONAL (graceful floor).
+Authoring contract wired into `full-trade-analysis`. Suite **1816 pass**.
 
 ### O17 — driver scenarios + reverse-DCF + disagreement-state (augment; govern the conflict)
 
