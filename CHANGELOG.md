@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — 2026-07-21 · Outstanding-tasks O5 / O11 / O4
+
+Three engineering items from the post-0.14.0 outstanding-tasks docket, each shipped TDD-first and
+validated on a real GOOG end-to-end (before/after read, not just green tests). Full suite **1555 pass**.
+
+- **O5 — liquidity-aware options strike selection.** Structures were declining on 0-open-interest
+  half-dollar strikes (GOOG 332.5, OI 0) between deeply-liquid round strikes, before the IV-crush
+  gate was reached. Three pickers made liquidity-aware: `pick_by_delta_liquid` (snap to nearest liquid
+  strike; debit verticals), `pick_short_by_delta` (strike-snap fallback), and the credit-spread wings
+  `pick_long_put_below`/`pick_long_call_above` (nearest **liquid** listed strike). The wings were the
+  real GOOG blocker. **Crush simulation exercised end-to-end for the first time**: GOOG bull_put_spread
+  now assembles on 335/330 and gates on `crush_ev=0.1344`, `survives_crush=True`.
+- **O11 — deterministic brief transclusion (efficiency-audit T3).** Module briefs carry
+  `BRIEF`/`SIGNAL` markers; `render_report` transcludes those spans verbatim into the report slots
+  instead of the LLM re-condensing them. Thesis slot reads from `brief_composite.md`. Missing
+  brief/marker → graceful fallback to the LLM slot. Cap enforcement moves upstream to the module skills.
+- **O4 — scored sector-relative RS (technical-v1.2.0, PROVISIONAL).** New 10-pt technical sub-factor:
+  relative strength vs the ticker's GICS-sector SPDR ETF (canonical `overview.Sector`→SPDR map;
+  unknown sector omits the benchmark, never guesses). `benchmark.sector_ret_*`/`rel_sector_ret_*`
+  fields; the factor joins the existing present_max renormalization only when sector data is present
+  (byte-identical to v1.1.0 when absent). Pre-registered falsifier for the B9 set. E2E: GOOG +10.7%
+  vs XLC over 3m → RS 10/10 → technical 72→74.55.
+
 ## 0.14.0 — 2026-07-21 · Analysis-depth waves (R1–R5, B29) + confidence layer + efficiency hardening
 
 The quality-review roadmap, shipped. Every evidence module gained its institutional-depth pass and a
