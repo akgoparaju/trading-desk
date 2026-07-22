@@ -1,6 +1,91 @@
 # Changelog
 
-## Unreleased — 2026-07-22 · O14 adjusted-financials bridge
+## Unreleased — 2026-07-22 · O14 adjusted-financials bridge + O17 valuation reconciliation
+
+### O17 — driver scenarios + reverse-DCF + disagreement-state (augment; govern the conflict)
+
+New `scripts/valuation_reconcile.py` classifies the DCF-vs-comps disagreement into a
+state machine and solves the reverse-DCF implied terminal growth, `score_composite.py`
+GOVERNS an `UNRESOLVED_CONFLICT` (variant cap + A→B grade cap; SCORE never touched),
+`coverage_qc.py` gains an optional coherence check for `scenario_drivers.json`, and the
+report renders a Valuation Reconciliation disclosure block. The price fan / EV / trade
+plan are UNCHANGED (augment, not regenerate). Every number is transcribed (cited) or
+computed from transcribed inputs; all effects degrade gracefully when an artifact is
+absent.
+
+- **`scripts/valuation_reconcile.py` (NEW, pure, stdlib-only).**
+  - `disagreement(fundamental)` → `|dcf_base − comps_mid|/((dcf_base+comps_mid)/2)`
+    from the module_fundamental valuation `inputs.anchors` (`comps_mid = (low+high)/2`,
+    average denominator — the SAME authoritative formula
+    `score_fundamental._dcf_band_position` computes and discloses in the arithmetic);
+    None if anchors absent.
+  - `disagreement_state(fundamental)` → `CONSISTENT` (≤0.25) · `UNRESOLVED_CONFLICT`
+    (>0.25) · `MODEL_INVALID` (a dcf/comps anchor ≤0) · None (no anchors). The 0.25
+    edge is kept in lockstep (asserted in tests) with
+    `decision_contract._VALUATION_DISAGREEMENT_TOL`.
+  - `reverse_dcf(dcf_reverse_inputs, last)` → closed-form solve of the implied
+    terminal growth that makes the DCF equal `last` (holding FCF/WACC fixed):
+    `g* = (needed·wacc − 1)/(1 + needed)`. Returns `implied_terminal_g=None` + note
+    "market prices FCF above the model path" when `needed ≤ 0` or `g* ≥ wacc`; None
+    entirely when an input is missing.
+  - CLI `--bundle` → reads module_fundamental + `coverage/scenario_drivers.json`
+    (bundle sibling) + snapshot `price.last` → writes `module_valuation_reconcile.json`.
+    Absent scenario_drivers → still emits `disagreement_state`, but `reverse_dcf=None`
+    and `scenarios=None`.
+
+- **`scripts/score_composite.py` — GOVERN.** `import valuation_reconcile`; derive the
+  state from the already-loaded fundamental module. On `UNRESOLVED_CONFLICT`:
+  `score_thesis_conviction` caps a STRONG variant to the `some` tier (20→12,
+  disclosed in the arithmetic string); `grade_for_governed` caps an A grade to B (the
+  SCORE is unchanged; grade + action reflect the cap); the composite doc records
+  `valuation_state` + a `valuation_govern` block + appends the `composite-o17-v1.0.0`
+  PROVISIONAL note (B9 falsifier). CONSISTENT / None / MODEL_INVALID → byte-identical
+  to today (no new fields). The govern flows through `build_sensitivity` per profile.
+
+- **`scripts/coverage_qc.py` — `check_scenario_drivers` (O17).** Optional check
+  (mirrors `check_adjusted_financials`): SKIP when absent; validates bear/base/bull
+  `eps_fy28`+`fcf_fy28_m` numeric (bear FCF may be negative), `dcf_reverse_inputs`
+  numeric, `citations` non-empty. NOT in `_REQUIRED_ARTIFACTS`; wired as the 10th
+  check.
+
+- **`scripts/render_report.py` — Valuation Reconciliation block (Page 3).**
+  `load_bundle` also loads the optional `module_valuation_reconcile.json` (under a
+  `module_` key so its numeric leaves auto-whitelist for number_provenance).
+  `build_valuation_reconciliation` renders the disagreement state, a driver-scenario
+  table (EPS+FCF FY28), and the reverse-DCF line ("$last implies ~8.1% perpetual
+  growth vs 3.0% base"). Absent module → block omitted. number_provenance stays PASS.
+
+- **GOOG validation (E2E):** `module_valuation_reconcile.json` →
+  `disagreement_state=UNRESOLVED_CONFLICT` (disagreement 0.8601 vs edge 0.25,
+  matching module_fundamental's disclosed valuation arithmetic),
+  `reverse_dcf.implied_terminal_g=0.0807` vs base 0.03. Re-running `score_composite`
+  on the bundle: score 65.4294 / grade B UNCHANGED, `valuation_state=UNRESOLVED_CONFLICT`
+  recorded, `variant_capped=false` (variant already `some`), `grade_capped_to_b=false`
+  (score < 80) — score-NEUTRAL; the value is the DISCLOSURE. `coverage_qc` on the GOOG
+  coverage dir: all 10 checks PASS. report_qc: number_provenance PASS with the block.
+  A synthetic fixture confirms the govern BITES: variant strong + UNRESOLVED → capped
+  to `some` (12); score ≥ 80 + UNRESOLVED → grade B.
+
+- **Tests:** `tests/test_valuation_reconcile.py` (27 tests: state table, reverse-DCF
+  incl. no-finite paths, build assembly, CLI), `tests/test_score_composite.py` (O17
+  govern classes: variant cap, grade cap, build_module bite, GOOG score-neutral),
+  `tests/test_coverage_qc.py` (`TestScenarioDriversCheck`, incl. real GOOG),
+  `tests/test_report_renderer.py` (`TestO17ReconciliationBlock`: present/omitted/
+  provenance/no-finite). Full suite: 1816 passed, 2 skipped (baseline 1753+2).
+
+- **Files changed (O17):**
+  - `scripts/valuation_reconcile.py` — NEW module (disagreement/state/reverse_dcf/CLI)
+  - `scripts/score_composite.py` — import + `_O17_*` consts, `score_thesis_conviction`
+    (+valuation_state variant cap), `grade_for_governed` (NEW), `build_sensitivity`
+    (+valuation_state), `build_module` (state derive + govern + disclosure)
+  - `scripts/coverage_qc.py` — `check_scenario_drivers`, `run_coverage_qc` (+1 check)
+  - `scripts/render_report.py` — `_OPTIONAL_MODULES`, `load_bundle` (+optional module),
+    `build_valuation_reconciliation` + `_dig_price_last`, `build_page3` (+block)
+  - `tests/test_valuation_reconcile.py` (NEW), `tests/test_score_composite.py` (+O17),
+    `tests/test_coverage_qc.py` (+`TestScenarioDriversCheck`),
+    `tests/test_report_renderer.py` (+`TestO17ReconciliationBlock`)
+
+### O14 — adjusted-financials bridge (feed the scores)
 
 New optional `--adjusted <adjusted_financials.json>` flag in `score_fundamental.py`
 threads FSI-transcribed core EPS and core ROE into the two affected score components,

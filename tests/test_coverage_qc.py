@@ -697,5 +697,154 @@ class TestAdjustedFinancialsCheck(unittest.TestCase):
         self.assertIs(result["passed"], True, result["detail"])
 
 
+# --------------------------------------------------------------------------- #
+# O17 — check_scenario_drivers (optional; SKIP when absent)
+# --------------------------------------------------------------------------- #
+
+def _valid_scenario_drivers():
+    return {
+        "scenarios": {
+            "bear": {"eps_fy28": 10.73, "fcf_fy28_m": -313,
+                     "rev_growth_path": [0.115, 0.090, 0.070], "op_margin": 0.290},
+            "base": {"eps_fy28": 14.16, "fcf_fy28_m": 41794,
+                     "rev_growth_path": [0.155, 0.135, 0.120], "op_margin": 0.330},
+            "bull": {"eps_fy28": 17.18, "fcf_fy28_m": 80734,
+                     "rev_growth_path": [0.185, 0.170, 0.150], "op_margin": 0.360},
+        },
+        "dcf_reverse_inputs": {
+            "pv_explicit_fcf_m": 312850, "pv_terminal_base_m": 1270900,
+            "terminal_g_base": 0.03, "wacc": 0.1066, "net_cash_m": 49339,
+            "diluted_shares_m": 12238,
+        },
+        "as_of": "2026-07-21",
+        "citations": {"scenarios": "coverage/model.md §scenarios_FY2028E"},
+    }
+
+
+def _write_scenario_drivers(cov_dir, obj):
+    path = os.path.join(cov_dir, "scenario_drivers.json")
+    with open(path, "w") as fh:
+        if isinstance(obj, str):
+            fh.write(obj)
+        else:
+            json.dump(obj, fh)
+    return path
+
+
+class TestScenarioDriversCheck(unittest.TestCase):
+    """check_scenario_drivers: absent -> SKIP; valid -> PASS; malformed -> FAIL."""
+
+    def test_absent_file_returns_skip(self):
+        with tempfile.TemporaryDirectory() as td:
+            result = cq.check_scenario_drivers(td)
+            self.assertIsNone(result["passed"],
+                              "absent file should be SKIP (passed=None)")
+            self.assertIn("absent", result["detail"].lower())
+
+    def test_valid_scenario_drivers_passes(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_scenario_drivers(td, _valid_scenario_drivers())
+            result = cq.check_scenario_drivers(td)
+            self.assertIs(result["passed"], True, result["detail"])
+
+    def test_negative_bear_fcf_still_passes(self):
+        # A bear FCF may legitimately be NEGATIVE — no positivity check on it.
+        with tempfile.TemporaryDirectory() as td:
+            sd = _valid_scenario_drivers()
+            sd["scenarios"]["bear"]["fcf_fy28_m"] = -5000
+            _write_scenario_drivers(td, sd)
+            result = cq.check_scenario_drivers(td)
+            self.assertIs(result["passed"], True, result["detail"])
+
+    def test_missing_scenario_tier_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            sd = _valid_scenario_drivers()
+            del sd["scenarios"]["bull"]
+            _write_scenario_drivers(td, sd)
+            result = cq.check_scenario_drivers(td)
+            self.assertIs(result["passed"], False)
+            self.assertIn("bull", result["detail"])
+
+    def test_nonnumeric_eps_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            sd = _valid_scenario_drivers()
+            sd["scenarios"]["base"]["eps_fy28"] = "n/a"
+            _write_scenario_drivers(td, sd)
+            result = cq.check_scenario_drivers(td)
+            self.assertIs(result["passed"], False)
+            self.assertIn("eps_fy28", result["detail"])
+
+    def test_missing_dcf_reverse_inputs_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            sd = _valid_scenario_drivers()
+            del sd["dcf_reverse_inputs"]
+            _write_scenario_drivers(td, sd)
+            result = cq.check_scenario_drivers(td)
+            self.assertIs(result["passed"], False)
+            self.assertIn("dcf_reverse_inputs", result["detail"])
+
+    def test_nonnumeric_dcf_reverse_input_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            sd = _valid_scenario_drivers()
+            sd["dcf_reverse_inputs"]["wacc"] = "10.66%"
+            _write_scenario_drivers(td, sd)
+            result = cq.check_scenario_drivers(td)
+            self.assertIs(result["passed"], False)
+            self.assertIn("wacc", result["detail"])
+
+    def test_empty_citations_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            sd = {**_valid_scenario_drivers(), "citations": {}}
+            _write_scenario_drivers(td, sd)
+            result = cq.check_scenario_drivers(td)
+            self.assertIs(result["passed"], False)
+            self.assertIn("citations", result["detail"])
+
+    def test_bad_json_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_scenario_drivers(td, "{not json")
+            result = cq.check_scenario_drivers(td)
+            self.assertIs(result["passed"], False)
+            self.assertIn("parse", result["detail"])
+
+    def test_absent_does_not_affect_overall_pass(self):
+        with tempfile.TemporaryDirectory() as td:
+            cov = _write_coverage(td)  # no scenario_drivers.json
+            results = cq.run_coverage_qc(cov, mode="full")
+            failed = [r for r in results if r["passed"] is False]
+            self.assertEqual(failed, [], f"unexpected failures: {failed}")
+            by_name = {r["check"]: r for r in results}
+            self.assertIn("scenario_drivers", by_name)
+            self.assertIsNone(by_name["scenario_drivers"]["passed"])
+
+    def test_present_valid_passes_alongside_required_checks(self):
+        with tempfile.TemporaryDirectory() as td:
+            cov = _write_coverage(td)
+            _write_scenario_drivers(cov, _valid_scenario_drivers())
+            results = cq.run_coverage_qc(cov, mode="full")
+            failed = [r for r in results if r["passed"] is False]
+            self.assertEqual(failed, [], f"unexpected failures: {failed}")
+            by_name = {r["check"]: r for r in results}
+            self.assertIs(by_name["scenario_drivers"]["passed"], True)
+
+    def test_present_malformed_fails_overall(self):
+        with tempfile.TemporaryDirectory() as td:
+            cov = _write_coverage(td)
+            sd = _valid_scenario_drivers()
+            del sd["scenarios"]["bear"]
+            _write_scenario_drivers(cov, sd)
+            results = cq.run_coverage_qc(cov, mode="full")
+            by_name = {r["check"]: r for r in results}
+            self.assertIs(by_name["scenario_drivers"]["passed"], False)
+
+    def test_goog_real_coverage_passes(self):
+        goog_cov = (
+            "/Users/ankugo/dev/jutsu-trading-desk/trading_desk_GOOG/coverage")
+        if not os.path.isdir(goog_cov):
+            self.skipTest("GOOG coverage dir not accessible")
+        result = cq.check_scenario_drivers(goog_cov)
+        self.assertIs(result["passed"], True, result["detail"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -109,9 +109,11 @@ def _valuation_conflict(fundamental):
 
     Detection, in preference order (spec G4 rule):
       1. RECOMPUTE from the subscore ``inputs.anchors`` — disagreement =
-         |dcf_base - comps_mid| / comps_mid where comps_mid = (comps_low +
-         comps_high) / 2; conflict when disagreement > 0.25 (the SAME edge
-         score_fundamental widens on). This is the authoritative path.
+         |dcf_base - comps_mid| / ((dcf_base + comps_mid) / 2) where comps_mid =
+         (comps_low + comps_high) / 2; conflict when disagreement > 0.25. This is
+         the SAME, authoritative formula score_fundamental._dcf_band_position
+         computes (and valuation_reconcile.disagreement recomputes) — one
+         disagreement formula, one 0.25 edge, three consumers. Authoritative path.
       2. FALL BACK to scanning the subscore ``arithmetic`` for "WIDEN" (the token
          score_fundamental emits when it widened the band).
       3. If neither the anchors NOR the arithmetic are available -> None (omit the
@@ -131,8 +133,9 @@ def _valuation_conflict(fundamental):
                 and isinstance(comps_low, (int, float))
                 and isinstance(comps_high, (int, float))):
             comps_mid = (comps_low + comps_high) / 2.0
-            if comps_mid != 0:
-                disagreement = abs(dcf_base - comps_mid) / abs(comps_mid)
+            denom = (dcf_base + comps_mid) / 2.0
+            if denom != 0:
+                disagreement = abs(dcf_base - comps_mid) / abs(denom)
                 return disagreement > _VALUATION_DISAGREEMENT_TOL
 
     # (2) Fallback: the module already recorded a WIDEN in its arithmetic string.

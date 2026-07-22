@@ -146,12 +146,25 @@ def _load_json(path):
         return None
 
 
+# Optional module JSONs (not required for a FULL report; absent -> block omitted).
+# Loaded into the docs dict under a ``module_`` key so number_provenance auto-
+# whitelists their numeric leaves (build_allowed_set scans every ``module_*`` doc).
+_OPTIONAL_MODULES = [
+    "module_valuation_reconcile.json",  # O17 disagreement state + reverse-DCF
+]
+
+
 def load_bundle(bundle):
     """Load snapshot + all present module JSONs. Returns a dict of parsed docs
-    (missing modules map to None). ``snapshot`` may be None."""
+    (missing modules map to None). ``snapshot`` may be None.
+
+    The optional O17 ``module_valuation_reconcile.json`` is loaded too (absent ->
+    None -> the reconciliation block is omitted). It carries a ``module_`` key so
+    its numeric leaves join the number_provenance allowed set automatically.
+    """
     snap_path = _find_snapshot(bundle)
     out = {"snapshot": _load_json(snap_path) if snap_path else None}
-    for name in _REQUIRED_MODULES:
+    for name in _REQUIRED_MODULES + _OPTIONAL_MODULES:
         key = name[:-5]  # strip ".json"
         out[key] = _load_json(os.path.join(bundle, name))
     return out
@@ -778,6 +791,71 @@ def build_scenario_ev(composite):
     return "\n".join(["### Scenario & Expected Value", "", tbl, "", ev_line])
 
 
+def build_valuation_reconciliation(reconcile, snapshot):
+    """O17 disclosure block: driver scenarios + reverse-DCF + disagreement state.
+
+    ``reconcile`` is the parsed module_valuation_reconcile.json (or None -> the
+    caller omits the block). Every number rendered is a reconcile / snapshot field,
+    so number_provenance stays PASS. This is a DISCLOSURE — it does NOT restate a
+    price target; the bull/base/bear fan on the Scenario & EV table is unchanged.
+    """
+    if not isinstance(reconcile, dict):
+        return None
+
+    parts = ["### Valuation Reconciliation", ""]
+
+    state = reconcile.get("disagreement_state")
+    disagree = reconcile.get("disagreement")
+    edge = reconcile.get("disagreement_edge")
+    state_line = (f"**Disagreement state**: *{state}* "
+                  f"(DCF-vs-comps split {_fmt(disagree)} vs edge {_fmt(edge)}).")
+    parts.append(state_line)
+
+    # Driver scenarios table (bear/base/bull EPS + FCF), when transcribed.
+    scenarios = reconcile.get("scenarios")
+    if isinstance(scenarios, dict):
+        rows = []
+        for name in ("bear", "base", "bull"):
+            sc = scenarios.get(name)
+            if not isinstance(sc, dict):
+                continue
+            rows.append([name, _fmt(sc.get("eps_fy28")),
+                         _fmt(sc.get("fcf_fy28_m"))])
+        if rows:
+            parts.append("")
+            parts.append(_table(["Scenario", "EPS FY28", "FCF FY28 ($m)"], rows))
+
+    # Reverse-DCF line: what perpetual growth the current price implies.
+    reverse = reconcile.get("reverse_dcf")
+    last = _dig_price_last(snapshot)
+    if isinstance(reverse, dict):
+        implied = reverse.get("implied_terminal_g")
+        g_base = reverse.get("g_base")
+        if implied is not None:
+            rline = (f"**Reverse-DCF**: the {_fmt(last)} price implies "
+                     f"~{_pct(implied)} perpetual FCF growth vs the model's "
+                     f"{_pct(g_base)} base (holding FCF + WACC fixed) — a "
+                     f"DISCLOSURE, not a new price target.")
+        else:
+            note = reverse.get("note") or "no finite implied growth"
+            rline = (f"**Reverse-DCF**: no finite implied growth vs the "
+                     f"{_pct(g_base)} base — {note}.")
+        parts.append("")
+        parts.append(rline)
+
+    return "\n".join(parts)
+
+
+def _dig_price_last(snapshot):
+    """snapshot.price.last, or None."""
+    if not isinstance(snapshot, dict):
+        return None
+    price = snapshot.get("price")
+    if not isinstance(price, dict):
+        return None
+    return price.get("last")
+
+
 def build_options_expression(options, tradeplan):
     vd = options.get("vol_dashboard", {}) or {}
     verdict = vd.get("verdict", "unknown")
@@ -953,6 +1031,14 @@ def build_page3(snapshot, technical, risk, composite, options, tradeplan, module
         build_catalyst_calendar(snapshot),
         "",
         build_scenario_ev(composite),
+    ]
+    # O17: valuation reconciliation (driver scenarios + reverse-DCF + state). Only
+    # when the optional module_valuation_reconcile.json is present; else omitted.
+    reconcile_block = build_valuation_reconciliation(
+        modules.get("module_valuation_reconcile"), snapshot)
+    if reconcile_block:
+        parts += ["", reconcile_block]
+    parts += [
         "",
         build_options_expression(options, tradeplan),
         "",

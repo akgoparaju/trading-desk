@@ -561,6 +561,65 @@ def check_adjusted_financials(coverage_dir):
                    "numeric+positive, one_time_items and citations present")
 
 
+def check_scenario_drivers(coverage_dir):
+    """Optional coherence check for scenario_drivers.json (O17).
+
+    Returns SKIP (passed=None) when the file is absent — not a failure.
+    When present: parses; ``scenarios`` carries bear/base/bull, each with numeric
+    ``eps_fy28`` and ``fcf_fy28_m`` (a bear FCF may legitimately be NEGATIVE, so no
+    positivity check on those); ``dcf_reverse_inputs`` is present with every value
+    numeric; ``citations`` is a non-empty dict. Mirrors check_adjusted_financials'
+    style/return.
+    """
+    path = os.path.join(coverage_dir, "scenario_drivers.json")
+    if not os.path.isfile(path):
+        return _result("scenario_drivers", None,
+                       "scenario_drivers.json absent (optional — skipped)")
+    try:
+        sd = _load_json(path)
+    except (OSError, ValueError) as exc:
+        return _result("scenario_drivers", False,
+                       f"scenario_drivers.json does not parse: {exc}")
+    if not isinstance(sd, dict):
+        return _result("scenario_drivers", False,
+                       "scenario_drivers.json is not a JSON object")
+
+    problems = []
+
+    scenarios = sd.get("scenarios")
+    if not isinstance(scenarios, dict):
+        problems.append("scenarios must be an object with bear/base/bull")
+    else:
+        for name in ("bear", "base", "bull"):
+            sc = scenarios.get(name)
+            if not isinstance(sc, dict):
+                problems.append(f"scenarios.{name} must be an object")
+                continue
+            for key in ("eps_fy28", "fcf_fy28_m"):
+                v = sc.get(key)
+                if not isinstance(v, (int, float)) or isinstance(v, bool):
+                    problems.append(f"scenarios.{name}.{key} must be numeric")
+
+    dri = sd.get("dcf_reverse_inputs")
+    if not isinstance(dri, dict):
+        problems.append("dcf_reverse_inputs must be an object")
+    else:
+        for key, v in dri.items():
+            if not isinstance(v, (int, float)) or isinstance(v, bool):
+                problems.append(f"dcf_reverse_inputs.{key} must be numeric")
+
+    citations = sd.get("citations")
+    if not isinstance(citations, dict) or not citations:
+        problems.append("citations must be a non-empty dict")
+
+    if problems:
+        return _result("scenario_drivers", False,
+                       "invalid scenario_drivers.json: " + "; ".join(problems))
+    return _result("scenario_drivers", True,
+                   "scenario_drivers.json valid: bear/base/bull eps_fy28 + "
+                   "fcf_fy28_m numeric, dcf_reverse_inputs numeric, citations present")
+
+
 def check_anchors_coherent(coverage_dir):
     apath = os.path.join(coverage_dir, "valuation_anchors.json")
     vpath = os.path.join(coverage_dir, "valuation.md")
@@ -612,9 +671,9 @@ def check_anchors_coherent(coverage_dir):
 def run_coverage_qc(coverage_dir, mode="full"):
     """Run all coverage checks for `mode` ("full"|"shallow"); return result dicts.
 
-    The adjusted_financials check (O14) is OPTIONAL: absent file -> SKIP (not
-    a failure). It is appended after the required checks so the existing
-    8-check table is extended by one optional row.
+    The adjusted_financials (O14) and scenario_drivers (O17) checks are OPTIONAL:
+    an absent file -> SKIP (not a failure). They are appended after the required
+    checks so the existing 8-check table is extended by the two optional rows.
     """
     return [
         check_artifacts_present(coverage_dir),
@@ -626,6 +685,7 @@ def run_coverage_qc(coverage_dir, mode="full"):
         check_valuation_depth(coverage_dir, mode),
         check_anchors_coherent(coverage_dir),
         check_adjusted_financials(coverage_dir),
+        check_scenario_drivers(coverage_dir),
     ]
 
 

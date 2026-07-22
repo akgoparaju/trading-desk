@@ -285,6 +285,230 @@ class TestGrades(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# O17 GOVERN: variant cap + A->B grade cap on an UNRESOLVED_CONFLICT valuation
+# state (disagreement > 0.25). The state is transcribed/computed from the
+# fundamental anchors; the govern RESPONSE is provisional. CONSISTENT / None /
+# MODEL_INVALID leave everything byte-identical to today.
+# --------------------------------------------------------------------------- #
+
+from scripts import valuation_reconcile as _vr
+
+
+def _fundamental_anchors(dcf_base, comps_low=294.0, comps_high=436.0):
+    """A fundamental module doc carrying the valuation subscore inputs.anchors the
+    O17 govern reads (mirrors the real GOOG shape)."""
+    return {
+        "skill": "fundamental",
+        "score": 60,
+        "subscores": [
+            {"name": "valuation", "points": 12.75, "max": 17,
+             "inputs": {"anchors": {
+                 "dcf_base": dcf_base,
+                 "comps_low": comps_low,
+                 "comps_high": comps_high,
+             }}},
+        ],
+    }
+
+
+# UNRESOLVED: dcf_base 145.47 vs comps_mid 365 -> 0.8601 > 0.25 (the GOOG split;
+# average-denominator formula score_fundamental discloses).
+_FUND_UNRESOLVED = _fundamental_anchors(145.47)
+# CONSISTENT: dcf_base 320 vs comps_mid 365 -> 0.1314 <= 0.25.
+_FUND_CONSISTENT = _fundamental_anchors(320.0)
+
+
+class TestO17VariantCap(unittest.TestCase):
+    """score_thesis_conviction caps a STRONG variant to 'some' under UNRESOLVED."""
+
+    def _tc(self, variant, state):
+        return sc.score_thesis_conviction(
+            _SCENARIOS, "", _LAST, "balanced",
+            variant, "vj", "clear", "cj", "both-legs", "ij",
+            valuation_state=state)
+
+    def test_strong_capped_to_some_under_unresolved(self):
+        tc = self._tc("strong", _vr.STATE_UNRESOLVED)
+        self.assertEqual(tc["subscore_points"]["variant"], 12)  # 'some' tier
+
+    def test_strong_uncapped_without_state(self):
+        tc = self._tc("strong", None)
+        self.assertEqual(tc["subscore_points"]["variant"], 20)
+
+    def test_strong_uncapped_under_consistent(self):
+        tc = self._tc("strong", _vr.STATE_CONSISTENT)
+        self.assertEqual(tc["subscore_points"]["variant"], 20)
+
+    def test_strong_uncapped_under_model_invalid(self):
+        tc = self._tc("strong", _vr.STATE_MODEL_INVALID)
+        self.assertEqual(tc["subscore_points"]["variant"], 20)
+
+    def test_some_unchanged_under_unresolved(self):
+        self.assertEqual(self._tc("some", _vr.STATE_UNRESOLVED)
+                         ["subscore_points"]["variant"], 12)
+
+    def test_none_unchanged_under_unresolved(self):
+        self.assertEqual(self._tc("none", _vr.STATE_UNRESOLVED)
+                         ["subscore_points"]["variant"], 4)
+
+    def test_cap_is_disclosed_in_arithmetic(self):
+        tc = self._tc("strong", _vr.STATE_UNRESOLVED)
+        variant_line = [s for s in tc["subscores"] if s.startswith("variant")][0]
+        self.assertIn("capped to some", variant_line)
+        self.assertIn("UNRESOLVED_CONFLICT", variant_line)
+
+    def test_uncapped_arithmetic_unchanged(self):
+        # Without the state, the variant line is byte-identical to today's format.
+        tc = self._tc("strong", None)
+        variant_line = [s for s in tc["subscores"] if s.startswith("variant")][0]
+        self.assertEqual(variant_line, "variant strong -> 20/20 (vj)")
+
+
+class TestO17GradeCap(unittest.TestCase):
+    """grade_for_governed caps A -> B under UNRESOLVED; else grade_for unchanged."""
+
+    def test_a_capped_to_b_under_unresolved(self):
+        g, a, capped = sc.grade_for_governed(85.0, _vr.STATE_UNRESOLVED)
+        self.assertEqual(g, "B")
+        self.assertEqual(a, "Hold/Accumulate-on-weakness")
+        self.assertTrue(capped)
+
+    def test_a_uncapped_without_state(self):
+        g, a, capped = sc.grade_for_governed(85.0, None)
+        self.assertEqual(g, "A")
+        self.assertEqual(a, "Buy/Add")
+        self.assertFalse(capped)
+
+    def test_a_uncapped_under_consistent(self):
+        g, a, capped = sc.grade_for_governed(85.0, _vr.STATE_CONSISTENT)
+        self.assertEqual(g, "A")
+        self.assertFalse(capped)
+
+    def test_b_unchanged_under_unresolved(self):
+        # Already B (score 72) -> no cap fires, capped flag False.
+        g, a, capped = sc.grade_for_governed(72.0, _vr.STATE_UNRESOLVED)
+        self.assertEqual(g, "B")
+        self.assertFalse(capped)
+
+    def test_grade_for_governed_matches_grade_for_when_no_state(self):
+        # For every band, grade_for_governed(None) == grade_for.
+        for score in (85.0, 79.99, 60.0, 45.0, 0.0):
+            g0, a0 = sc.grade_for(score)
+            g1, a1, capped = sc.grade_for_governed(score, None)
+            self.assertEqual((g0, a0, False), (g1, a1, capped))
+
+
+class TestO17BuildModuleGovern(unittest.TestCase):
+    """build_module: the govern BITES a synthetic UNRESOLVED fixture and is
+    byte-identical to today when the state is CONSISTENT / None."""
+
+    _SNAP = {"meta": {"ticker": "MU", "as_of_utc": "2026-07-16T00:00:00Z"},
+             "price": {"last": 100.0}}
+
+    def _build(self, fundamental, variant="strong"):
+        mods = _modules(fundamental=fundamental)
+        flags = dict(_FLAGS)
+        flags["variant"] = variant
+        return sc.build_module(
+            self._SNAP, mods, _SCENARIOS, "r", "balanced", **flags,
+            entry_levels=[])
+
+    def test_unresolved_caps_variant_to_some(self):
+        doc = self._build(_FUND_UNRESOLVED, variant="strong")
+        self.assertEqual(doc["valuation_state"], _vr.STATE_UNRESOLVED)
+        self.assertTrue(doc["valuation_govern"]["variant_capped"])
+        variant_line = [s for s in doc["thesis_conviction"]["subscores"]
+                        if s.startswith("variant")][0]
+        self.assertIn("capped to some", variant_line)
+
+    def test_unresolved_records_state_and_note(self):
+        doc = self._build(_FUND_UNRESOLVED, variant="some")
+        self.assertEqual(doc["valuation_state"], _vr.STATE_UNRESOLVED)
+        self.assertIn("composite-o17-v1.0.0 PROVISIONAL", doc["note"])
+        # The base composite provisional note still travels too.
+        self.assertIn("composite-v1.1.0 PROVISIONAL", doc["note"])
+
+    def test_unresolved_grade_cap_when_score_high(self):
+        # Push the composite >= 80 so grade_for would say A, then confirm A->B.
+        # All four evidence modules at 100 + strong flags -> composite >= 80.
+        mods = _modules(
+            technical={"skill": "technical-analysis", "score": 100},
+            fundamental=_fundamental_anchors(145.47),
+            sentiment={"skill": "sentiment-positioning", "score": 100},
+            risk={"skill": "risk-analytics", "score": 100})
+        # replace the fundamental score to 100 too (keep the anchors).
+        mods["fundamental"]["score"] = 100
+        flags = dict(_FLAGS, variant="strong", catalyst_clarity="clear",
+                     invalidation="both-legs")
+        doc = sc.build_module(self._SNAP, mods, _SCENARIOS, "r", "balanced",
+                              **flags, entry_levels=[])
+        self.assertGreaterEqual(doc["score"], 80.0)
+        self.assertEqual(doc["grade"], "B")  # capped from A
+        self.assertTrue(doc["valuation_govern"]["grade_capped_to_b"])
+        self.assertEqual(doc["action"], "Hold/Accumulate-on-weakness")
+
+    def test_consistent_is_byte_identical_to_no_anchors(self):
+        # CONSISTENT state must add NO new fields (byte-identical to today) — the
+        # govern only bites UNRESOLVED. Compare a CONSISTENT-anchor build to a
+        # plain fundamental (no anchors) build; both must equal + carry no
+        # valuation_state / valuation_govern key.
+        doc_consistent = self._build(_FUND_CONSISTENT, variant="strong")
+        doc_plain = self._build({"skill": "fundamental", "score": 60},
+                                variant="strong")
+        self.assertNotIn("valuation_state", doc_consistent)
+        self.assertNotIn("valuation_govern", doc_consistent)
+        self.assertEqual(doc_consistent, doc_plain)
+        # And the strong variant is NOT capped (20 points), byte-identical format.
+        variant_line = [s for s in doc_consistent["thesis_conviction"]["subscores"]
+                        if s.startswith("variant")][0]
+        self.assertEqual(
+            variant_line,
+            f"variant strong -> 20/20 ({_FLAGS['variant_justification']})")
+
+    def test_no_anchors_no_govern_keys(self):
+        doc = self._build({"skill": "fundamental", "score": 60}, variant="strong")
+        self.assertNotIn("valuation_state", doc)
+        self.assertNotIn("valuation_govern", doc)
+
+
+class TestO17GoogFixtureNeutral(unittest.TestCase):
+    """The REAL GOOG case: UNRESOLVED_CONFLICT is RECORDED but score/grade are
+    UNCHANGED (variant already 'some', score 65.4 < 80 already B). The value on
+    GOOG is the DISCLOSURE of the state, not a score/grade move."""
+
+    def test_goog_state_recorded_but_score_grade_unchanged(self):
+        snap = {"meta": {"ticker": "GOOG", "as_of_utc": "2026-07-21T00:00:00Z"},
+                "price": {"last": 351.37}}
+        # GOOG-shaped module scores: composite lands at a B (< 80), variant 'some'
+        # (matching the real 65.4/B call — the govern is score-neutral here).
+        fund = _fundamental_anchors(145.47)
+        fund["score"] = 65
+        mods = _modules(
+            technical={"skill": "technical-analysis", "score": 72},
+            fundamental=fund,
+            sentiment={"skill": "sentiment-positioning", "score": 62},
+            risk={"skill": "risk-analytics", "score": 58})
+        flags = dict(_FLAGS, variant="some")  # GOOG's real variant tier
+        # Build WITHOUT the anchors (govern off) to get the today-baseline number.
+        mods_noanchor = _modules(
+            technical={"skill": "technical-analysis", "score": 72},
+            fundamental={"skill": "fundamental", "score": 65},
+            sentiment={"skill": "sentiment-positioning", "score": 62},
+            risk={"skill": "risk-analytics", "score": 58})
+        base = sc.build_module(snap, mods_noanchor, _SCENARIOS, "r", "balanced",
+                               **flags, entry_levels=[])
+        governed = sc.build_module(snap, mods, _SCENARIOS, "r", "balanced",
+                                   **flags, entry_levels=[])
+        # score + grade UNCHANGED; only the disclosure is added.
+        self.assertEqual(governed["score"], base["score"])
+        self.assertEqual(governed["grade"], base["grade"])
+        self.assertEqual(governed["grade"], "B")
+        self.assertEqual(governed["valuation_state"], _vr.STATE_UNRESOLVED)
+        self.assertFalse(governed["valuation_govern"]["variant_capped"])
+        self.assertFalse(governed["valuation_govern"]["grade_capped_to_b"])
+
+
+# --------------------------------------------------------------------------- #
 # EV block.
 # --------------------------------------------------------------------------- #
 

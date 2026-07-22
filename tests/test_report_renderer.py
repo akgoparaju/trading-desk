@@ -933,6 +933,101 @@ class TestReportQCCleanFill(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# O17: valuation reconciliation block (present when the optional module is;
+# omitted otherwise; number_provenance unaffected).
+# --------------------------------------------------------------------------- #
+
+def _reconcile_doc():
+    """A module_valuation_reconcile.json mirroring valuation_reconcile's output.
+
+    All numbers are chosen so the reverse-DCF is finite and every value can trace
+    (via the module_ leaf) through number_provenance. Uses the fixture's last=100
+    for the reverse-DCF so the rendered price echoes a bundle leaf.
+    """
+    return {
+        "skill": "valuation-reconcile",
+        "reconcile_version": "1.0.0",
+        "disagreement": 0.8601,
+        "disagreement_edge": 0.25,
+        "disagreement_state": "UNRESOLVED_CONFLICT",
+        "reverse_dcf": {
+            "implied_terminal_g": 0.0807,
+            "g_base": 0.03,
+            "wacc": 0.1066,
+            "implied_vs_base": 0.0507,
+            "note": None,
+        },
+        "scenarios": {
+            "bear": {"eps_fy28": 10.73, "fcf_fy28_m": -313},
+            "base": {"eps_fy28": 14.16, "fcf_fy28_m": 41794},
+            "bull": {"eps_fy28": 17.18, "fcf_fy28_m": 80734},
+        },
+        "citations": {"scenarios": "coverage/model.md"},
+    }
+
+
+def _write_reconcile(bundle):
+    with open(os.path.join(bundle, "module_valuation_reconcile.json"), "w") as fh:
+        json.dump(_reconcile_doc(), fh)
+
+
+class TestO17ReconciliationBlock(unittest.TestCase):
+    """The Valuation Reconciliation block renders when the optional module is
+    present, is omitted otherwise, and never breaks number_provenance."""
+
+    def test_block_present_when_module_present(self):
+        with tempfile.TemporaryDirectory() as d:
+            _mk_bundle(d)
+            _write_reconcile(d)
+            _render(d)
+            text = _read_file(_find_report(d))
+            self.assertIn("### Valuation Reconciliation", text)
+            self.assertIn("UNRESOLVED_CONFLICT", text)
+            # driver scenarios table + reverse-DCF line.
+            self.assertIn("EPS FY28", text)
+            self.assertIn("Reverse-DCF", text)
+            # reverse-DCF growth: 0.0807 -> 8.1%, base 0.03 -> 3.0%.
+            self.assertIn("8.1%", text)
+            self.assertIn("3.0%", text)
+
+    def test_block_omitted_when_module_absent(self):
+        with tempfile.TemporaryDirectory() as d:
+            _mk_bundle(d)  # no reconcile module
+            _render(d)
+            text = _read_file(_find_report(d))
+            self.assertNotIn("### Valuation Reconciliation", text)
+
+    def test_number_provenance_unaffected_with_block(self):
+        # With the reconcile module present, a clean-prose fill still passes ALL
+        # report_qc checks (its numbers trace via the module_ leaf).
+        with tempfile.TemporaryDirectory() as d:
+            _mk_bundle(d)
+            _write_reconcile(d)
+            _render(d)
+            report = _find_report(d)
+            _fill_slots(report)
+            rc, out, err = _qc(d, report)
+            self.assertEqual(rc, 0, out + err)
+            self.assertIn("number_provenance", out)
+            self.assertIn("PASS", out)
+
+    def test_no_finite_reverse_dcf_renders_note(self):
+        with tempfile.TemporaryDirectory() as d:
+            _mk_bundle(d)
+            doc = _reconcile_doc()
+            doc["reverse_dcf"] = {
+                "implied_terminal_g": None, "g_base": 0.03, "wacc": 0.1066,
+                "implied_vs_base": None,
+                "note": "market prices FCF above the model path (no finite g)",
+            }
+            with open(os.path.join(d, "module_valuation_reconcile.json"), "w") as fh:
+                json.dump(doc, fh)
+            _render(d)
+            text = _read_file(_find_report(d))
+            self.assertIn("no finite implied growth", text)
+
+
+# --------------------------------------------------------------------------- #
 # report_qc: number_provenance catches a rogue number.
 # --------------------------------------------------------------------------- #
 

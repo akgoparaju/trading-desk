@@ -55,10 +55,33 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from scripts import build_snapshot, confidence, ev_kelly
+from scripts import build_snapshot, confidence, ev_kelly, valuation_reconcile
 
 RUBRIC_VERSION = "1.1.0"
 SKILL_NAME = "composite-score"
+
+# O17 GOVERN (composite-o17-v1.0.0, PROVISIONAL). Stamped onto the composite doc
+# when the DCF-vs-comps split is UNRESOLVED_CONFLICT so a reader knows the govern
+# (variant cap + A->B grade cap) is review's first rule, subject to the B9
+# falsifier — not a calibrated default. The state itself is transcribed/computed
+# (module_fundamental anchors + the 0.25 edge); the GOVERN RESPONSE is provisional.
+_O17_PROVISIONAL_NOTE = (
+    "composite-o17-v1.0.0 PROVISIONAL: on an UNRESOLVED_CONFLICT valuation state "
+    "(|dcf_base - comps_mid|/((dcf_base+comps_mid)/2) > 0.25) the thesis-conviction "
+    "variant is "
+    "capped at the 'some' tier (a prose reconciliation EXPLAINS but does not "
+    "RESOLVE the numeric DCF-vs-comps gap, so the split cannot be claimed as STRONG "
+    "edge) and an A composite grade is capped to B (the score is unchanged; only "
+    "the grade + action reflect the cap). Falsifier (B9): the govern is falsified "
+    "if, across the calibration set, names carrying an UNRESOLVED_CONFLICT do NOT "
+    "realize worse variant-edge outcomes than CONSISTENT names (the split is then "
+    "priced-in, not a risk) OR if capped-to-B names outperform uncapped A names at "
+    "similar scores. Not calibrated.")
+
+# The conviction-variant tier the STRONG variant is capped to under an
+# UNRESOLVED_CONFLICT (the 'some' points value). Named so the cap is greppable and
+# ratifiable, and kept in lockstep with _VARIANT_POINTS["some"].
+_O17_VARIANT_CAP_TIER = "some"
 
 # PROVISIONAL (composite-v1.1.0, Wave 3B / Philosophy A). Stamped into the module
 # note so a reader knows these thresholds are review's first numbers, subject to the
@@ -276,7 +299,8 @@ def ev_asymmetry_points(ratio) -> int:
 def score_thesis_conviction(scenarios, scenario_reasoning, last, profile,
                             variant, variant_justification,
                             catalyst_clarity, catalyst_clarity_justification,
-                            invalidation, invalidation_justification) -> dict:
+                            invalidation, invalidation_justification,
+                            valuation_state=None) -> dict:
     """Compute the thesis-conviction dimension (0-100) for the given profile.
 
     ``scenario_reasoning`` is accepted for signature parity with build_ev_block
@@ -290,6 +314,14 @@ def score_thesis_conviction(scenarios, scenario_reasoning, last, profile,
     Variant perception (max 20), catalyst clarity (max 20), invalidation quality
     (max 20) are the three judgment flags -- asserted, never defaulted.
 
+    O17 GOVERN: when ``valuation_state == "UNRESOLVED_CONFLICT"`` a STRONG variant
+    is CAPPED to the 'some' tier (20 -> 12) — a prose reconciliation EXPLAINS but
+    does not RESOLVE the numeric DCF-vs-comps gap, so the split cannot be claimed as
+    STRONG edge. 'some'/'none' variants are unchanged (already at/below the cap), and
+    any state other than UNRESOLVED_CONFLICT (including the default None) leaves the
+    variant untouched, keeping today's output byte-identical. The cap is disclosed in
+    the variant arithmetic string.
+
     Returns {"score", "subscore_points": {...}, "subscores": [arithmetic strings]}.
     The EV-asymmetry band uses THIS profile's hurdle; the sensitivity row recomputes
     the whole thing per each profile's hurdle.
@@ -300,17 +332,32 @@ def score_thesis_conviction(scenarios, scenario_reasoning, last, profile,
     ratio = ev / hurdle_total
     ev_pts = ev_asymmetry_points(ratio)
 
-    variant_pts = _VARIANT_POINTS[variant]
+    raw_variant_pts = _VARIANT_POINTS[variant]
+    # O17: cap a STRONG variant to 'some' under an UNRESOLVED_CONFLICT. min() makes
+    # the cap safe for already-lower tiers (some/none never rise), so only STRONG
+    # is affected; a non-UNRESOLVED state never triggers the branch.
+    variant_capped = (
+        valuation_state == valuation_reconcile.STATE_UNRESOLVED
+        and raw_variant_pts > _VARIANT_POINTS[_O17_VARIANT_CAP_TIER])
+    variant_pts = (min(raw_variant_pts, _VARIANT_POINTS[_O17_VARIANT_CAP_TIER])
+                   if variant_capped else raw_variant_pts)
     catalyst_pts = _CATALYST_POINTS[catalyst_clarity]
     invalidation_pts = _INVALIDATION_POINTS[invalidation]
 
     total = ev_pts + variant_pts + catalyst_pts + invalidation_pts
 
+    if variant_capped:
+        variant_line = (
+            f"variant {variant} capped to {_O17_VARIANT_CAP_TIER} "
+            f"(UNRESOLVED_CONFLICT) -> {variant_pts}/20 ({variant_justification})")
+    else:
+        variant_line = f"variant {variant} -> {variant_pts}/20 ({variant_justification})"
+
     subscores = [
         (f"ev_asymmetry: ev {_fmt(_clean(ev))} / hurdle_total "
          f"{_fmt(_clean(hurdle_total))} (0.08 x horizon_years {_fmt(horizon_years)}, "
          f"{profile}) = ratio {_fmt(_clean(ratio))} -> {ev_pts}/40"),
-        f"variant {variant} -> {variant_pts}/20 ({variant_justification})",
+        variant_line,
         (f"catalyst_clarity {catalyst_clarity} -> {catalyst_pts}/20 "
          f"({catalyst_clarity_justification})"),
         (f"invalidation {invalidation} -> {invalidation_pts}/20 "
@@ -555,6 +602,25 @@ def grade_for(score):
     return "D", "Reduce/Avoid"
 
 
+def grade_for_governed(score, valuation_state=None):
+    """``grade_for`` with the O17 A->B cap on an UNRESOLVED_CONFLICT.
+
+    Returns ``(grade, action, grade_capped_bool)``. When ``grade_for`` yields "A"
+    AND ``valuation_state == "UNRESOLVED_CONFLICT"`` the grade is capped to "B"
+    (with B's action) — the SCORE is unchanged; only the grade + action reflect the
+    unresolved DCF-vs-comps split (an A "Buy/Add" cannot be claimed while the two
+    valuation rails still numerically disagree). Every other case (grade != A, or a
+    non-UNRESOLVED / default-None state) returns ``grade_for``'s result unchanged so
+    today's output is byte-identical. The boolean lets the caller disclose the cap.
+    """
+    grade, action = grade_for(score)
+    if grade == "A" and valuation_state == valuation_reconcile.STATE_UNRESOLVED:
+        capped_grade = "B"
+        _, capped_action = grade_for(60)  # B band's canonical action string.
+        return capped_grade, capped_action, True
+    return grade, action, False
+
+
 # --------------------------------------------------------------------------- #
 # EV block.
 # --------------------------------------------------------------------------- #
@@ -604,7 +670,8 @@ def build_sensitivity(module_scores, scenarios, last,
                       variant, variant_justification,
                       catalyst_clarity, catalyst_clarity_justification,
                       invalidation, invalidation_justification,
-                      custom_profiles=None, custom_label=None) -> dict:
+                      custom_profiles=None, custom_label=None,
+                      valuation_state=None) -> dict:
     """Recompute the full composite (INCLUDING thesis conviction with EV re-banded
     per that profile's hurdle) for all three profiles, so a reader sees how the call
     shifts with the profile lens. Each entry is {"score", "grade"}.
@@ -614,6 +681,11 @@ def build_sensitivity(module_scores, scenarios, last,
     standard fixed table -- so the tuning is transparent (a reader sees exactly how
     much the custom column moved the number). The block also carries a top-level
     ``weight_set`` label (custom label when ANY profile is custom, else standard).
+
+    O17: ``valuation_state`` (default None -> today's behavior) applies the SAME
+    govern the headline uses to EVERY sensitivity row — the variant cap flows through
+    score_thesis_conviction and the A->B grade cap through grade_for_governed — so a
+    per-profile grade stays consistent with the governed headline call.
     """
     out = {}
     any_custom = False
@@ -623,15 +695,16 @@ def build_sensitivity(module_scores, scenarios, last,
             scenarios, "", last, profile,
             variant, variant_justification,
             catalyst_clarity, catalyst_clarity_justification,
-            invalidation, invalidation_justification)
+            invalidation, invalidation_justification,
+            valuation_state=valuation_state)
         comp = score_composite(module_scores, tc["score"], profile, weights)
-        grade, _ = grade_for(comp["score"])
+        grade, _, _ = grade_for_governed(comp["score"], valuation_state)
         entry = {"score": comp["score"], "grade": grade}
         if label != STANDARD_WEIGHT_SET:
             any_custom = True
             std_comp = score_composite(
                 module_scores, tc["score"], profile, WEIGHTS[profile])
-            std_grade, _ = grade_for(std_comp["score"])
+            std_grade, _, _ = grade_for_governed(std_comp["score"], valuation_state)
             entry["standard_comparison"] = {
                 "score": std_comp["score"], "grade": std_grade}
         out[profile] = entry
@@ -681,14 +754,26 @@ def build_module(snapshot, module_scores, scenarios, scenario_reasoning, profile
 
     weights, weight_set = resolve_weights(profile, custom_profiles, custom_label)
 
+    # O17 GOVERN: derive the DCF-vs-comps disagreement state from the (already
+    # loaded) fundamental module's valuation anchors, reusing valuation_reconcile
+    # (the SAME 0.25 edge score_fundamental / decision_contract use). None (no
+    # anchors) / CONSISTENT / MODEL_INVALID -> no govern (byte-identical to today);
+    # UNRESOLVED_CONFLICT -> variant cap (in score_thesis_conviction) + A->B grade
+    # cap (grade_for_governed). The state is transcribed/computed; only the govern
+    # RESPONSE is provisional.
+    valuation_state = valuation_reconcile.disagreement_state(
+        module_scores.get("fundamental"))
+
     tc = score_thesis_conviction(
         scenarios, scenario_reasoning, last, profile,
         variant, variant_justification,
         catalyst_clarity, catalyst_clarity_justification,
-        invalidation, invalidation_justification)
+        invalidation, invalidation_justification,
+        valuation_state=valuation_state)
 
     composite = score_composite(module_scores, tc["score"], profile, weights)
-    grade, action = grade_for(composite["score"])
+    grade, action, grade_capped = grade_for_governed(
+        composite["score"], valuation_state)
 
     ev = build_ev_block(scenarios, scenario_reasoning, last, profile, entry_levels)
     sensitivity = build_sensitivity(
@@ -696,7 +781,8 @@ def build_module(snapshot, module_scores, scenarios, scenario_reasoning, profile
         variant, variant_justification,
         catalyst_clarity, catalyst_clarity_justification,
         invalidation, invalidation_justification,
-        custom_profiles=custom_profiles, custom_label=custom_label)
+        custom_profiles=custom_profiles, custom_label=custom_label,
+        valuation_state=valuation_state)
 
     # Goal A (PROVISIONAL): anchor the LLM scenario probs against the ticker's own
     # empirical earnings-move base rates; SOFT-flag any >25pp deviation (disclosed,
@@ -708,7 +794,7 @@ def build_module(snapshot, module_scores, scenarios, scenario_reasoning, profile
     # (thesis_conviction excluded) exceeds 25; else the LLM prose slot stays open.
     tension = build_auto_tension(composite["dimensions"])
 
-    return {
+    doc = {
         "skill": SKILL_NAME,
         "rubric_version": RUBRIC_VERSION,
         "ticker": meta.get("ticker"),
@@ -746,6 +832,26 @@ def build_module(snapshot, module_scores, scenarios, scenario_reasoning, profile
         "note": _PROVISIONAL_NOTE,
         "signal": None,
     }
+
+    # O17 GOVERN disclosure (PROVISIONAL). ONLY an UNRESOLVED_CONFLICT changes the
+    # doc: it records the ``valuation_state`` + a ``valuation_govern`` block naming
+    # exactly what was capped, and appends the O17 provisional note (with the B9
+    # falsifier) to the existing composite note. A None / CONSISTENT / MODEL_INVALID
+    # state adds NOTHING (the composite doc is byte-identical to today), because the
+    # govern only bites on the unresolved split. The score is never touched.
+    if valuation_state == valuation_reconcile.STATE_UNRESOLVED:
+        doc["valuation_state"] = valuation_state
+        doc["valuation_govern"] = {
+            "state": valuation_state,
+            "variant_capped": tc["subscore_points"]["variant"]
+            < _VARIANT_POINTS[variant],
+            "variant_cap_tier": _O17_VARIANT_CAP_TIER,
+            "grade_capped_to_b": grade_capped,
+            "note": _O17_PROVISIONAL_NOTE,
+        }
+        doc["note"] = _PROVISIONAL_NOTE + " · " + _O17_PROVISIONAL_NOTE
+
+    return doc
 
 
 # --------------------------------------------------------------------------- #
