@@ -6,9 +6,11 @@ A Claude Code plugin that produces short (≈3-page) trade decision reports buil
 
 ## Status
 
-**v0.14.0 — the analysis-depth roadmap shipped.** The full pipeline is wired end to end: the `market-snapshot` data engine (L1), the four evidence modules (technical, sentiment, risk, fundamental), the `composite-score` decision layer (L3), the `trade-plan` + `options-strategy` execution layer, the `report-renderer` 3-page output + docket with its blocking QC gate (L4), and the `full-trade-analysis` orchestrator (L5) that runs them all through phase gates.
+**v0.19.0 — analysis depth plus a machine-consumable decision contract.** The full pipeline is wired end to end: the `market-snapshot` data engine (L1), the four evidence modules (technical, sentiment, risk, fundamental), the `composite-score` decision layer (L3), the `trade-plan` + `options-strategy` execution layer, the `report-renderer` 3-page output + docket with its blocking QC gate (L4), and the `full-trade-analysis` orchestrator (L5) that runs them all through phase gates.
 
-0.14.0 deepened every evidence module to institutional-practice rubrics and added a scored **confidence layer** (see [Analysis depth & confidence](#analysis-depth--confidence)): event-aware risk, sentiment positioning dynamics, regime-conditional technicals, event-vol-aware options, and base-rate-anchored composite scenarios. **Every score-moving rubric is PROVISIONAL** — shipped with a versioned default and a *pre-registered falsifier*, to be ratified after a calibration set of 5–10 anchored names runs. Reports disclose this in the footer and confidence badge; nothing reads as settled that isn't.
+The 0.14.0 depth roadmap deepened every evidence module to institutional-practice rubrics and added a scored **confidence layer** (see [Analysis depth & confidence](#analysis-depth--confidence)): event-aware risk, sentiment positioning dynamics, regime-conditional technicals, event-vol-aware options, and base-rate-anchored composite scenarios. **Every score-moving rubric is PROVISIONAL** — shipped with a versioned default and a *pre-registered falsifier*, to be ratified after a calibration set of 5–10 anchored names runs. Reports disclose this in the footer and confidence badge; nothing reads as settled that isn't.
+
+Since then: a capital-authorization decision gate (0.15.0), an issuer/security master + snapshot schema 0.4.0 (0.17.0), and — for downstream LLMs and agents — a **machine-consumable decision contract** (0.18.0–0.19.0): a single versioned `decision.json`, a headless JSON-only mode, and a documented governed-source adapter seam. See [Machine-consumable output](#machine-consumable-output-for-downstream-agents-and-orchestrators).
 
 1.0.0 remains gated on the clean-environment install probe (V6 Part 3) and a non-Alpha-Vantage source validation (FMP).
 
@@ -60,6 +62,7 @@ trading_desk_<TICKER>/
     ├── snapshot_<TICKER>_<date>.json     ← the verified single source of truth
     ├── manifest.json                     ← sources + data_mode + retrieval timestamps
     ├── module_{technical,risk,sentiment,context,fundamental,composite,tradeplan,options}.json
+    ├── module_decision.json             ← consolidated, versioned decision object (contract_version 2.0.0)
     ├── brief_<dim>.md                    ← per-dimension evidence briefs
     ├── pdf_slots.json                    ← docket prose slots (provenance-gated)
     ├── charts/                           ← deterministic chart pack (script-minted PNGs)
@@ -67,6 +70,18 @@ trading_desk_<TICKER>/
 ```
 
 The report lands in the **parent** `trading_desk_<TICKER>/` (a sibling of the dated data folder), so it is easy to find next to prior dates. (Legacy `td_bundle_<TICKER>_<date>/` bundles still work — discovery globs both; those keep the report inside the bundle.)
+
+## Machine-consumable output (for downstream agents and orchestrators)
+
+The 3-page report and docket are the human-facing output. For a **downstream LLM or agent** that needs to load the call into its own context and act on it, every run also emits a single versioned **decision object** — `detail_reports_<date>/module_decision.json` — so a consumer reads one file and pins one contract, instead of scraping the rendered report or joining five module schemas that each drift independently.
+
+It consolidates the whole call: the capital-authorization gate (`action_owned` / `action_unowned`, `capital_eligible`, `capital_blockers[]`, `ev_band`, hurdles, `entry_state`), the composite score + dimensions + confidence, the executable plan (entries / exits / sizing / both invalidation legs), the options expression, valuation anchors, a structured catalyst calendar, and a stable thesis id.
+
+- **Pin one version.** The object carries a semver `contract_version` (currently **2.0.0**); a consumer asserts it on read and gets a clean, explicit mismatch at upgrade time rather than a silently vanished field. Every emitted artifact also carries a top-level `schema_version` for drift detection on the other module JSONs, and the input side is versioned in [`docs/CANONICAL_CONTRACT.md`](docs/CANONICAL_CONTRACT.md). A published JSON Schema ships at [`docs/decision.schema.json`](docs/decision.schema.json).
+- **Provenance-consistent by construction.** A blocking gate (`report_qc.py --decision-gates`, run on every full run and refresh) enforces that every non-derived numeric leaf in the decision object equals a value already in the bundle — it can never carry a number the pipeline didn't compute — and validates the object against the schema.
+- **Structured, not prose.** Catalysts are ISO-dated with `days_out` and type (earnings / dividend); the technical-invalidation trigger is an enumerated `operator` a monitor can evaluate mechanically; the thesis carries a deterministic, refresh-stable `id` (`<TICKER>-<inception_date>`) so a tracker can join score / EV / invalidation deltas across refreshes.
+- **Headless JSON-only mode.** For an orchestrator that needs only the decision object — a scheduled re-score, a monitoring tick — `scripts/run_pipeline.py --emit json` runs the deterministic scorer chain plus the blocking gates and emits the decision JSON with **no report, no charts, no PDF, and no render venv**. It carries the prior run's judgments forward for a no-event re-score, and refuses (a distinct exit code) to carry them across an earnings/dividend event so the caller can route event-runs back through the full model path; it exits non-zero on any gate failure.
+- **Governed / foreign data sources.** The snapshot builder is source-neutral, so a locked-down consumer can feed a governed market-data MCP through the documented adapter seam — see [Bring your own data source](#bring-your-own-data-source) and the worked "Step 2-MCP" example in the `market-snapshot` skill, with a copy-pasteable stub at [`docs/adapter_template.py`](docs/adapter_template.py).
 
 ## The docket
 
@@ -129,7 +144,7 @@ Run the whole pipeline in one shot: **`full trade analysis NVDA`** — snapshot 
 
 ## Data & provenance
 
-Every number in a snapshot traces to a data-source endpoint or a public web source, each recorded with its retrieval timestamp under `meta.sources`; `meta.data_source` records the primary source (Alpha Vantage by default), `meta.data_mode` records which of the three AV data modes produced it, and `meta.latest_trading_day` records the quote's own trading date (so a weekend/stale print is surfaced, not hidden). The blocking QC gate reconciles internal consistency (market cap, P/E, net cash, MA ordering, ranges, spot-check tolerance, options freshness, staleness) and stamps an attestation into `meta.qc` — the same arithmetic checks double as the transcription audit for web-fallback runs. The report's own QC gate additionally enforces that every judgment-flag justification cites a real coverage finding ID (grounding + referential integrity), so a set flag can never rest on an unfounded or fabricated citation. Snapshot schema version: **v0.3.3**.
+Every number in a snapshot traces to a data-source endpoint or a public web source, each recorded with its retrieval timestamp under `meta.sources`; `meta.data_source` records the primary source (Alpha Vantage by default), `meta.data_mode` records which of the three AV data modes produced it, and `meta.latest_trading_day` records the quote's own trading date (so a weekend/stale print is surfaced, not hidden). The blocking QC gate reconciles internal consistency (market cap, P/E, net cash, MA ordering, ranges, spot-check tolerance, options freshness, staleness) and stamps an attestation into `meta.qc` — the same arithmetic checks double as the transcription audit for web-fallback runs. The report's own QC gate additionally enforces that every judgment-flag justification cites a real coverage finding ID (grounding + referential integrity), so a set flag can never rest on an unfounded or fabricated citation. Snapshot schema version: **v0.4.0**.
 
 ## Development
 
