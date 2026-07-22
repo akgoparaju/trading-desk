@@ -19,6 +19,23 @@ Spec: `docs/specs/2026-07-21-G1-G4-capital-trust-spec.md`. Bar: no guesses, data
   composite ~65.43 → ~64.93, **grade B unchanged**; risk net-cash display **2.8% → 1.27%** (scoring band
   unchanged). +22 tests; full suite **1551 pass**.
 
+- **G4a — canonical decision contract + semantic assertions.** Two-part trust forcing-function (G4a
+  slice; page-1 rewiring to the contract is deferred to G4b). (1) New pure `scripts/decision_contract.py`
+  builds a deterministic `{profile, horizon_months, scenario_horizon_months, annual/total_return_hurdle,
+  ev_at_current, hurdle_clearing_price, grade, capital_blockers[], capital_eligible, action_unowned,
+  action_owned}` object from `module_composite` + `module_fundamental` + snapshot — every field sourced
+  from a real bundle leaf, every blocker an EXPLICIT rule (`EV_BELOW_HURDLE`, `EARNINGS_WITHIN_1_DAY`,
+  `LOW_COMPOSITE_CONFIDENCE`, `VALUATION_MODEL_CONFLICT`). CLI `--bundle/--out` writes `module_decision.json`.
+  On the real GOOG bundle all four blockers fire → `capital_eligible=false`, `action_unowned=WAIT_FOR_EVENT`.
+  (2) Four semantic assertions wired into `run_report_qc` (+ `check_first_positive_ev_label` into
+  `run_pdf_slots_qc`): `first_positive_ev_label` (FAIL if prose says "first positive-EV" while
+  `ev_at_current>0`), `reclaimed_level` (FAIL if prose asserts "reclaimed N" while `last<N`; forward-looking
+  "reclaim toward N" skipped), `version_labels` (FAIL on a `vX.Y.Z` no module claims; `confidence-v1.0.0`
+  admitted), `horizon_consistency` (FAIL on a "12-month" label when `horizon_years_convention≠1.0`).
+  Each FAILs on a genuine contradiction, SKIPs when inputs absent. **Live-defect catch:** the check
+  FAILs on the real shipped GOOG `pdf_slots.json` ("the first positive-EV entry is 334.69" vs
+  `ev_at_current=0.059`). +51 tests; full suite **1602 pass**.
+
 ## Unreleased — 2026-07-21 · Outstanding-tasks O5 / O11 / O4
 
 Three engineering items from the post-0.14.0 outstanding-tasks docket, each shipped TDD-first and

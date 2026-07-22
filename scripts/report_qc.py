@@ -795,6 +795,176 @@ def check_no_empty_slots(report_text):
     return _result("no_empty_slots", True, "no unfilled slots remain")
 
 
+# --------------------------------------------------------------------------- #
+# G4a: semantic assertions.
+#
+# number_provenance catches a number the LLM invented; these catch a number that
+# is IN the bundle but is described with a claim that contradicts the bundle. Each
+# returns _result(name, passed|None, detail): FAIL (passed=False) only on a genuine
+# contradiction, SKIP (None) when the inputs the assertion needs are absent. They
+# never mint numbers -- they read the same module leaves the deterministic layer
+# scored and check that the prose agrees with them.
+# --------------------------------------------------------------------------- #
+
+# "first positive-EV" / "first positive EV" (tolerant of a hyphen OR a space
+# between "positive" and "EV"). Case-insensitive.
+_FIRST_POSITIVE_EV_RE = re.compile(r"first\s+positive[\s-]+ev", re.IGNORECASE)
+# A PAST-TENSE / present ASSERTION that a level was retaken: "reclaimed <N>",
+# "reclaims <N>", "reclaimed the swing-low at <N>", "reclaimed back above <N>".
+# Only the verb/participle forms "reclaimed"/"reclaims" match (the noun "a reclaim"
+# does not), and the intervening window is captured so the check can REJECT a
+# forward-looking directional -- "reclaims TOWARD 367", "reclaim TO 367" -- which
+# asserts nothing about current price and is legitimate prose. Number group is a
+# plain price (optional $ and thousands sep).
+_RECLAIM_LEVEL_RE = re.compile(
+    r"reclaim(?:ed|s)\b([^.\n]{0,40}?)\$?(\d[\d,]*\.?\d*)", re.IGNORECASE)
+# Directional connectors that turn a "reclaim(ed) ... N" into a FORWARD-LOOKING
+# statement ("reclaims toward 367") rather than an assertion the level was retaken.
+# If one of these appears in the intervening window before the level, the level is
+# a target, not a claim -> not checked.
+_RECLAIM_FORWARD_RE = re.compile(r"\b(toward|towards|to|of)\b", re.IGNORECASE)
+# "12-month" / "12 month" horizon label (case-insensitive, hyphen or space).
+_TWELVE_MONTH_RE = re.compile(r"12[\s-]month", re.IGNORECASE)
+
+
+def check_first_positive_ev_label(text_blob, docs):
+    """FAIL if prose calls a level the "first positive-EV" entry while the CURRENT
+    price already has positive EV.
+
+    Rationale (GOOG live defect): the engine's field is ev_*breakeven*_entry (the
+    HURDLE-clearing price), not the first price at which EV turns positive. When
+    ev_at_current > 0, EV is already positive at spot, so no higher-priced "first
+    positive-EV entry" can exist -- the phrase mislabels the hurdle-breakeven as
+    the first-positive-EV level. SKIP when the phrase is absent or ev_at_current is
+    unavailable.
+    """
+    name = "first_positive_ev_label"
+    if not _FIRST_POSITIVE_EV_RE.search(text_blob or ""):
+        return _result(name, None, "SKIP: no 'first positive-EV' phrase in text")
+    ev_at_current = _dig(docs.get("module_composite") or {}, "ev", "ev_at_current")
+    if ev_at_current is None:
+        return _result(name, None,
+                       "SKIP: 'first positive-EV' present but ev_at_current absent")
+    if ev_at_current > 0:
+        breakeven = _dig(docs.get("module_composite") or {}, "ev", "ev_breakeven_entry")
+        return _result(name, False,
+                       f"prose claims a 'first positive-EV' entry but "
+                       f"ev_at_current={ev_at_current} > 0 (EV is already positive "
+                       f"at spot); the labeled level is the hurdle-breakeven entry "
+                       f"(ev_breakeven_entry={breakeven}), not the first positive-EV "
+                       f"level.")
+    return _result(name, True,
+                   f"'first positive-EV' phrase present and ev_at_current="
+                   f"{ev_at_current} <= 0 (consistent)")
+
+
+def check_reclaimed_level(text, docs):
+    """FAIL if prose ASSERTS the price "reclaimed N" while last < N.
+
+    "Reclaimed X" asserts price is back above X; if the snapshot's last is below X
+    the claim is false. A FORWARD-LOOKING directional -- "reclaims toward 367", "a
+    reclaim to 367 reasserts" -- is NOT an assertion about current price (it names a
+    target) and is skipped via the directional-connector guard. SKIP overall when
+    there is no asserting reclaim phrase with a number, or price.last is absent.
+    """
+    name = "reclaimed_level"
+    matches = _RECLAIM_LEVEL_RE.findall(text or "")
+    # Keep only assertion matches (no directional connector before the level).
+    assertions = [(window, raw) for window, raw in matches
+                  if not _RECLAIM_FORWARD_RE.search(window)]
+    if not assertions:
+        return _result(name, None,
+                       "SKIP: no asserting 'reclaimed <level>' phrase in text")
+    last = _dig(docs.get("snapshot") or {}, "price", "last")
+    if not isinstance(last, (int, float)):
+        return _result(name, None,
+                       "SKIP: 'reclaimed' phrase present but price.last absent")
+    for _window, raw in assertions:
+        level = _canonical(raw)
+        if level is None:
+            continue
+        if last < level:
+            return _result(name, False,
+                           f"prose claims price 'reclaimed' {render_report._fmt(level)} "
+                           f"but last {render_report._fmt(last)} < "
+                           f"{render_report._fmt(level)} (not reclaimed).")
+    return _result(name, True,
+                   f"all reclaim levels <= last {render_report._fmt(last)}")
+
+
+def check_version_labels(text, docs):
+    """FAIL if a rubric version token 'vX.Y.Z' in the report is not one any module
+    actually claims.
+
+    build_allowed_versions collects every version the bundle carries (each module's
+    rubric_version, the expression rule_version, the snapshot schema_version, the
+    plugin version) in both raw and 'v'-prefixed form. A separate legitimate
+    version -- e.g. 'confidence-v1.0.0' (the confidence-scorer artifact version, NOT
+    a rubric label) -- is admitted iff its X.Y.Z appears among those bundle versions
+    (it does, as the modules' confidence.version). A version-shaped token whose
+    core X.Y.Z is in NO bundle module orphans. SKIP when no version token appears.
+    """
+    name = "version_labels"
+    tokens = _VERSION_TOKEN_RE.findall(text or "")
+    if not tokens:
+        return _result(name, None, "SKIP: no version-shaped tokens in text")
+    allowed = build_allowed_versions(docs)
+    # Also admit each module's confidence.version (confidence-vX.Y.Z is a separate,
+    # legitimate artifact version -- see the confidence subsystem). This is additive
+    # to build_allowed_versions and never removes a rubric requirement.
+    for key, m in (docs or {}).items():
+        if key.startswith("module_") and isinstance(m, dict):
+            cv = _dig(m, "confidence", "version")
+            if isinstance(cv, str):
+                core = cv[1:] if cv.startswith("v") else cv
+                allowed.add(core)
+                allowed.add("v" + core)
+    orphans = []
+    for tok in tokens:
+        core = tok[1:] if tok.startswith("v") else tok
+        if core not in allowed and tok not in allowed:
+            orphans.append(tok)
+    if orphans:
+        # Dedupe preserving order.
+        seen = []
+        for o in orphans:
+            if o not in seen:
+                seen.append(o)
+        return _result(name, False,
+                       "version label(s) no module claims: "
+                       + ", ".join(seen[:_ORPHAN_CAP]))
+    return _result(name, True,
+                   f"all {len(tokens)} version token(s) match an owning module")
+
+
+def check_horizon_consistency(text, docs):
+    """FAIL if the report carries a "12-month" horizon label while the composite's
+    hurdle horizon is not 1.0 years (label contradicts the hurdle horizon).
+
+    The hurdle_total is defined over horizon_years_convention; a "12-month" label on
+    a 1.5y-hurdle bundle is the chart-title / prose horizon slip the review flagged
+    (no computational impact, but a stated contradiction). SKIP when there is no
+    12-month label or the convention is absent.
+    """
+    name = "horizon_consistency"
+    if not _TWELVE_MONTH_RE.search(text or ""):
+        return _result(name, None, "SKIP: no '12-month' horizon label in text")
+    horizon_years = _dig(docs.get("module_composite") or {}, "ev",
+                         "horizon_years_convention")
+    if horizon_years is None:
+        return _result(name, None,
+                       "SKIP: '12-month' label present but "
+                       "horizon_years_convention absent")
+    if abs(horizon_years - 1.0) > 1e-9:
+        return _result(name, False,
+                       f"report carries a '12-month' horizon label but the hurdle "
+                       f"horizon is {horizon_years}y "
+                       f"(horizon_years_convention={horizon_years}); the label "
+                       f"contradicts the hurdle horizon.")
+    return _result(name, True,
+                   "'12-month' label consistent with horizon_years_convention 1.0")
+
+
 # C\d+ token regex (finding citation): same pattern as _FINDING_REF_RE above
 # but compiled once here for use in check_judgment_flag_citations.
 _CID_RE = re.compile(r"C\d+")
@@ -991,6 +1161,11 @@ def run_report_qc(bundle, report_path, delta=False, previous=None):
         check_word_cap(report_text),
         check_no_empty_slots(report_text),
         check_judgment_flag_citations(bundle),
+        # G4a semantic assertions over the final report prose.
+        check_first_positive_ev_label(report_text, docs),
+        check_reclaimed_level(report_text, docs),
+        check_version_labels(report_text, docs),
+        check_horizon_consistency(report_text, docs),
     ]
 
 
@@ -1067,8 +1242,14 @@ def run_pdf_slots_qc(bundle, slots, previous=None):
         old_docs = render_report.load_bundle(previous)
         extra.extend(derived_delta_values(old_docs, docs))
 
-    return [check_number_provenance(slot_text, docs, extra_values=extra,
-                                    previous_docs=old_docs)]
+    return [
+        check_number_provenance(slot_text, docs, extra_values=extra,
+                                previous_docs=old_docs),
+        # G4a: the "first positive-EV" slip lives in the LLM-authored docket prose
+        # (pdf_slots), so the semantic assertion runs here too -- this is where the
+        # GOOG live defect ("the first positive-EV entry is 334.69") is caught.
+        check_first_positive_ev_label(slot_text, docs),
+    ]
 
 
 def _stamp_slots(slots_path, slots):
