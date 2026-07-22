@@ -900,7 +900,7 @@ def _key_stats(doc, x, y_top, w, docs):
         return "%.1f%%" % (v * 100) if isinstance(v, (int, float)) else "n/a"
 
     rows = [
-        ("Mkt cap", money(price.get("mktcap_computed"))),
+        ("Mkt cap", money(price.get("mktcap") or price.get("mktcap_computed"))),
         ("52wk hi / lo", "%s / %s" % (fmt_price(price.get("wk52_high")),
                                       fmt_price(price.get("wk52_low")))),
         ("ADV (3m)", money(price.get("adv_dollar_3m"))),

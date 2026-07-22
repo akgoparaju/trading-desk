@@ -217,7 +217,7 @@ def build_header_block(snapshot):
     ticker = meta.get("ticker", "UNKNOWN")
     as_of = meta.get("as_of_utc", "")
     last = price.get("last")
-    mktcap = price.get("mktcap_computed")
+    mktcap = price.get("mktcap") or price.get("mktcap_computed")
     wk_hi, wk_lo = price.get("wk52_high"), price.get("wk52_low")
 
     ne = events.get("next_earnings") if isinstance(events, dict) else None

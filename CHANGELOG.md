@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased — 2026-07-21 · Capital-trust fixes (GOOG review, G1–G4)
+
+From the GOOG review validation (`jutsu-trading-desk/docs/reviews/2026-07-21-goog-review-validation.md`).
+Spec: `docs/specs/2026-07-21-G1-G4-capital-trust-spec.md`. Bar: no guesses, data-driven, 95% confidence.
+
+- **G1 — reconciled issuer market cap (verified score-moving bug).** Page 1, `fcf_yield`, and the risk
+  net-cash ratio were computed off `mktcap_computed` (`last × SharesOutstanding`), which for a
+  multi-class issuer is ONE share class only — GOOG showed **$1.932T** vs the correct issuer cap
+  **$4.288T** (AV `MarketCapitalization`). New pure `build_snapshot.reconcile_mktcap()` emits an
+  authoritative `price.mktcap` + `price.mktcap_basis` via a 4-case rule keyed to the same divergence
+  `check_mktcap` already detects (single-class reconciles → keep computed; multi-class band
+  `0.15<ratio<1.0` → issuer overview; out-of-band → retain computed as an anomaly for QC). `build_valuation`,
+  `render_report`, `render_pdf`, `score_risk` now read `price.mktcap`. `check_mktcap` returns a
+  non-failing "reconciled to issuer overview" disclosure for the multi-class case instead of a
+  waiver-requiring FAIL. **GOOG E2E (real bundle re-score):** fcf_yield **0.03334 → 0.01503**;
+  fundamental valuation subscore **18.2 → 16.2** (fcf_yield_points 5→3); fundamental **66.2 → 64.2**;
+  composite ~65.43 → ~64.93, **grade B unchanged**; risk net-cash display **2.8% → 1.27%** (scoring band
+  unchanged). +22 tests; full suite **1551 pass**.
+
 ## Unreleased — 2026-07-21 · Outstanding-tasks O5 / O11 / O4
 
 Three engineering items from the post-0.14.0 outstanding-tasks docket, each shipped TDD-first and

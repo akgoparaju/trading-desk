@@ -874,7 +874,7 @@ class TestInputFields(unittest.TestCase):
             "technicals.max_dd_10yr", "technicals.dd_episodes_20pct_10yr",
             "technicals.dd_episodes_30pct_10yr", "technicals.dist_from_ath_pct",
             "price.adv_dollar_3m", "fundamentals.net_cash_defined.net",
-            "price.mktcap_computed",
+            "price.mktcap",
             # confidence-gating inputs (short-history bug): the beta component is
             # gated on the return-day count, the rv-percentile on the ohlcv rows.
             "benchmark.beta_n_days", "technicals.ohlcv_rows",

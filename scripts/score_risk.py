@@ -128,7 +128,7 @@ INPUT_FIELDS = {
     "technicals.dist_from_ath_pct",
     "price.adv_dollar_3m",
     "fundamentals.net_cash_defined.net",
-    "price.mktcap_computed",
+    "price.mktcap",
     # Confidence-gating inputs (short-history bug): the beta component is gated
     # on the number of return-days behind the estimate, and the rv30 regime
     # percentile on the number of ohlcv rows behind the percentile. They do not
@@ -977,7 +977,7 @@ def build_module(snapshot, ladder, stress_pct, top_risk, anchors=None,
     beta_n_days = bench.get("beta_n_days")
     ohlcv_rows = tech.get("ohlcv_rows")
     adv = price.get("adv_dollar_3m")
-    mktcap = price.get("mktcap_computed")
+    mktcap = price.get("mktcap") or price.get("mktcap_computed")
     net_cash = fund.get("net_cash_defined") or {}
     net = net_cash.get("net") if isinstance(net_cash, dict) else None
     events = snapshot.get("events", {}) if isinstance(snapshot, dict) else {}

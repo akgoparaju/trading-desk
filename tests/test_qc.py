@@ -141,7 +141,9 @@ class TestPerCheckMutations(unittest.TestCase):
         return checks[check_name](s)
 
     def test_mktcap_fails_on_overview_mismatch(self):
-        def m(s): s["price"]["mktcap_overview"] *= 1.10
+        # G1: ratio must be OUTSIDE the multi-class band (0.15, 1.0) to fail.
+        # overview × 10 → ratio = computed / (overview×10) = 0.1 < 0.15 → FAIL.
+        def m(s): s["price"]["mktcap_overview"] *= 10
         self.assertIs(self._run_one(m, "check_mktcap")["passed"], False)
 
     def test_mktcap_passes_on_stale_vendor_cap_matching_prev_close(self):
@@ -156,8 +158,10 @@ class TestPerCheckMutations(unittest.TestCase):
         self.assertIn("prior-session stale", r["detail"])
 
     def test_mktcap_fails_when_neither_last_nor_prev_reconciles(self):
+        # G1: ratio must be outside the multi-class band to fail.  overview × 10
+        # → ratio ≈ 0.1 < 0.15 (implausible for a class split) → still FAIL.
         def m(s):
-            s["price"]["mktcap_overview"] *= 1.10
+            s["price"]["mktcap_overview"] *= 10
             s["price"]["last"] = s["price"]["prev_close"] * 1.04
         self.assertIs(self._run_one(m, "check_mktcap")["passed"], False)
 
@@ -272,8 +276,11 @@ class TestSkipBehavior(unittest.TestCase):
 
 class TestWaivers(unittest.TestCase):
     def test_waived_failure_does_not_fail_gate(self):
+        # G1: to trigger a genuine check_mktcap FAIL the ratio must be outside
+        # the multi-class band.  overview × 10 → ratio ≈ 0.1 < 0.15 → FAIL
+        # (implausible for any known class-structure reason) → waiveable.
         s = make_snapshot()
-        s["price"]["mktcap_overview"] *= 1.10  # breaks check_mktcap
+        s["price"]["mktcap_overview"] *= 10  # breaks check_mktcap (out-of-band)
         s["meta"]["qc"]["waivers"] = [
             {"check": "check_mktcap", "reason": "known share-count lag"}
         ]
@@ -284,8 +291,9 @@ class TestWaivers(unittest.TestCase):
         self.assertIn("known share-count lag", checks["check_mktcap"]["detail"])
 
     def test_unwaived_failure_fails_gate(self):
+        # G1: ratio must be outside the multi-class band to remain a hard FAIL.
         s = make_snapshot()
-        s["price"]["mktcap_overview"] *= 1.10
+        s["price"]["mktcap_overview"] *= 10  # out-of-band → still FAIL
         r = Q.run_qc(s)
         self.assertIs(r["passed"], False)
 

@@ -126,7 +126,20 @@ def check_mktcap(s):
     real target is share-count / unit errors, so it passes if EITHER
     shares x last OR shares x prev_close reconciles; matching on prev_close
     is disclosed as vendor staleness in the detail.
+
+    Multi-class handling (G1): when a fresh overview diverges beyond tol but
+    the ratio computed/overview is in the plausible multi-class band
+    (0.15 < ratio < 1.0), the divergence is a known AV data characteristic
+    (SharesOutstanding = one class only). build_price already reconciled to
+    the issuer-level overview via price.mktcap_basis="overview_authoritative".
+    The QC check returns passed=True with a "reconciled to issuer overview"
+    detail rather than a waiver-requiring FAIL. A hard FAIL is kept only when
+    the ratio is outside the band (implausible for a class split — real anomaly).
     """
+    # Multi-class plausibility band — mirrors build_snapshot._MULTICLASS_LO/HI.
+    _MULTICLASS_LO = 0.15
+    _MULTICLASS_HI = 1.0
+
     price = _get(s, "price")
     last = _get(price, "last")
     prev = _get(price, "prev_close")
@@ -163,6 +176,17 @@ def check_mktcap(s):
                        f"SKIP: vendor mktcap is {ov_age:.0f}d old (reused in-window "
                        f"source) and price has moved ({diff:.2%} vs last) -- "
                        f"share-count reconciliation deferred to the next full fetch")
+    # MULTI-CLASS PASS (G1): fresh overview, diverges beyond tol, but ratio is
+    # in the plausible multi-class band -- this is the known AV characteristic
+    # where SharesOutstanding = one share class only.  build_price already chose
+    # price.mktcap = mktcap_overview.  Non-failing disclosure rather than waiver.
+    ratio = computed / overview
+    if _MULTICLASS_LO < ratio < _MULTICLASS_HI:
+        diff_pct = (computed - overview) / overview * 100
+        return _result("check_mktcap", True,
+                       f"reconciled to issuer overview (multi-class: AV SharesOutstanding "
+                       f"is one class); computed={computed:.4g} overview={overview:.4g} "
+                       f"({diff_pct:+.1f}%)")
     return _result("check_mktcap", False,
                    f"computed {computed:.4g} vs overview {overview:.4g}: "
                    f"{diff:.2%} diff (tol {_MKTCAP_TOL:.0%}; prev_close reconciliation also failed)")

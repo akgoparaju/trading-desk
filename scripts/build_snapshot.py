@@ -340,6 +340,92 @@ def _quarterly(payload, key="quarterlyReports"):
 # Block builders (pure functions over parsed inputs)
 # --------------------------------------------------------------------------- #
 
+# Tolerance mirror: keep in sync with qc._MKTCAP_TOL (2%).  We reference the
+# same constant value rather than importing qc to avoid a circular dependency
+# (qc imports nothing from build_snapshot, but build_snapshot is a CLI entry
+# point that should not pull in the whole QC stack at import time).  If
+# qc._MKTCAP_TOL ever changes, update this value too.
+_MKTCAP_TOL = 0.02  # +-2 % — mirrors qc._MKTCAP_TOL exactly
+
+# Multi-class plausibility band: computed/overview ratio must fall in this
+# half-open interval for the divergence to be treated as a known multi-class
+# share-count scope error (e.g. AV SharesOutstanding = one class only).
+# Outside this band the divergence is implausible for a class split and is
+# retained as "computed_anomaly_retained" so QC can flag it.
+_MULTICLASS_LO = 0.15  # exclusive lower bound
+_MULTICLASS_HI = 1.0   # exclusive upper bound
+
+
+def reconcile_mktcap(mktcap_overview, mktcap_computed, last, prev_close,
+                     shares_m, tol=_MKTCAP_TOL):
+    """Return (mktcap, basis) using a 4-case reconciliation rule.
+
+    Case 1 – overview absent / ≤0:
+        mktcap = mktcap_computed, basis = "computed_only".
+
+    Case 2 – both present AND computed reconciles to overview within ``tol``
+        at ``last`` OR ``prev_close`` (single-class issuer):
+        mktcap = mktcap_computed, basis = "reconciled_agree".
+        (keeps the fresher today's-price figure)
+
+    Case 3 – both present, diverge beyond tol, AND the ratio
+        computed/overview is in the multi-class plausibility band
+        (0.15 < ratio < 1.0):
+        mktcap = mktcap_overview, basis = "overview_authoritative".
+        (AV MarketCapitalization is issuer-level; the computed figure
+        is one-class only)
+
+    Case 4 – both present, diverge beyond tol, ratio OUTSIDE the band:
+        mktcap = mktcap_computed, basis = "computed_anomaly_retained".
+        (implausible for a class split; keep computed and let QC flag it)
+
+    Parameters
+    ----------
+    mktcap_overview : float | None
+        AV COMPANY_OVERVIEW MarketCapitalization (issuer-level).
+    mktcap_computed : float | None
+        last × SharesOutstanding (in absolute dollars, not millions).
+    last : float | None
+        Current session close/last price.
+    prev_close : float | None
+        Prior session close.
+    shares_m : float | None
+        SharesOutstanding in millions.
+    tol : float
+        Relative tolerance for reconciliation (default mirrors qc._MKTCAP_TOL).
+    """
+    # Case 1: overview absent or non-positive
+    if not (isinstance(mktcap_overview, (int, float)) and mktcap_overview > 0):
+        return (mktcap_computed, "computed_only")
+
+    # mktcap_computed must also be present and positive for cases 2-4
+    if not (isinstance(mktcap_computed, (int, float)) and mktcap_computed > 0):
+        return (mktcap_computed, "computed_only")
+
+    diff_last = abs(mktcap_computed - mktcap_overview) / mktcap_overview
+
+    # Case 2: reconciles at last price within tolerance
+    if diff_last <= tol:
+        return (mktcap_computed, "reconciled_agree")
+
+    # Also check prev_close reconciliation (vendor mktcap may lag one session)
+    if (isinstance(prev_close, (int, float)) and prev_close > 0
+            and isinstance(shares_m, (int, float)) and shares_m > 0):
+        computed_prev = prev_close * shares_m * 1e6
+        diff_prev = abs(computed_prev - mktcap_overview) / mktcap_overview
+        if diff_prev <= tol:
+            return (mktcap_computed, "reconciled_agree")
+
+    # Diverges — check plausibility band
+    ratio = mktcap_computed / mktcap_overview
+    if _MULTICLASS_LO < ratio < _MULTICLASS_HI:
+        # Case 3: multi-class scope error — use authoritative issuer overview
+        return (mktcap_overview, "overview_authoritative")
+
+    # Case 4: implausible ratio — keep computed, let QC flag
+    return (mktcap_computed, "computed_anomaly_retained")
+
+
 def build_price(quote, overview, rows, web_spot):
     """Price block: quote, 52wk range, share count, market caps, ADV."""
     gq = quote.get("Global Quote", {}) if isinstance(quote, dict) else {}
@@ -355,6 +441,10 @@ def build_price(quote, overview, rows, web_spot):
     shares_m = shares / 1e6 if shares is not None else None
     mktcap_overview = num(overview.get("MarketCapitalization")) if isinstance(overview, dict) else None
     mktcap_computed = last * shares if (last is not None and shares is not None) else None
+
+    mktcap, mktcap_basis = reconcile_mktcap(
+        mktcap_overview, mktcap_computed, last, prev_close, shares_m,
+    )
 
     wk_high = num(overview.get("52WeekHigh")) if isinstance(overview, dict) else None
     wk_low = num(overview.get("52WeekLow")) if isinstance(overview, dict) else None
@@ -378,6 +468,8 @@ def build_price(quote, overview, rows, web_spot):
         "shares_diluted_m": shares_m,
         "mktcap_overview": mktcap_overview,
         "mktcap_computed": mktcap_computed,
+        "mktcap": mktcap,
+        "mktcap_basis": mktcap_basis,
         "adv_dollar_3m": adv,
         "web_spot_check": spot_block,
         # QF2: vendor latest-trading-day stamp; moved to meta.latest_trading_day
@@ -845,7 +937,7 @@ def build_valuation(price, fundamentals, overview, rows):
     eps_ttm = fundamentals.get("eps_ttm")
     eps_ntm = fundamentals.get("eps_ntm_consensus")
     fcf_ttm = fundamentals.get("fcf_ttm")
-    mktcap = price.get("mktcap_computed")
+    mktcap = price.get("mktcap") or price.get("mktcap_computed")
 
     pe_ttm = (last / eps_ttm) if (last is not None and eps_ttm and eps_ttm > 0) else None
     pe_fwd = (last / eps_ntm) if (last is not None and eps_ntm and eps_ntm > 0) else None

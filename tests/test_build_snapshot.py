@@ -925,9 +925,11 @@ class TestQCGate(unittest.TestCase):
         self.assertTrue(len(snap["meta"]["qc"]["checks"]) == 9)
 
     def test_gate_fails_on_corrupt_mktcap(self):
+        # G1: ratio must be OUTSIDE the multi-class band (0.15, 1.0) to fail.
+        # overview × 10 → ratio = computed/(overview×10) ≈ 0.1 < 0.15 → FAIL.
         with open(self.snap_path) as fh:
             snap = json.load(fh)
-        snap["price"]["mktcap_overview"] *= 1.5
+        snap["price"]["mktcap_overview"] *= 10
         with open(self.snap_path, "w") as fh:
             json.dump(snap, fh)
         proc = _run_gate(self.snap_path)
@@ -937,9 +939,10 @@ class TestQCGate(unittest.TestCase):
         self.assertIs(snap2["meta"]["qc"]["passed"], False)
 
     def test_waive_flips_to_pass(self):
+        # G1: same out-of-band mutation as above; waiver must suppress the FAIL.
         with open(self.snap_path) as fh:
             snap = json.load(fh)
-        snap["price"]["mktcap_overview"] *= 1.5
+        snap["price"]["mktcap_overview"] *= 10
         with open(self.snap_path, "w") as fh:
             json.dump(snap, fh)
         proc = _run_gate(self.snap_path,
