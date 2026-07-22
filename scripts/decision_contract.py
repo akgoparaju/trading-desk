@@ -50,15 +50,17 @@ CONTRACT_VERSION = "1.1.0"
 # uncertainty (the review's first numbers). See ``PROVISIONAL_NOTE`` for the
 # pre-registered B9 falsifier.
 # --------------------------------------------------------------------------- #
-_EV_BAND_K = {"LOW": 0.25, "MEDIUM": 0.15, "HIGH": 0.05}
+_EV_BAND_K = {"LOW": 0.15, "MEDIUM": 0.10, "HIGH": 0.05}
 # Confidence level used (and k selected) when the composite confidence level is
 # absent or unrecognized: fall back to the WIDEST (most conservative) band.
 _EV_BAND_DEFAULT_LEVEL = "LOW"
 
 PROVISIONAL_NOTE = (
     "decision-contract-v1.1.0 PROVISIONAL: EV-uncertainty band = k(confidence) x "
-    "(r_bull - r_bear), k={LOW:0.25,MEDIUM:0.15,HIGH:0.05} (review's first "
-    "numbers, keyed on composite/data confidence as a v1.1.0 proxy for forecast "
+    "(r_bull - r_bear), k={LOW:0.15,MEDIUM:0.10,HIGH:0.05} (softened 2026-07-21 "
+    "from LOW 0.25/MED 0.15 per user tuning: the LOW robustness bar was ~22% EV; "
+    "0.15 sets it ~18% at GOOG's spread. Keyed on composite/data confidence as a "
+    "v1.1.0 proxy for forecast "
     "uncertainty). Falsifier (B9): the k table and the "
     "EV_NOT_ROBUST_UNDER_UNCERTAINTY gate are falsified if, across the "
     "calibration set, (i) realized forward returns for LOW-confidence names land "

@@ -337,19 +337,20 @@ class TestEvBandMath(unittest.TestCase):
     """The band math + k selection + guards (compute_ev_band is pure)."""
 
     def test_goog_band_exact_values(self):
-        # r_bull = 436/351.37 - 1 ; r_bear = 294/351.37 - 1 ; spread ; k=0.25.
+        # r_bull = 436/351.37 - 1 ; r_bear = 294/351.37 - 1 ; spread ; k=0.15
+        # (softened 2026-07-21 from 0.25).
         band = dc.compute_ev_band(
             last=351.37, scenarios=_GOOG_SCENARIOS,
             ev_at_current=0.059, confidence_level="LOW")
-        self.assertAlmostEqual(band["ev_uncertainty_k"], 0.25)
+        self.assertAlmostEqual(band["ev_uncertainty_k"], 0.15)
         self.assertEqual(band["ev_uncertainty_confidence_level"], "LOW")
-        # spread ≈ 0.40414 ; halfwidth ≈ 0.10103.
-        self.assertAlmostEqual(band["ev_uncertainty_halfwidth"], 0.10103, places=5)
-        self.assertAlmostEqual(band["ev_band"][0], -0.04203, places=5)
-        self.assertAlmostEqual(band["ev_band"][1], 0.16003, places=5)
+        # spread ≈ 0.40414 ; halfwidth = 0.15 * 0.40414 ≈ 0.06062.
+        self.assertAlmostEqual(band["ev_uncertainty_halfwidth"], 0.06062, places=5)
+        self.assertAlmostEqual(band["ev_band"][0], -0.00162, places=5)
+        self.assertAlmostEqual(band["ev_band"][1], 0.11962, places=5)
 
     def test_k_selection_table(self):
-        for level, k in (("LOW", 0.25), ("MEDIUM", 0.15), ("HIGH", 0.05)):
+        for level, k in (("LOW", 0.15), ("MEDIUM", 0.10), ("HIGH", 0.05)):
             band = dc.compute_ev_band(
                 last=100.0, scenarios=[{"price_target": 120.0},
                                        {"price_target": 80.0}],
@@ -366,7 +367,7 @@ class TestEvBandMath(unittest.TestCase):
                 last=100.0, scenarios=[{"price_target": 120.0},
                                        {"price_target": 80.0}],
                 ev_at_current=0.05, confidence_level=level)
-            self.assertAlmostEqual(band["ev_uncertainty_k"], 0.25, msg=str(level))
+            self.assertAlmostEqual(band["ev_uncertainty_k"], 0.15, msg=str(level))
             self.assertEqual(band["ev_uncertainty_confidence_level"], "LOW",
                              msg=str(level))
 
@@ -460,12 +461,14 @@ class TestGoogBandContract(unittest.TestCase):
     def test_goog_band_fields_and_no_not_robust_blocker(self):
         c = dc.build_contract(_goog_docs())
         self.assertEqual(c["contract_version"], "1.1.0")
-        self.assertAlmostEqual(c["ev_band"][0], -0.04203, places=5)
-        self.assertAlmostEqual(c["ev_band"][1], 0.16003, places=5)
-        self.assertAlmostEqual(c["ev_uncertainty_halfwidth"], 0.10103, places=5)
-        self.assertAlmostEqual(c["ev_uncertainty_k"], 0.25)
+        self.assertAlmostEqual(c["ev_band"][0], -0.00162, places=5)
+        self.assertAlmostEqual(c["ev_band"][1], 0.11962, places=5)
+        self.assertAlmostEqual(c["ev_uncertainty_halfwidth"], 0.06062, places=5)
+        self.assertAlmostEqual(c["ev_uncertainty_k"], 0.15)
         self.assertEqual(c["ev_uncertainty_confidence_level"], "LOW")
-        self.assertIs(c["ev_robust_vs_hurdle"], False)
+        # k softened 0.25->0.15: band [-0.2%, +12.0%] no longer straddles the 12%
+        # hurdle (both ends below) -> the below-hurdle verdict is now robust.
+        self.assertIs(c["ev_robust_vs_hurdle"], True)
         # GOOG point EV 0.059 < hurdle -> EV_BELOW_HURDLE covers; NOT_ROBUST absent.
         self.assertNotIn("EV_NOT_ROBUST_UNDER_UNCERTAINTY", c["capital_blockers"])
         # The existing four blockers are unchanged.

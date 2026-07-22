@@ -71,8 +71,11 @@ Spec: `docs/specs/2026-07-21-G1-G4-capital-trust-spec.md`. Bar: no guesses, data
   **1.0.0 → 1.1.0** and computes an uncertainty band from data already in the bundle: from
   `snapshot.price.last` + `module_composite.ev.scenarios`, `r_i = price_target_i/last − 1`,
   `spread = max(r) − min(r)`; `halfwidth = k·spread` with a DISCLOSED confidence-keyed table
-  `_EV_BAND_K = {LOW:0.25, MEDIUM:0.15, HIGH:0.05}` (v1.1.0 proxy for forecast uncertainty; absent/
-  unrecognized confidence → conservative LOW k); `ev_band = [ev − halfwidth, ev + halfwidth]`. New
+  `_EV_BAND_K = {LOW:0.15, MEDIUM:0.10, HIGH:0.05}` (**softened 2026-07-21 from LOW 0.25/MED 0.15 per
+  user tuning** — the LOW robustness bar was ~22% EV; 0.15 sets it ~18% at GOOG's spread. GOOG band
+  shifts [-4.2%,16.0%]→**[-0.2%,12.0%]** and `ev_robust_vs_hurdle` False→**True** as +12.0% no longer
+  straddles the 12% hurdle. Still PROVISIONAL; k is the B9 lever) (v1.1.0 proxy for forecast
+  uncertainty; absent/unrecognized confidence → conservative LOW k); `ev_band = [ev − halfwidth, ev + halfwidth]`. New
   contract fields `ev_band`, `ev_uncertainty_halfwidth`, `ev_uncertainty_k`,
   `ev_uncertainty_confidence_level`, `ev_robust_vs_hurdle` (`(ev_low≥hurdle)==(ev_high≥hurdle)`), and a
   `provisional_note` carrying the pre-registered B9 falsifier. New ACTIVE blocker
