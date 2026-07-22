@@ -1,9 +1,36 @@
 # Changelog
 
-## 0.18.0 — 2026-07-22 · Downstream integration contract (downstream FR-1/2/3/5-id/6)
+## 0.19.0 — 2026-07-22 · Headless re-score CLI + governed-source adapter guide (FR-4/FR-7)
+
+Completes the downstream-integration request set. A locked-down orchestrator can now run cheap, scheduled
+re-scores with the LLM entirely OUT of the control path, and a new integrator can stand up a governed-MCP
+fetch pass from a worked example instead of reverse-engineering the builder. Suite **1955 pass, 2 skip**
+(+31); FR-4 verified end-to-end on the live GOOG bundle (event-path routes to model; no-event path runs the
+full deterministic chain to a gates-PASS decision, byte-identical across runs).
+
+- **FR-4 — `scripts/run_pipeline.py --emit json` (NEW), deterministic headless no-event re-score.** Carries
+  the model's judgments forward from `--previous` (composite conviction flags + justifications, trade-plan
+  catalyst/fund-invalidation flags, moat, `scenario_reasoning`, `scenarios.json`, `module_context.json` — each
+  justification tagged `[carried forward from <prev_as_of>]`, finding IDs preserved, context copy `schema_version`-
+  stamped + `carried_forward_from` disclosed), then runs the deterministic chain in-process (build_snapshot →
+  qc_gate → technical/sentiment/risk/fundamental → composite → trade_plan[stock] → options[--mode pipeline] →
+  trade_plan[synthesize] → valuation_reconcile → decision_contract → `report_qc --decision-gates`) and emits the
+  decision JSON. **Renders nothing** (no render_report/charts/pdf import). Exit codes: `0` ok · `2` usage/missing-
+  input refusal (no `--bundle`/`manifest.json`, no `--previous` [first-ever runs need the model], no `coverage/`) ·
+  `3` a step or blocking gate failed (chain stops there) · `4` earnings/dividend between runs → route to the model
+  refresh path (carry-forward is unsafe across an event; event logic reused from `refresh_plan`). Deterministic:
+  byte-identical outputs for identical inputs.
+- **FR-7 — governed-source adapter guide (docs-only).** `skills/market-snapshot/SKILL.md` gains a "Step 2-MCP —
+  worked example" (bulk-group adapters for `daily_adjusted`/`spy_daily_adjusted` + `options_chain` reading the
+  tool's file-offload `cache_path`; a scalar `overview` transcription with the full-vs-compact caveat; the
+  `pc_ratio_realtime` degrade note; and an adapter-validation sequence). Ships `docs/adapter_template.py` — a
+  copy-pasteable STRUCTURAL bulk-group adapter stub (field-mapping only, never arithmetic; offload-envelope
+  auto-detect; saved to the user workspace `trading_desk_config/adapters/<source>_<group>.py` and re-run verbatim).
+
+## 0.18.0 — 2026-07-22 · Downstream integration contract (FR-1/2/3/5-id/6)
 
 Makes the plugin's per-ticker output a stable, versioned, machine-consumable contract for a downstream
-governed portfolio-OS (a downstream portfolio-OS), per its reviewed integration requests. The heavy analytics were
+governed portfolio-OS, per its reviewed integration requests. The heavy analytics were
 already computed; this release **consolidates + versions + exposes** them — near-zero new computation.
 The consolidated decision object is the single file a consumer reads and pins against. Suite **1924 pass,
 2 skip** (was 1894/2; +30 net new tests). Decision-contract gates verified PASS end-to-end on the live

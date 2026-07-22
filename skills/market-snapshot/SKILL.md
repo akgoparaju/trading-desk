@@ -189,6 +189,294 @@ If the foreign source has no options chain, leave `options_chain`/`pc_ratio_real
 
 ---
 
+## Step 2-MCP — worked example (governed-source adapter)
+
+This section shows how to implement the Step 2-MCP adapter pass for a governed MCP source that returns **Alpha Vantage-shaped JSON** (a wrapped AV source).  The examples use the generic name `mcp:governed_av`; substitute your actual source identifier.
+
+**Key facts about this source type:**
+- Bulk groups (`daily_adjusted`, `spy_daily_adjusted`, `options_chain`) use a **file-offload contract**: the tool result is `{"cache_path": "<path>", "bytes": <n>, "summary": "..."}` — the actual JSON body is on disk at `cache_path`.  The adapter reads the FILE, not the tool result.  This mirrors the plugin's own `HISTORICAL_OPTIONS` offload pattern.
+- Scalar groups (`overview`, `global_quote`, statements, etc.) return AV-shaped JSON directly in the tool result — transcription is near-1:1.
+- Fundamentals have a **compact mode** (trimmed line-items).  For the full-statement contract the adapter must request the **FULL** body (omit `compact`), otherwise `quarterlyReports` may be truncated and TTM sums will be wrong.
+- The source exposes `HISTORICAL_PUT_CALL_RATIO`, not a realtime P/C endpoint.  `pc_ratio_realtime` either falls to the web path or is accepted **degraded** (the QC gate handles an absent P/C — do not assume a realtime endpoint exists).
+
+The reusable adapter stub is at `${CLAUDE_PLUGIN_ROOT}/docs/adapter_template.py`.
+
+---
+
+### 2-MCP-A — Bulk group: `daily_adjusted` (and `spy_daily_adjusted`)
+
+The tool returns `{"cache_path": "/tmp/...", "bytes": ..., "summary": "..."}`.  Read the file at `cache_path`, map it to the AV JSON shape, and write `raw/daily_adjusted.json`.
+
+Save this adapter VERBATIM to `./trading_desk_config/adapters/mcp:governed_av_daily_adjusted.py` on first use.  Re-run it unchanged on every later fetch — never regenerate it.
+
+```python
+# trading_desk_config/adapters/mcp:governed_av_daily_adjusted.py
+#
+# Structural adapter: mcp:governed_av → canonical daily_adjusted shape.
+# STRUCTURAL ONLY: field mapping and renaming.  No arithmetic, no unit
+# conversion, no derived columns.  See docs/CANONICAL_CONTRACT.md.
+#
+# Usage:
+#   python3 trading_desk_config/adapters/mcp:governed_av_daily_adjusted.py \
+#       --input  <cache_path from tool result>  \
+#       --output <bundle>/raw/daily_adjusted.json
+
+import argparse, json, sys
+
+SOURCE_LABEL = "mcp:governed_av"
+
+def _read_offload(cache_path):
+    """Read the body the tool offloaded to disk at cache_path."""
+    try:
+        with open(cache_path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        raise ValueError(f"{SOURCE_LABEL}: offloaded file not found: {cache_path!r}")
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{SOURCE_LABEL}: JSON parse error at {cache_path!r}: {exc}")
+
+def _transform(payload):
+    """Map AV-shaped payload → canonical daily_adjusted shape.
+
+    Source shape (AV JSON, already at cache_path):
+        {"Time Series (Daily)": {"YYYY-MM-DD": {
+            "1. open", "2. high", "3. low", "4. close",
+            "5. adjusted close",   # REQUIRED — split/dividend-adjusted
+            "6. volume"
+        }, ...}}
+
+    Target shape (accepted by build_snapshot.parse_daily_rows):
+        identical — this source is AV-shaped, so mapping is 1:1.
+        If your source uses different field names, edit the FIELD_MAP below.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError(f"{SOURCE_LABEL}: expected dict payload, got {type(payload).__name__}")
+    ts = payload.get("Time Series (Daily)")
+    if not isinstance(ts, dict):
+        raise ValueError(f"{SOURCE_LABEL}: missing 'Time Series (Daily)' in payload")
+
+    # Field mapping: source key → canonical key.  Both sides are identical here
+    # because the source is AV-shaped.  Edit the LEFT side if your source differs.
+    FIELD_MAP = {
+        "1. open":           "1. open",
+        "2. high":           "2. high",
+        "3. low":            "3. low",
+        "4. close":          "4. close",
+        "5. adjusted close": "5. adjusted close",  # mandatory; map to your adj-close field
+        "6. volume":         "6. volume",
+    }
+    canonical_ts = {}
+    for date_str, bar in ts.items():
+        if not isinstance(bar, dict):
+            continue
+        canonical_ts[date_str] = {
+            dst: bar[src] for src, dst in FIELD_MAP.items() if src in bar
+        }
+    return {"Time Series (Daily)": canonical_ts}
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--input",  required=True, help="cache_path from tool result")
+    ap.add_argument("--output", required=True, help="raw/daily_adjusted.json destination")
+    args = ap.parse_args()
+
+    # The tool result is the file-offload envelope; --input is cache_path directly.
+    payload = _read_offload(args.input)
+    canonical = _transform(payload)
+    with open(args.output, "w", encoding="utf-8") as fh:
+        json.dump(canonical, fh, separators=(",", ":"))
+    print(f"OK: wrote {args.output}", file=sys.stderr)
+
+if __name__ == "__main__":
+    main()
+```
+
+**`spy_daily_adjusted` reuses the same transform** — run the same adapter with `--output raw/spy_daily_adjusted.json`:
+
+```bash
+python3 trading_desk_config/adapters/mcp:governed_av_daily_adjusted.py \
+    --input  <cache_path for SPY tool result> \
+    --output trading_desk_<TICKER>/detail_reports_<DATE>/raw/spy_daily_adjusted.json
+```
+
+No second adapter file is needed.
+
+---
+
+### 2-MCP-B — Bulk group: `options_chain`
+
+Same file-offload contract: read the body at `cache_path`.  The governed source returns an AV-shaped chain.  Map each contract to the canonical fields and emit a raw JSON list.
+
+Save to `./trading_desk_config/adapters/mcp:governed_av_options_chain.py`.  **Never read the emitted file into context** — `scripts/chain.py` is the only reader.
+
+```python
+# trading_desk_config/adapters/mcp:governed_av_options_chain.py
+#
+# Structural adapter: mcp:governed_av → canonical options_chain shape.
+# STRUCTURAL ONLY.  See docs/CANONICAL_CONTRACT.md "options_chain".
+#
+# Usage:
+#   python3 trading_desk_config/adapters/mcp:governed_av_options_chain.py \
+#       --input  <cache_path from tool result>  \
+#       --output <bundle>/raw/options_chain.json
+
+import argparse, json, sys
+
+SOURCE_LABEL = "mcp:governed_av"
+
+def _read_offload(cache_path):
+    try:
+        with open(cache_path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        raise ValueError(f"{SOURCE_LABEL}: offloaded file not found: {cache_path!r}")
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{SOURCE_LABEL}: JSON parse error at {cache_path!r}: {exc}")
+
+def _transform(payload):
+    """Map source payload → canonical options_chain shape (raw JSON list).
+
+    Source shape: a list of contract dicts (AV-shaped), or a dict with a
+    "data" or "options" key holding that list.
+
+    Target shape (accepted by scripts/chain.load_contracts):
+        A raw JSON list of contracts, each dict with:
+          expiration (YYYY-MM-DD) — REQUIRED
+          type       (call|put)   — REQUIRED
+          strike     (number)     — REQUIRED
+          mark, bid, ask, iv (or implied_volatility), delta,
+          oi (or open_interest), volume, last   — optional
+
+    STRUCTURAL ONLY: rename source fields to canonical names.
+    Do NOT compute mark from bid/ask — chain.py already does that fallback.
+    """
+    # Unwrap dict containers if needed.
+    if isinstance(payload, dict):
+        for key in ("data", "options"):
+            if isinstance(payload.get(key), list):
+                payload = payload[key]
+                break
+    if not isinstance(payload, list):
+        raise ValueError(
+            f"{SOURCE_LABEL} options_chain: expected a list of contracts "
+            f"(or dict with 'data'/'options' list), got {type(payload).__name__}"
+        )
+
+    # Field mapping: source key → canonical key.
+    # Edit the LEFT side if your source uses different names.
+    # chain.py also accepts "implied_volatility" as an alias for "iv",
+    # and "open_interest" as an alias for "oi" — map whichever your source has.
+    FIELD_MAP = {
+        "expiration":         "expiration",   # REQUIRED; YYYY-MM-DD
+        "type":               "type",         # REQUIRED; "call" or "put"
+        "strike":             "strike",       # REQUIRED; must coerce to float
+        "mark":               "mark",
+        "bid":                "bid",
+        "ask":                "ask",
+        "implied_volatility": "iv",           # or map "iv" → "iv" if source uses "iv"
+        "delta":              "delta",
+        "open_interest":      "oi",           # or map "oi" → "oi"
+        "volume":             "volume",
+        "last":               "last",
+    }
+    canonical = []
+    for contract in payload:
+        if not isinstance(contract, dict):
+            continue
+        c = {dst: contract[src] for src, dst in FIELD_MAP.items() if src in contract}
+        # Skip contracts missing any required field.
+        if not all(k in c for k in ("expiration", "type", "strike")):
+            continue
+        canonical.append(c)
+    return canonical
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--input",  required=True, help="cache_path from tool result")
+    ap.add_argument("--output", required=True, help="raw/options_chain.json destination")
+    args = ap.parse_args()
+
+    payload = _read_offload(args.input)
+    canonical = _transform(payload)
+    with open(args.output, "w", encoding="utf-8") as fh:
+        json.dump(canonical, fh, separators=(",", ":"))
+    print(f"OK: wrote {args.output} ({len(canonical)} contracts)", file=sys.stderr)
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+### 2-MCP-C — Scalar transcription: `overview`
+
+The governed source returns AV-shaped JSON directly in the tool result — transcription is near-1:1.  Write the payload **verbatim** to `raw/overview.json`; record the tool name in the manifest entry.  The QC gate's mktcap, P/E, and net-cash arithmetic cross-checks are the transcription audit.
+
+```python
+# Pseudocode — this is NOT a file-offload; the tool result arrives in context.
+
+result = mcp__governed_av__COMPANY_OVERVIEW(symbol="AAPL")  # your tool name here
+
+# The result is AV-shaped: a flat dict with the consumed keys the builder reads
+# (MarketCapitalization, SharesOutstanding, EPS, PERatio, EVToEBITDA, PEGRatio,
+#  52WeekHigh, 52WeekLow, ReturnOnEquityTTM, AnalystTargetPrice,
+#  AnalystRatingStrongBuy/Buy/Hold/Sell/StrongSell,
+#  DividendPerShare, ExDividendDate, DividendDate).
+# Units are standard AV units (MarketCapitalization in absolute dollars, etc.).
+
+# Save verbatim — do not reformat or compute any number:
+with open("raw/overview.json", "w") as fh:
+    json.dump(result, fh)
+
+# Record in manifest.files:
+manifest["files"]["overview"] = {
+    "path": "raw/overview.json",
+    "endpoint_or_url": "mcp:governed_av / COMPANY_OVERVIEW",
+    "retrieved_utc": "<utc>"
+}
+```
+
+**Full vs. compact caveat:** if the source supports a `compact` mode for statement endpoints (`income_statement`, `balance_sheet`, `cash_flow`), always request the **full** body (omit `compact`).  Compact responses truncate `quarterlyReports`; with fewer than 5 quarters the builder cannot compute YoY revenue growth (needs index 0 vs. index 4) or a 4-quarter TTM sum.
+
+---
+
+### 2-MCP-D — `pc_ratio_realtime`: source has only HISTORICAL data
+
+The governed source exposes `HISTORICAL_PUT_CALL_RATIO`, not a realtime endpoint.  Do not call a realtime P/C tool that does not exist.  Instead: either fetch from the **web path** (Step 2-ALT / Step 3 web research) and write `raw/pc_ratio_realtime.json` in the accepted scalar shape, or **leave the key absent** and accept the degraded result.  The QC gate already handles an absent P/C — `pc_ratio_realtime` becomes null, listed in `meta.missing`, and options sentiment renormalizes without it.
+
+```
+# In manifest.api_tier_notes, record the absence:
+"pc_ratio_realtime unavailable from mcp:governed_av (HISTORICAL_PUT_CALL_RATIO only) — accepted degraded or fell back to web path"
+```
+
+---
+
+### 2-MCP-E — How to validate an adapter before committing it
+
+1. **Run the adapter** against a real tool-result cache file:
+   ```bash
+   python3 trading_desk_config/adapters/mcp:governed_av_daily_adjusted.py \
+       --input  <cache_path>  \
+       --output trading_desk_<TICKER>/detail_reports_<DATE>/raw/daily_adjusted.json
+   ```
+   The script prints `OK: wrote ...` on success, or an explicit error on shape mismatch.
+
+2. **Run the snapshot builder:**
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_snapshot.py \
+       --bundle trading_desk_<TICKER>/detail_reports_<DATE> --ticker <TICKER>
+   ```
+   Exit 2 means a required file is missing or unparseable — the error message names the key and the parse failure, which points directly to the mismatched field name in the adapter.
+
+3. **Run the QC gate:**
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/qc_gate.py \
+       trading_desk_<TICKER>/detail_reports_<DATE>/snapshot_<TICKER>_<DATE>.json
+   ```
+   Exit 0 means the adapter is correct: the same reconciliation checks that pass on a native AV bundle — mktcap, P/E, net-cash, MA ordering, range sanity, options freshness, staleness — also pass here.  Any structural slip (wrong field name, missing adjusted close, non-numeric strike) surfaces as a named check failure, not a silent wrong number.
+
+---
+
 ## Step 3 — Web gap-fill (AV has no endpoint for these)
 
 **(a)** ONE independent spot-price check from any public quote page. Write `raw/web_spot.json` (key `web_spot_check`):
