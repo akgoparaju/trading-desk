@@ -79,7 +79,7 @@ The valuation floor then becomes the coverage DCF bear case (`dcf_bear`, basis `
 The module JSON is small — read it directly. Then write `<bundle>/brief_risk.md` with exactly these parts, in order:
 
 1. **Score headline** — `## Risk Score: <score>/100 — <one-line conditions read>`. Copy `score` verbatim. If `renormalized` is true, add a one-line note quoting `renormalization_note`. State once, plainly, that higher = better conditions.
-2. **A single paragraph, ≤120 words.** Cite ONLY numbers present in `module_risk.json` (the `subscores[].arithmetic` strings and `inputs`) or the snapshot. Zero computed-in-prose numbers. Walk the six dimensions (volatility state, drawdown profile, margin of safety, liquidity & solvency, event risk, tail risk), naming the points each earned and why, using the `arithmetic` strings as your source of truth. When `event_risk` or `tail_risk` is cited, note that these are risk-v1.1.0 PROVISIONAL factors (unratified pending B9 calibration).
+2. **A single paragraph, ≤120 words.** Wrap the paragraph in `<!-- BRIEF:START -->` … `<!-- BRIEF:END -->` delimiters (one delimiter per line, the paragraph text between them). Cite ONLY numbers present in `module_risk.json` (the `subscores[].arithmetic` strings and `inputs`) or the snapshot. Zero computed-in-prose numbers. Walk the six dimensions (volatility state, drawdown profile, margin of safety, liquidity & solvency, event risk, tail risk), naming the points each earned and why, using the `arithmetic` strings as your source of truth. When `event_risk` or `tail_risk` is cited, note that these are risk-v1.1.0 PROVISIONAL factors (unratified pending B9 calibration).
 3. **Downside-map mini-table** — the FIRST 5 rows of `tables.downside_map` — the map is emitted nearest-first, so rows 1-5 are the nearest anchors below `last` in the order price would fall through them, each with its `level`, `type`, and `basis`; include `pct_from_last` if you show a distance (quote it, never recompute), and the `risk` text on the stress row:
 
    | Level | Type | Basis | % from last |
@@ -87,7 +87,7 @@ The module JSON is small — read it directly. Then write `<bundle>/brief_risk.m
    | … | … | … | … |
 
 4. **Correlation note vs SPY** — one line from `tables.vol_profile`: quote `beta`, `corr`, and `beta_n_days`. Correlation is context (it is NOT scored) — say so, so no reader treats it as a scored factor.
-5. **One-line signal** — your single-sentence read of the risk-reward setup (e.g. "Volatility is calm and the balance sheet is net-cash, but the entry sits near the highs with thin downside asymmetry — size small until it pulls back to structure."). This is the ONLY place a signal appears; it is prose, never a number, and the JSON's `signal` field stays `null`.
+5. **One-line signal** — Wrap the signal in `<!-- SIGNAL:START -->` … `<!-- SIGNAL:END -->` delimiters (one delimiter per line, the signal text between them). Your single-sentence read of the risk-reward setup (e.g. "Volatility is calm and the balance sheet is net-cash, but the entry sits near the highs with thin downside asymmetry — size small until it pulls back to structure."). This is the ONLY place a signal appears; it is prose, never a number, and the JSON's `signal` field stays `null`.
 6. **Footer** — `_Rubric v<rubric_version> · as of <as_of>_` using the JSON's fields.
 
 ---

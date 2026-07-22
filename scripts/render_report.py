@@ -169,6 +169,43 @@ def _table(headers, rows):
 
 
 # --------------------------------------------------------------------------- #
+# O11: Brief-transclusion helper.
+# --------------------------------------------------------------------------- #
+
+def _read_brief_span(bundle, dim, kind):
+    """Read the STRIPPED text between ``<!-- {kind}:START -->`` and
+    ``<!-- {kind}:END -->`` in ``<bundle>/brief_<dim>.md``.
+
+    Returns the stripped span string, or ``None`` if:
+    - the file is missing;
+    - either marker is absent;
+    - the extracted span is empty after stripping.
+
+    ``kind`` is ``"BRIEF"`` or ``"SIGNAL"``.
+    """
+    if bundle is None:
+        return None
+    path = os.path.join(bundle, f"brief_{dim}.md")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    start_marker = f"<!-- {kind}:START -->"
+    end_marker = f"<!-- {kind}:END -->"
+    start_idx = text.find(start_marker)
+    if start_idx == -1:
+        return None
+    end_idx = text.find(end_marker, start_idx + len(start_marker))
+    if end_idx == -1:
+        return None
+    span = text[start_idx + len(start_marker):end_idx].strip()
+    return span if span else None
+
+
+# --------------------------------------------------------------------------- #
 # Page 1 -- Decision.
 # --------------------------------------------------------------------------- #
 
@@ -409,7 +446,7 @@ def _score_headline(label, module, slot_suffix):
     return f"### {label} — {_fmt(score)}/100 (rubric v{ver}){badge}"
 
 
-def build_technical_evidence(technical):
+def build_technical_evidence(technical, bundle=None):
     ladder = technical.get("ladder", []) or []
     below = sorted([e for e in ladder if e.get("pct_from_last") is not None
                     and e["pct_from_last"] < 0],
@@ -425,35 +462,39 @@ def build_technical_evidence(technical):
         rows.append(["resistance", _fmt(e.get("level")), e.get("type", ""),
                      _pct(e.get("pct_from_last"))])
     table = _table(["Side", "Level", "Type", "% from last"], rows)
+    brief_span = _read_brief_span(bundle, "technical", "BRIEF")
+    signal_span = _read_brief_span(bundle, "technical", "SIGNAL")
     return "\n".join([
         _score_headline("Technical", technical, "technical"),
         "",
-        "<!-- SLOT:brief_technical -->",
+        brief_span if brief_span is not None else "<!-- SLOT:brief_technical -->",
         "",
         table,
         "",
-        "<!-- SLOT:signal_technical -->",
+        signal_span if signal_span is not None else "<!-- SLOT:signal_technical -->",
     ])
 
 
-def build_fundamental_evidence(fundamental):
+def build_fundamental_evidence(fundamental, bundle=None):
     subs = fundamental.get("subscores", []) or []
     rows = []
     for s in subs:
         rows.append([s.get("name", ""), _fmt(s.get("points")), _fmt(s.get("max"))])
     table = _table(["Sub-dimension", "Points", "Max"], rows)
+    brief_span = _read_brief_span(bundle, "fundamental", "BRIEF")
+    signal_span = _read_brief_span(bundle, "fundamental", "SIGNAL")
     return "\n".join([
         _score_headline("Fundamental", fundamental, "fundamental"),
         "",
-        "<!-- SLOT:brief_fundamental -->",
+        brief_span if brief_span is not None else "<!-- SLOT:brief_fundamental -->",
         "",
         table,
         "",
-        "<!-- SLOT:signal_fundamental -->",
+        signal_span if signal_span is not None else "<!-- SLOT:signal_fundamental -->",
     ])
 
 
-def build_sentiment_evidence(sentiment_mod):
+def build_sentiment_evidence(sentiment_mod, bundle=None):
     tables = sentiment_mod.get("tables", {}) or {}
     pos = tables.get("positioning", {}) or {}
     rows = [
@@ -462,36 +503,40 @@ def build_sentiment_evidence(sentiment_mod):
         ["IV percentile (1yr)", _fmt(pos.get("iv_pctile_1yr"))],
     ]
     table = _table(["Positioning", "Value"], rows)
+    brief_span = _read_brief_span(bundle, "sentiment", "BRIEF")
+    signal_span = _read_brief_span(bundle, "sentiment", "SIGNAL")
     return "\n".join([
         _score_headline("Sentiment / Positioning", sentiment_mod, "sentiment"),
         "",
-        "<!-- SLOT:brief_sentiment -->",
+        brief_span if brief_span is not None else "<!-- SLOT:brief_sentiment -->",
         "",
         table,
         "",
-        "<!-- SLOT:signal_sentiment -->",
+        signal_span if signal_span is not None else "<!-- SLOT:signal_sentiment -->",
     ])
 
 
-def build_risk_evidence(risk):
+def build_risk_evidence(risk, bundle=None):
     dm = ((risk.get("tables", {}) or {}).get("downside_map") or [])[:5]
     rows = []
     for r in dm:
         rows.append([_fmt(r.get("level")), r.get("type", ""),
                      _pct(r.get("pct_from_last"))])
     table = _table(["Level", "Type", "% from last"], rows)
+    brief_span = _read_brief_span(bundle, "risk", "BRIEF")
+    signal_span = _read_brief_span(bundle, "risk", "SIGNAL")
     return "\n".join([
         _score_headline("Risk", risk, "risk"),
         "",
-        "<!-- SLOT:brief_risk -->",
+        brief_span if brief_span is not None else "<!-- SLOT:brief_risk -->",
         "",
         table,
         "",
-        "<!-- SLOT:signal_risk -->",
+        signal_span if signal_span is not None else "<!-- SLOT:signal_risk -->",
     ])
 
 
-def build_thesis_evidence(composite):
+def build_thesis_evidence(composite, bundle=None):
     ev = composite.get("ev", {}) or {}
     scenarios = ev.get("scenarios", []) or []
     rows = []
@@ -502,11 +547,16 @@ def build_thesis_evidence(composite):
     ev_line = (f"EV at current: {_fmt(ev.get('ev_at_current'))} · "
                f"hurdle {_fmt(ev.get('hurdle_total'))} · "
                f"EV-breakeven entry {_fmt(ev.get('ev_breakeven_entry'))}")
+    # The composite-score skill writes brief_composite.md (not brief_thesis.md);
+    # its part-2 BRIEF span is the tension sentence that belongs here.
+    # No SIGNAL marker exists in brief_composite.md, so the signal slot falls
+    # back to the open mark unconditionally.
+    brief_span = _read_brief_span(bundle, "composite", "BRIEF")
     return "\n".join([
         _score_headline("Thesis / EV", composite, "thesis").replace(
             "/100 (rubric", " conviction (rubric"),
         "",
-        "<!-- SLOT:brief_thesis -->",
+        brief_span if brief_span is not None else "<!-- SLOT:brief_thesis -->",
         "",
         table,
         "",
@@ -516,19 +566,20 @@ def build_thesis_evidence(composite):
     ])
 
 
-def build_page2(technical, fundamental, sentiment_mod, risk, composite):
+def build_page2(technical, fundamental, sentiment_mod, risk, composite,
+                bundle=None):
     parts = [
         "## Page 2 — Evidence",
         "",
-        build_technical_evidence(technical),
+        build_technical_evidence(technical, bundle=bundle),
         "",
-        build_fundamental_evidence(fundamental),
+        build_fundamental_evidence(fundamental, bundle=bundle),
         "",
-        build_sentiment_evidence(sentiment_mod),
+        build_sentiment_evidence(sentiment_mod, bundle=bundle),
         "",
-        build_risk_evidence(risk),
+        build_risk_evidence(risk, bundle=bundle),
         "",
-        build_thesis_evidence(composite),
+        build_thesis_evidence(composite, bundle=bundle),
     ]
     return "\n".join(parts)
 
@@ -792,7 +843,7 @@ def build_page3(snapshot, technical, risk, composite, options, tradeplan, module
 # Full report assembly.
 # --------------------------------------------------------------------------- #
 
-def build_full_report(bundle_docs):
+def build_full_report(bundle_docs, bundle=None):
     snapshot = bundle_docs["snapshot"]
     ticker = (snapshot.get("meta", {}) or {}).get("ticker", "UNKNOWN")
     as_of_date = (snapshot.get("meta", {}) or {}).get("as_of_utc", "")[:10]
@@ -803,7 +854,8 @@ def build_full_report(bundle_docs):
                         bundle_docs["module_fundamental"],
                         bundle_docs["module_sentiment"],
                         bundle_docs["module_risk"],
-                        bundle_docs["module_composite"])
+                        bundle_docs["module_composite"],
+                        bundle=bundle)
     page3 = build_page3(snapshot, bundle_docs["module_technical"],
                         bundle_docs["module_risk"], bundle_docs["module_composite"],
                         bundle_docs["module_options"],
@@ -1055,7 +1107,7 @@ def main(argv=None):
         print(f"ERROR: no readable snapshot in {args.bundle}", file=sys.stderr)
         return 2
 
-    report = build_full_report(docs)
+    report = build_full_report(docs, bundle=args.bundle)
     out = args.out or _default_out(args.bundle, docs["snapshot"], delta=False)
     with open(out, "w") as fh:
         fh.write(report)

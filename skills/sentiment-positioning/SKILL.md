@@ -86,7 +86,7 @@ The script loads the newest snapshot, scores the five dimensions, builds the pos
 The module JSON is small — read it directly. Then write `<bundle>/brief_sentiment.md` with exactly these parts, in order:
 
 1. **Score headline** — `## Sentiment Score: <score>/100 — <one-line read>`. Copy `score` verbatim. If `renormalized` is true, add a one-line note quoting `renormalization_note`.
-2. **A single paragraph, ≤120 words.** Cite ONLY numbers present in `module_sentiment.json` (the `subscores[].arithmetic` strings and `inputs`) or the snapshot. Zero computed-in-prose numbers. Walk the five dimensions (street view, revisions momentum, smart money & insiders, positioning & derivatives, price momentum), naming the points each earned and why, using the `arithmetic` strings as your source of truth. If the street-view dimension was capped ("PT below price: dimension capped at 10/25"), say so plainly.
+2. **A single paragraph, ≤120 words.** Wrap the paragraph in `<!-- BRIEF:START -->` … `<!-- BRIEF:END -->` delimiters (one delimiter per line, the paragraph text between them). Cite ONLY numbers present in `module_sentiment.json` (the `subscores[].arithmetic` strings and `inputs`) or the snapshot. Zero computed-in-prose numbers. Walk the five dimensions (street view, revisions momentum, smart money & insiders, positioning & derivatives, price momentum), naming the points each earned and why, using the `arithmetic` strings as your source of truth. If the street-view dimension was capped ("PT below price: dimension capped at 10/25"), say so plainly.
 3. **Momentum & positioning mini-table** — from `tables.momentum_vs_spy` and `tables.positioning`, quoting the relative returns and positioning figures (never recompute a `rel_*` value):
 
    | Metric | Value |
@@ -97,7 +97,7 @@ The module JSON is small — read it directly. Then write `<bundle>/brief_sentim
    | iv_pctile_1yr | … |
 
 4. **Hedging-cost note** — if `tables.hedging_cost_note` is non-null, include it as a one-liner (protective structures historically cheap; cross-ref options-strategy). Omit if null.
-5. **One-line signal** — your single-sentence read of the sentiment/positioning setup (e.g. "Street is constructive and revisions are turning up, but a call-heavy chain and low short interest into overbought RSI say the froth is already priced — no fresh-money edge here."). This is the ONLY place a signal appears; it is prose, never a number, and the JSON's `signal` field stays `null`.
+5. **One-line signal** — Wrap the signal in `<!-- SIGNAL:START -->` … `<!-- SIGNAL:END -->` delimiters (one delimiter per line, the signal text between them). Your single-sentence read of the sentiment/positioning setup (e.g. "Street is constructive and revisions are turning up, but a call-heavy chain and low short interest into overbought RSI say the froth is already priced — no fresh-money edge here."). This is the ONLY place a signal appears; it is prose, never a number, and the JSON's `signal` field stays `null`.
 6. **Footer** — `_Rubric v<rubric_version> · as of <as_of>_` using the JSON's fields.
 
 ---

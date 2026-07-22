@@ -1633,5 +1633,273 @@ class TestConfidenceBadgeRender(unittest.TestCase):
             self.assertIn("### Risk", text)
 
 
+# --------------------------------------------------------------------------- #
+# O11: _read_brief_span + evidence builder transclusion.
+# --------------------------------------------------------------------------- #
+
+class TestReadBriefSpan(unittest.TestCase):
+    """O11.1 — _read_brief_span(bundle, dim, kind) helper."""
+
+    def test_read_brief_span_extracts_marked_text(self):
+        import pathlib
+        d = tempfile.mkdtemp()
+        (pathlib.Path(d) / "brief_technical.md").write_text(
+            "## Technical Score: 72/100\n\n"
+            "<!-- BRIEF:START -->\nTrend earned 24/30 on price>MA50>MA200.\n<!-- BRIEF:END -->\n\n"
+            "| t |\n\n<!-- SIGNAL:START -->\nConstructive uptrend holding MA50.\n<!-- SIGNAL:END -->\n")
+        self.assertEqual(
+            rr._read_brief_span(d, "technical", "BRIEF"),
+            "Trend earned 24/30 on price>MA50>MA200.")
+        self.assertEqual(
+            rr._read_brief_span(d, "technical", "SIGNAL"),
+            "Constructive uptrend holding MA50.")
+
+    def test_read_brief_span_none_when_missing(self):
+        d = tempfile.mkdtemp()
+        self.assertIsNone(rr._read_brief_span(d, "risk", "BRIEF"))
+
+    def test_read_brief_span_none_when_markers_absent(self):
+        """File present but no markers -> None."""
+        import pathlib
+        d = tempfile.mkdtemp()
+        (pathlib.Path(d) / "brief_technical.md").write_text(
+            "## Technical Score: 72/100\n\nSome paragraph without markers.\n")
+        self.assertIsNone(rr._read_brief_span(d, "technical", "BRIEF"))
+
+    def test_read_brief_span_none_when_span_empty(self):
+        """Markers present but span is empty -> None."""
+        import pathlib
+        d = tempfile.mkdtemp()
+        (pathlib.Path(d) / "brief_technical.md").write_text(
+            "## Headline\n<!-- BRIEF:START -->\n<!-- BRIEF:END -->\n")
+        self.assertIsNone(rr._read_brief_span(d, "technical", "BRIEF"))
+
+    def test_read_brief_span_multiline_brief(self):
+        """Multi-line brief is returned joined."""
+        import pathlib
+        d = tempfile.mkdtemp()
+        (pathlib.Path(d) / "brief_risk.md").write_text(
+            "<!-- BRIEF:START -->\nLine one.\nLine two.\n<!-- BRIEF:END -->\n")
+        result = rr._read_brief_span(d, "risk", "BRIEF")
+        self.assertIsNotNone(result)
+        self.assertIn("Line one.", result)
+        self.assertIn("Line two.", result)
+
+
+class TestBuildTechnicalEvidenceTransclusion(unittest.TestCase):
+    """O11.2 — build_technical_evidence transcludes when brief present, falls back when absent."""
+
+    def _minimal_technical(self):
+        """Minimal technical dict matching what build_technical_evidence reads."""
+        return {
+            "score": 72,
+            "rubric_version": "1.0.0",
+            "ladder": [
+                {"level": 90.0, "type": "ma200", "basis": "ohlcv",
+                 "pct_from_last": -0.10},
+                {"level": 110.0, "type": "swing_high", "basis": "ohlcv",
+                 "pct_from_last": 0.10},
+            ],
+        }
+
+    def test_build_technical_evidence_transcludes_when_brief_present(self):
+        import pathlib
+        d = tempfile.mkdtemp()
+        brief_text = "Trend earned 24/30 on price above MA50 and MA200 stack."
+        signal_text = "Constructive uptrend holding MA50 support."
+        (pathlib.Path(d) / "brief_technical.md").write_text(
+            "## Technical Score: 72/100\n\n"
+            f"<!-- BRIEF:START -->\n{brief_text}\n<!-- BRIEF:END -->\n\n"
+            "| t |\n\n"
+            f"<!-- SIGNAL:START -->\n{signal_text}\n<!-- SIGNAL:END -->\n")
+        technical = self._minimal_technical()
+        out = rr.build_technical_evidence(technical, bundle=d)
+        self.assertIn(brief_text, out)
+        self.assertIn(signal_text, out)
+        self.assertNotIn("<!-- SLOT:brief_technical -->", out)
+        self.assertNotIn("<!-- SLOT:signal_technical -->", out)
+
+    def test_build_technical_evidence_leaves_slot_when_brief_absent(self):
+        d = tempfile.mkdtemp()  # no brief file
+        technical = self._minimal_technical()
+        out = rr.build_technical_evidence(technical, bundle=d)
+        self.assertIn("<!-- SLOT:brief_technical -->", out)
+        self.assertIn("<!-- SLOT:signal_technical -->", out)
+
+    def test_build_technical_evidence_leaves_slot_when_bundle_none(self):
+        """No bundle arg at all -> slot marks preserved (backward compat)."""
+        technical = self._minimal_technical()
+        out = rr.build_technical_evidence(technical)
+        self.assertIn("<!-- SLOT:brief_technical -->", out)
+        self.assertIn("<!-- SLOT:signal_technical -->", out)
+
+    def test_build_technical_evidence_partial_transclusion(self):
+        """Brief present but SIGNAL marker absent -> brief transcluded, signal slot left."""
+        import pathlib
+        d = tempfile.mkdtemp()
+        brief_text = "Paragraph text here."
+        (pathlib.Path(d) / "brief_technical.md").write_text(
+            f"<!-- BRIEF:START -->\n{brief_text}\n<!-- BRIEF:END -->\n")
+        technical = self._minimal_technical()
+        out = rr.build_technical_evidence(technical, bundle=d)
+        self.assertIn(brief_text, out)
+        self.assertNotIn("<!-- SLOT:brief_technical -->", out)
+        # signal marker absent -> slot preserved
+        self.assertIn("<!-- SLOT:signal_technical -->", out)
+
+
+class TestBuildEvidenceFunctionsTransclusion(unittest.TestCase):
+    """O11.2 — fundamental/sentiment/risk/thesis builders transclude similarly."""
+
+    def _write_brief(self, d, dim, brief_text, signal_text):
+        import pathlib
+        (pathlib.Path(d) / f"brief_{dim}.md").write_text(
+            f"<!-- BRIEF:START -->\n{brief_text}\n<!-- BRIEF:END -->\n"
+            f"<!-- SIGNAL:START -->\n{signal_text}\n<!-- SIGNAL:END -->\n")
+
+    def test_build_fundamental_evidence_transcludes(self):
+        d = tempfile.mkdtemp()
+        brief_text = "Quality sub-dim earned 30/50 on revenue growth."
+        signal_text = "Fundamental backdrop is supportive."
+        self._write_brief(d, "fundamental", brief_text, signal_text)
+        fundamental = _fundamental_doc()
+        out = rr.build_fundamental_evidence(fundamental, bundle=d)
+        self.assertIn(brief_text, out)
+        self.assertIn(signal_text, out)
+        self.assertNotIn("<!-- SLOT:brief_fundamental -->", out)
+        self.assertNotIn("<!-- SLOT:signal_fundamental -->", out)
+
+    def test_build_fundamental_evidence_leaves_slot_without_bundle(self):
+        fundamental = _fundamental_doc()
+        out = rr.build_fundamental_evidence(fundamental)
+        self.assertIn("<!-- SLOT:brief_fundamental -->", out)
+
+    def test_build_sentiment_evidence_transcludes(self):
+        d = tempfile.mkdtemp()
+        brief_text = "Street is constructive with buy-side consensus at 72 pct."
+        signal_text = "Sentiment neutral-to-constructive."
+        self._write_brief(d, "sentiment", brief_text, signal_text)
+        sentiment = _sentiment_doc()
+        out = rr.build_sentiment_evidence(sentiment, bundle=d)
+        self.assertIn(brief_text, out)
+        self.assertIn(signal_text, out)
+        self.assertNotIn("<!-- SLOT:brief_sentiment -->", out)
+
+    def test_build_sentiment_evidence_leaves_slot_without_bundle(self):
+        sentiment = _sentiment_doc()
+        out = rr.build_sentiment_evidence(sentiment)
+        self.assertIn("<!-- SLOT:brief_sentiment -->", out)
+
+    def test_build_risk_evidence_transcludes(self):
+        d = tempfile.mkdtemp()
+        brief_text = "Volatility is elevated but drawdown profile is shallow."
+        signal_text = "Risk setup is mixed; size defensively."
+        self._write_brief(d, "risk", brief_text, signal_text)
+        risk = _risk_doc()
+        out = rr.build_risk_evidence(risk, bundle=d)
+        self.assertIn(brief_text, out)
+        self.assertIn(signal_text, out)
+        self.assertNotIn("<!-- SLOT:brief_risk -->", out)
+
+    def test_build_risk_evidence_leaves_slot_without_bundle(self):
+        risk = _risk_doc()
+        out = rr.build_risk_evidence(risk)
+        self.assertIn("<!-- SLOT:brief_risk -->", out)
+
+    def test_build_thesis_evidence_transcludes_from_composite_brief(self):
+        """Thesis brief is sourced from brief_composite.md (BRIEF span), not
+        brief_thesis.md — no skill writes brief_thesis.md; the composite-score
+        skill writes brief_composite.md whose part-2 is the tension sentence."""
+        import pathlib
+        d = tempfile.mkdtemp()
+        tension = "Bull-base EV skews positive on HBM ramp; bear tail is binary."
+        (pathlib.Path(d) / "brief_composite.md").write_text(
+            f"<!-- BRIEF:START -->\n{tension}\n<!-- BRIEF:END -->\n")
+        composite = _composite_doc()
+        out = rr.build_thesis_evidence(composite, bundle=d)
+        self.assertIn(tension, out, "tension sentence from brief_composite.md not transcluded")
+        self.assertNotIn("<!-- SLOT:brief_thesis -->", out,
+                         "slot mark should be replaced by transcluded text")
+
+    def test_build_thesis_evidence_fallback_without_composite_brief(self):
+        """When brief_composite.md is absent the slot mark is preserved (fallback)."""
+        import pathlib
+        d = tempfile.mkdtemp()
+        # Deliberately do NOT write brief_composite.md — only a decoy brief_thesis.md
+        (pathlib.Path(d) / "brief_thesis.md").write_text(
+            "<!-- BRIEF:START -->\ndecoy text\n<!-- BRIEF:END -->\n")
+        composite = _composite_doc()
+        out = rr.build_thesis_evidence(composite, bundle=d)
+        self.assertIn("<!-- SLOT:brief_thesis -->", out,
+                      "slot mark should remain when brief_composite.md is absent")
+        self.assertNotIn("decoy text", out,
+                         "brief_thesis.md should never be read for the thesis slot")
+
+    def test_build_thesis_evidence_transcludes(self):
+        # Thesis brief comes from brief_composite.md BRIEF span (no SIGNAL span
+        # exists in brief_composite.md, so signal_thesis slot always falls back).
+        import pathlib
+        d = tempfile.mkdtemp()
+        brief_text = "EV asymmetry tilts bull on HBM demand, base scenario at fair value."
+        (pathlib.Path(d) / "brief_composite.md").write_text(
+            f"<!-- BRIEF:START -->\n{brief_text}\n<!-- BRIEF:END -->\n")
+        composite = _composite_doc()
+        out = rr.build_thesis_evidence(composite, bundle=d)
+        self.assertIn(brief_text, out)
+        self.assertNotIn("<!-- SLOT:brief_thesis -->", out)
+        # signal slot always falls back (no SIGNAL marker in brief_composite.md)
+        self.assertIn("<!-- SLOT:signal_thesis -->", out)
+
+    def test_build_thesis_evidence_leaves_slot_without_bundle(self):
+        composite = _composite_doc()
+        out = rr.build_thesis_evidence(composite)
+        self.assertIn("<!-- SLOT:brief_thesis -->", out)
+
+
+class TestBuildPage2BundleThreading(unittest.TestCase):
+    """O11.2 — build_page2 threads bundle to all five builders."""
+
+    def test_build_page2_transcludes_all_five_when_briefs_present(self):
+        # technical/fundamental/sentiment/risk each have brief_{dim}.md with
+        # BRIEF+SIGNAL spans.  Thesis is different: its brief comes from
+        # brief_composite.md (BRIEF span only); no SIGNAL span exists in
+        # brief_composite.md so signal_thesis always falls back to its slot mark.
+        import pathlib
+        d = tempfile.mkdtemp()
+        non_thesis_dims = ["technical", "fundamental", "sentiment", "risk"]
+        for dim in non_thesis_dims:
+            (pathlib.Path(d) / f"brief_{dim}.md").write_text(
+                f"<!-- BRIEF:START -->\n{dim} paragraph text.\n<!-- BRIEF:END -->\n"
+                f"<!-- SIGNAL:START -->\n{dim} signal line.\n<!-- SIGNAL:END -->\n")
+        # Thesis brief via brief_composite.md, BRIEF span only.
+        (pathlib.Path(d) / "brief_composite.md").write_text(
+            "<!-- BRIEF:START -->\nthesis paragraph text.\n<!-- BRIEF:END -->\n")
+        out = rr.build_page2(
+            _technical_doc(), _fundamental_doc(), _sentiment_doc(),
+            _risk_doc(), _composite_doc(), bundle=d)
+        for dim in non_thesis_dims:
+            self.assertIn(f"{dim} paragraph text.", out,
+                          f"brief_{dim} not transcluded")
+            self.assertIn(f"{dim} signal line.", out,
+                          f"signal_{dim} not transcluded")
+            self.assertNotIn(f"<!-- SLOT:brief_{dim} -->", out,
+                             f"slot mark still present for {dim}")
+        # Thesis brief transcluded from brief_composite.md
+        self.assertIn("thesis paragraph text.", out,
+                      "thesis brief from brief_composite.md not transcluded")
+        self.assertNotIn("<!-- SLOT:brief_thesis -->", out,
+                         "thesis brief slot mark should be replaced")
+        # signal_thesis always falls back (no SIGNAL in brief_composite.md)
+        self.assertIn("<!-- SLOT:signal_thesis -->", out,
+                      "thesis signal slot mark should remain (no SIGNAL in brief_composite.md)")
+
+    def test_build_page2_without_bundle_leaves_all_slots(self):
+        out = rr.build_page2(
+            _technical_doc(), _fundamental_doc(), _sentiment_doc(),
+            _risk_doc(), _composite_doc())
+        for dim in ("technical", "fundamental", "sentiment", "risk", "thesis"):
+            self.assertIn(f"<!-- SLOT:brief_{dim} -->", out)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -55,12 +55,12 @@ Word budgets (kept tight — the whole report has a 2100-word cap):
 |------|--------|---------|
 | `tension` | 1 sentence | the one real tension in the call (e.g. "constructive score, but the print is a coin-flip and IV is cheap") |
 | `event_playbook` | 3 bullets | beat / inline / miss → the pre-committed action for each, vs the printed implied move |
-| `brief_<dim>` (×5) | ≤120 words each | condense the bundle's existing `brief_<dim>.md` for technical/fundamental/sentiment/risk/thesis — reuse that content, do not re-derive |
-| `signal_<dim>` (×5) | 1 line each | the single takeaway signal for the dimension |
+| `brief_<dim>` (×5) | ≤120 words each | **transcluded verbatim** by `render_report.py` from `<bundle>/brief_<dim>.md` (the `<!-- BRIEF:START -->`…`<!-- BRIEF:END -->` span) — you do NOT re-condense; the word cap is enforced upstream at module-brief authoring time. If the file or markers are absent the slot mark is left open; fill it manually as before. |
+| `signal_<dim>` (×5) | 1 line each | **transcluded verbatim** by `render_report.py` from the `<!-- SIGNAL:START -->`…`<!-- SIGNAL:END -->` span in `brief_<dim>.md`. If absent, fill manually. |
 | `catalyst_notes` | 1-2 lines | context on the scheduled catalysts |
 | `monitoring_notes` | 1-2 lines | what would change the call between now and the next review |
 
-Reuse the bundle's `brief_<dim>.md` files (they already cite only in-bundle numbers) — condense, don't rewrite from scratch.
+The `brief_<dim>` and `signal_<dim>` slots are now deterministically transcluded from the bundle's `brief_<dim>.md` files when those files carry the required delimiters (`<!-- BRIEF:START -->`/`<!-- BRIEF:END -->` and `<!-- SIGNAL:START -->`/`<!-- SIGNAL:END -->`). The render-time LLM no longer re-condenses them — cite in-bundle numbers only when filling any remaining open slots.
 
 ---
 
@@ -171,7 +171,7 @@ If the **financial-analysis docx skill** is available, offer to convert the pass
 - **The §12 gate is blocking.** A report that fails report_qc does not ship. Exit 0 is the ship criterion.
 - **Fix tables in the module, not the report.** If a scripted figure is wrong, the fix is upstream (re-run the module, re-render) — editing a number in the `.md` would pass a wrong figure past the gate on the next run and defeats the whole architecture.
 - **Waivers are disclosed, not silent.** A genuinely justified failure can be waived (`--waive "check:reason"`, same mechanics as the snapshot gate) — the report table then shows WAIVED with the reason. Use this only for a real, disclosed exception, never to hide a fabricated number.
-- **Word cap ~2100.** The three pages together must stay under the cap; the briefs are the main lever — condense the bundle briefs rather than expanding them.
+- **Word cap ~2100.** The three pages together must stay under the cap. The `brief_<dim>` word cap (≤120 words each) is enforced upstream at module-brief authoring time — each module SKILL instructs the LLM to stay within 120 words when it writes `brief_<dim>.md`. The render-time LLM does not re-condense transcluded briefs; the lever is authoring discipline in the upstream module step.
 - **The docket is a render of the SAME bundle; md stays the source of truth.** The PDFs (exec/detail, + delta on a refresh) carry only script-minted numbers + gated `pdf_slots.json` prose. If the render venv is not built, `render_env.py --check` exits 3 → announce md-only with the one-line bootstrap and skip the PDF steps; **the docket never blocks the md report.**
 - **The slots gate is blocking and cannot be bypassed.** `render_pdf` refuses exec/detail unless `report_qc.py --pdf-slots` stamped `qc_passed=true`. Fix slot PROSE, never numbers — the same discipline as the md gate.
 - **The METHODOLOGY appendix, footer stamps, and scale banners are fully scripted — nothing to author.** The methodology page keeps every detail transparent (rubric versions, weights, valuation formulas, active scale, conventions, governance) rendered purely from the module + scale JSONs; it is **out of `pdf_slots.json` scope** — do not try to write or edit it. Slot authoring is unchanged (the four prose blocks). Weight-set / scale footer stamps and the scale-review / pending-proposal banners likewise come from the module and refresh-plan JSONs, never from prose.
