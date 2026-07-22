@@ -59,7 +59,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from scripts import render_report, chain as chain_mod
+from scripts import render_report, chain as chain_mod, decision_contract
 
 _WORD_CAP = 2100
 _ORPHAN_CAP = 20
@@ -965,6 +965,88 @@ def check_horizon_consistency(text, docs):
                    "'12-month' label consistent with horizon_years_convention 1.0")
 
 
+# A bare buy directive in the GOVERNING capital call: whole-word buy or accumulate
+# (case-insensitive). "Accumulate-on-weakness" matches on the "accumulate" stem.
+_BUY_DIRECTIVE_RE = re.compile(r"\b(?:buy|accumulate)\w*", re.IGNORECASE)
+# A line labeled as a demoted evidence read (the composite action shown as
+# disclosure, NOT the governing capital call). Case-insensitive; matches the
+# renderer's "_evidence read:_ ..." annotation and any "evidence read" label.
+_EVIDENCE_READ_RE = re.compile(r"evidence\s+read", re.IGNORECASE)
+
+
+def _the_call_governing_lines(report_text):
+    """The page-1 GOVERNING call lines: everything under '### The Call' up to the
+    next '###' section header, EXCLUDING lines labeled 'evidence read'.
+
+    The capital-status block (bullets) and the governing headline are the binding
+    call; a line demoted to '_evidence read:_' is disclosure and is intentionally
+    dropped so a composite 'Accumulate' shown ONLY there does not read as a bare
+    buy directive. Returns the joined governing text (may be '' if the section is
+    absent).
+    """
+    sections = _page_sections(report_text)
+    if not sections:
+        return ""
+    # page1 body is the first section (its header line "1 — Decision" was consumed
+    # by the split on "## Page ").
+    page1 = sections[0]
+    # Locate the '### The Call' subsection within page 1.
+    m = re.search(r"^###\s+The Call\s*$", page1, flags=re.MULTILINE)
+    if not m:
+        return ""
+    body = page1[m.end():]
+    # Cut at the next '### ' header (e.g. '### Composite').
+    nxt = re.search(r"^###\s", body, flags=re.MULTILINE)
+    if nxt:
+        body = body[:nxt.start()]
+    governing = [ln for ln in body.splitlines()
+                 if not _EVIDENCE_READ_RE.search(ln)]
+    return "\n".join(governing)
+
+
+def check_capital_action_governed(report_text, docs):
+    """FAIL if the contract is capital-INELIGIBLE yet the page-1 GOVERNING capital
+    call still carries a bare buy directive (BUY|ACCUMULATE) outside a labeled
+    'evidence read' line.
+
+    Enforces the review's assertion ``BUY|ACCUMULATE ⇒ capital_eligible``: when
+    ``capital_eligible`` is False the governing call must be the capital status
+    (WAIT / HOLD_NO_ADD), and the composite action ("Hold/Accumulate-on-weakness")
+    may appear ONLY inside a clearly-labeled 'evidence read' annotation. A buy word
+    on the governing headline (or in the capital-status bullets) is a govern
+    violation.
+
+    SKIP when: the contract cannot be built (no composite), ``capital_eligible`` is
+    not False (True or unknown), or the '### The Call' section is absent.
+    """
+    name = "capital_action_governed"
+    composite = docs.get("module_composite") if isinstance(docs, dict) else None
+    if not isinstance(composite, dict):
+        return _result(name, None,
+                       "SKIP: module_composite absent — no contract to govern")
+    contract = decision_contract.build_contract(docs)
+    if contract.get("capital_eligible") is not False:
+        return _result(name, None,
+                       "SKIP: capital_eligible is not False "
+                       f"({contract.get('capital_eligible')}) — nothing to govern")
+    governing = _the_call_governing_lines(report_text)
+    if not governing:
+        return _result(name, None,
+                       "SKIP: '### The Call' section not found in report")
+    m = _BUY_DIRECTIVE_RE.search(governing)
+    if m:
+        blockers = contract.get("capital_blockers") or []
+        return _result(name, False,
+                       f"capital is INELIGIBLE (blockers: "
+                       f"{', '.join(blockers) or 'none'}) but the GOVERNING call "
+                       f"carries a bare buy directive '{m.group(0)}' outside an "
+                       f"'evidence read' annotation; the composite action must be "
+                       f"demoted to a labeled evidence read when capital is blocked.")
+    return _result(name, True,
+                   "capital INELIGIBLE and the governing call carries no bare "
+                   "buy directive (composite action demoted / absent)")
+
+
 # C\d+ token regex (finding citation): same pattern as _FINDING_REF_RE above
 # but compiled once here for use in check_judgment_flag_citations.
 _CID_RE = re.compile(r"C\d+")
@@ -1166,6 +1248,10 @@ def run_report_qc(bundle, report_path, delta=False, previous=None):
         check_reclaimed_level(report_text, docs),
         check_version_labels(report_text, docs),
         check_horizon_consistency(report_text, docs),
+        # G4b/G5: the capital call must be GOVERNED by the decision contract --
+        # an ineligible bundle may not carry a bare buy directive on the governing
+        # call (BUY|ACCUMULATE ⇒ capital_eligible).
+        check_capital_action_governed(report_text, docs),
     ]
 
 

@@ -83,6 +83,22 @@ Kills the three confirmed GOOG defects (353.32 triple-label, "first positive-EV"
 
 ---
 
+## G4b + G5 — make the contract GOVERN page 1 (user-ratified 2026-07-21: "govern, wire it in")
+
+Resolves open backlog **O10** (disclose vs govern) → GOVERN. The contract (G4a) exists and yields `capital_eligible=False` / WAIT for GOOG, but page 1 still renders the LLM's "Hold/Accumulate 4%". This wires the contract into the render and makes ineligibility bind.
+
+### render_report.py
+- Build the contract in the render path via `decision_contract.build_contract(bundle_docs)` (bundle_docs already has composite/tradeplan/fundamental/snapshot); also write `module_decision.json`.
+- New `build_capital_status(contract)` block on page 1 — the review's exact separation, rendered from the contract, not prose:
+  > **Evidence grade:** {grade} (composite {score}/100) · **Capital status:** {ELIGIBLE | WAIT} · **Blockers:** {codes} · **If unowned:** {action_unowned} · **If owned:** {action_owned} · **Hurdle-clearing price:** {hurdle_clearing_price}
+- `build_the_call`: when `capital_eligible=False`, the GOVERNING headline becomes the capital status (WAIT / HOLD_NO_ADD); the composite `action` string is demoted to a labeled "evidence read", never a bare buy instruction. When `capital_eligible=True`, existing behavior is preserved (add the status line showing ELIGIBLE). Evidence grade/score/composite table are UNCHANGED — only the capital call is governed.
+
+### report_qc.py
+- `check_capital_action_governed(report_text, docs)`: build the contract; if `capital_eligible == False` AND the page-1 GOVERNING action contains BUY/ACCUMULATE (outside a labeled "evidence read") → FAIL. Enforces the review's `BUY|ACCUMULATE ⇒ capital_eligible` assertion. Register in `run_report_qc`.
+
+### Validation (real GOOG)
+Page 1 must now show **Capital status: WAIT**, blockers, `if-unowned WAIT_FOR_EVENT` / `if-owned HOLD_NO_ADD`, hurdle-clearing 332.23; the govern assertion PASSES on the corrected render and FAILS on a synthetic "Accumulate + ineligible" report. Update render golden fixtures; keep the eligible-case rendering stable. Suite stays green.
+
 ## Build order (this batch)
 **G1 (now, full) → validate/E2E → G4 (decision contract + assertions) → G2 (coverage-input + disclosure, pending user's (a)/(b)) → G3 (separate staged spec).**
 G1 first because it is the verified score-mover and the down-payment on G3; G4 second because it is the trust forcing-function; G2/G3 gated on the decisions above.

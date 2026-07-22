@@ -1901,5 +1901,235 @@ class TestBuildPage2BundleThreading(unittest.TestCase):
             self.assertIn(f"<!-- SLOT:brief_{dim} -->", out)
 
 
+# --------------------------------------------------------------------------- #
+# G4b + G5: the decision contract GOVERNS the page-1 capital call.
+# --------------------------------------------------------------------------- #
+
+from scripts import decision_contract as dc  # noqa: E402
+
+
+def _eligible_contract():
+    """A capital-ELIGIBLE contract (no blockers) -> the evidence-led headline is
+    preserved and the status marker reads ELIGIBLE."""
+    return {
+        "grade": "B", "score": 72.0, "capital_eligible": True,
+        "capital_blockers": [], "action_unowned": "ACCUMULATE_ON_WEAKNESS",
+        "action_owned": "HOLD", "hurdle_clearing_price": 104.9107,
+    }
+
+
+def _ineligible_contract():
+    """The GOOG-shaped capital-INELIGIBLE contract (all four blockers)."""
+    return {
+        "grade": "B", "score": 65.4294, "capital_eligible": False,
+        "capital_blockers": ["EV_BELOW_HURDLE", "EARNINGS_WITHIN_1_DAY",
+                             "LOW_COMPOSITE_CONFIDENCE", "VALUATION_MODEL_CONFLICT"],
+        "action_unowned": "WAIT_FOR_EVENT", "action_owned": "HOLD_NO_ADD",
+        "hurdle_clearing_price": 332.2321,
+    }
+
+
+class TestBuildCapitalStatus(unittest.TestCase):
+    """build_capital_status renders the contract-owned capital block."""
+
+    def test_eligible_shows_eligible_no_override(self):
+        block = rr.build_capital_status(_eligible_contract())
+        self.assertIn("**Evidence grade:** B (composite 72/100)", block)
+        self.assertIn("**Capital status:** ELIGIBLE", block)
+        self.assertIn("**Blockers:** none", block)
+        self.assertIn("**Action if unowned:** ACCUMULATE_ON_WEAKNESS", block)
+        self.assertIn("**Action if owned:** HOLD", block)
+        self.assertIn("**Hurdle-clearing price:** 104.911", block)
+        # The eligible block must NOT carry a WAIT override.
+        self.assertNotIn("WAIT", block)
+
+    def test_ineligible_shows_wait_blockers_actions_hurdle(self):
+        block = rr.build_capital_status(_ineligible_contract())
+        self.assertIn("**Capital status:** WAIT", block)
+        # All four blockers, comma-joined.
+        self.assertIn("EV_BELOW_HURDLE, EARNINGS_WITHIN_1_DAY, "
+                      "LOW_COMPOSITE_CONFIDENCE, VALUATION_MODEL_CONFLICT", block)
+        self.assertIn("**Action if unowned:** WAIT_FOR_EVENT", block)
+        self.assertIn("**Action if owned:** HOLD_NO_ADD", block)
+        # Hurdle-clearing price rendered from the contract (%g -> 332.232).
+        self.assertIn("**Hurdle-clearing price:** 332.232", block)
+
+    def test_none_contract_yields_empty(self):
+        self.assertEqual(rr.build_capital_status(None), "")
+
+
+class TestBuildTheCallGoverned(unittest.TestCase):
+    """build_the_call: contract-governed capital call."""
+
+    def test_ineligible_headline_is_capital_status_action_only_evidence_read(self):
+        comp = _composite_doc()  # grade C, action Hold/Trim
+        comp["grade"] = "B"
+        comp["action"] = "Hold/Accumulate-on-weakness"
+        out = rr.build_the_call(comp, _ineligible_contract())
+        head = out.splitlines()[0]
+        # The GOVERNING headline leads with the capital status, NOT the action.
+        self.assertIn("CAPITAL STATUS: WAIT", head)
+        self.assertIn("HOLD_NO_ADD if owned", head)
+        # A bare "Accumulate" must NOT appear on the governing headline.
+        self.assertNotIn("Accumulate", head)
+        # The composite action appears ONLY under a labeled evidence read.
+        self.assertIn("_evidence read:_ Hold/Accumulate-on-weakness", out)
+
+    def test_eligible_headline_unchanged_plus_eligible_marker(self):
+        comp = _composite_doc()  # grade C, action Hold/Trim
+        out = rr.build_the_call(comp, _eligible_contract())
+        head = out.splitlines()[0]
+        # Eligible: the current evidence-led headline is preserved verbatim.
+        self.assertIn("**C — Hold/Trim** (composite 59.4/100, balanced profile)",
+                      head)
+        self.assertIn("Capital status: ELIGIBLE", head)
+        # No governed demotion / evidence-read annotation in the eligible case.
+        self.assertNotIn("evidence read", out)
+        self.assertNotIn("CAPITAL STATUS: WAIT", out)
+
+    def test_no_contract_preserves_legacy_headline(self):
+        # Older bundles / absent contract: the historical headline is unchanged.
+        comp = _composite_doc()
+        out = rr.build_the_call(comp, None)
+        head = out.splitlines()[0]
+        self.assertIn("**C — Hold/Trim** (composite 59.4/100, balanced profile)",
+                      head)
+        self.assertNotIn("Capital status", out)
+
+
+class TestCheckCapitalActionGoverned(unittest.TestCase):
+    """check_capital_action_governed enforces BUY|ACCUMULATE => capital_eligible."""
+
+    def _report_with_call(self, call_block):
+        """A minimal report carrying a Page-1 '### The Call' section."""
+        return ("# GOOG — Trade Report (2026-07-21)\n\n"
+                "## Page 1 — Decision\n\n"
+                "### The Call\n\n"
+                f"{call_block}\n\n"
+                "### Composite\n\nrest of page\n")
+
+    def _ineligible_docs(self):
+        comp = _composite_doc()
+        comp["grade"] = "B"
+        comp["action"] = "Hold/Accumulate-on-weakness"
+        comp["confidence"] = {"level": "LOW", "why": "wide spread"}
+        comp["ev"]["ev_at_current"] = 0.05
+        snap = _snapshot_doc()
+        snap["events"]["days_to_event"] = 1
+        fund = _fundamental_doc()
+        fund["subscores"][1]["inputs"] = {
+            "anchors": {"dcf_base": 145.47, "comps_low": 294.0, "comps_high": 436.0}}
+        fund["subscores"][1]["arithmetic"] = (
+            "disagreement 0.86 > 0.25 -> WIDEN band")
+        return {"snapshot": snap, "module_composite": comp,
+                "module_tradeplan": _tradeplan_doc(), "module_fundamental": fund}
+
+    def test_fail_ineligible_with_bare_accumulate_headline(self):
+        docs = self._ineligible_docs()
+        # Sanity: the contract really is ineligible.
+        self.assertIs(dc.build_contract(docs)["capital_eligible"], False)
+        report = self._report_with_call("**B — Accumulate-on-weakness** (composite "
+                                        "65.4294/100, balanced profile)")
+        res = rq.check_capital_action_governed(report, docs)
+        self.assertIs(res["passed"], False)
+        self.assertIn("Accumulate", res["detail"])
+
+    def test_pass_ineligible_with_governed_wait_headline(self):
+        docs = self._ineligible_docs()
+        governed = ("**B evidence · CAPITAL STATUS: WAIT (HOLD_NO_ADD if owned)** "
+                    "(composite 65.4294/100, balanced profile)\n\n"
+                    "_evidence read:_ Hold/Accumulate-on-weakness")
+        report = self._report_with_call(governed)
+        res = rq.check_capital_action_governed(report, docs)
+        self.assertIs(res["passed"], True)
+
+    def test_skip_when_eligible(self):
+        # The default fixture bundle is capital-eligible -> the check SKIPs.
+        docs = {"snapshot": _snapshot_doc(),
+                "module_composite": _composite_doc(),
+                "module_tradeplan": _tradeplan_doc(),
+                "module_fundamental": _fundamental_doc()}
+        self.assertIs(dc.build_contract(docs)["capital_eligible"], True)
+        report = self._report_with_call("**C — Hold/Trim** (composite 59.4/100, "
+                                        "balanced profile)")
+        res = rq.check_capital_action_governed(report, docs)
+        self.assertIsNone(res["passed"])
+        self.assertIn("SKIP", res["detail"])
+
+    def test_skip_when_composite_absent(self):
+        docs = {"snapshot": _snapshot_doc(), "module_composite": None}
+        report = self._report_with_call("nothing to see")
+        res = rq.check_capital_action_governed(report, docs)
+        self.assertIsNone(res["passed"])
+
+
+class TestModuleDecisionArtifact(unittest.TestCase):
+    """render_report writes module_decision.json alongside the other modules."""
+
+    def test_render_writes_module_decision(self):
+        with tempfile.TemporaryDirectory() as d:
+            _mk_bundle(d)
+            rc, out, err = _render(d)
+            self.assertEqual(rc, 0, err)
+            path = os.path.join(d, "module_decision.json")
+            self.assertTrue(os.path.isfile(path), "module_decision.json not written")
+            with open(path) as fh:
+                contract = json.load(fh)
+            self.assertEqual(contract["skill"], "decision-contract")
+            # The default fixture is capital-eligible.
+            self.assertIs(contract["capital_eligible"], True)
+
+
+class TestPage1CapitalGovernanceE2E(unittest.TestCase):
+    """End-to-end: an INELIGIBLE bundle renders a governed page-1 call and the
+    govern check PASSES; the eligible default fixture keeps its headline."""
+
+    def _ineligible_bundle(self, d):
+        comp = _composite_doc()
+        comp["score"] = 65.4294
+        comp["grade"] = "B"
+        comp["action"] = "Hold/Accumulate-on-weakness"
+        comp["dimensions"][0]["score"] = 90
+        comp["dimensions"][0]["contribution"] = 22.5
+        comp["confidence"] = {"level": "LOW", "why": "wide scenario spread"}
+        comp["ev"]["ev_at_current"] = 0.05
+        tp = _tradeplan_doc()
+        fund = _fundamental_doc()
+        fund["subscores"][1]["inputs"] = {
+            "anchors": {"dcf_base": 145.47, "comps_low": 294.0, "comps_high": 436.0}}
+        fund["subscores"][1]["arithmetic"] = (
+            "disagreement 0.86 > 0.25 -> WIDEN band")
+        _mk_bundle(d, composite_override=comp, tradeplan_override=tp)
+        # Patch the on-disk snapshot + fundamental to carry the blocker inputs.
+        snap = _snapshot_doc()
+        snap["events"]["days_to_event"] = 1
+        with open(os.path.join(d, "snapshot_MU_2026-07-16.json"), "w") as fh:
+            json.dump(snap, fh)
+        with open(os.path.join(d, "module_fundamental.json"), "w") as fh:
+            json.dump(fund, fh)
+
+    def test_ineligible_render_is_governed_and_passes_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._ineligible_bundle(d)
+            rc, out, err = _render(d)
+            self.assertEqual(rc, 0, err)
+            report = _find_report(d)
+            text = _read_file(report)
+            # Page-1 capital status is WAIT with all four blockers.
+            self.assertIn("**Capital status:** WAIT", text)
+            self.assertIn("EV_BELOW_HURDLE", text)
+            self.assertIn("EARNINGS_WITHIN_1_DAY", text)
+            self.assertIn("LOW_COMPOSITE_CONFIDENCE", text)
+            self.assertIn("VALUATION_MODEL_CONFLICT", text)
+            # The governing headline leads with the capital status; the composite
+            # action is demoted to an evidence read (not a bare buy).
+            self.assertIn("CAPITAL STATUS: WAIT", text)
+            self.assertIn("_evidence read:_ Hold/Accumulate-on-weakness", text)
+            # The govern check passes on the corrected render.
+            docs = rr.load_bundle(d)
+            res = rq.check_capital_action_governed(text, docs)
+            self.assertIs(res["passed"], True)
+
+
 if __name__ == "__main__":
     unittest.main()

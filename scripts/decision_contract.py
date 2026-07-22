@@ -208,8 +208,12 @@ def build_contract(docs):
     #   (the price at which EV clears the hurdle -- NOT the first positive-EV price).
     hurdle_clearing_price = ev.get("ev_breakeven_entry")
 
-    # grade <- module_composite.grade
+    # grade <- module_composite.grade ; score <- module_composite.score
+    #   (score is carried on the contract so the page-1 capital-status block --
+    #   which renders "composite {score}/100" -- draws every number from a contract
+    #   field, keeping the render's number-provenance surface contract-owned.)
     grade = composite.get("grade")
+    score = composite.get("score")
 
     # -- blocker inputs -----------------------------------------------------
     # days_to_event <- snapshot.events.days_to_event
@@ -245,6 +249,7 @@ def build_contract(docs):
         "ev_at_current": ev_at_current,
         "hurdle_clearing_price": hurdle_clearing_price,
         "grade": grade,
+        "score": score,
         "capital_blockers": capital_blockers,
         "capital_eligible": capital_eligible,
         "action_unowned": action_unowned,

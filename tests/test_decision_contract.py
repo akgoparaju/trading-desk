@@ -29,11 +29,12 @@ from scripts import decision_contract as dc
 
 def _composite(*, ev_at_current=0.059, hurdle_total=0.12, horizon_years=1.5,
                ev_breakeven=332.2321, grade="B", confidence_level="LOW",
-               profile="balanced"):
+               profile="balanced", score=65.4294):
     """A module_composite stub carrying only the fields build_contract reads."""
     return {
         "profile": profile,
         "grade": grade,
+        "score": score,
         "as_of": "2026-07-21",
         "confidence": {"level": confidence_level, "version": "1.0.0"},
         "ev": {
@@ -236,6 +237,9 @@ class TestGoogFixtureContract(unittest.TestCase):
         self.assertEqual(c["ev_at_current"], 0.059)
         self.assertEqual(c["hurdle_clearing_price"], 332.2321)
         self.assertEqual(c["grade"], "B")
+        # score is carried on the contract (G4b: the page-1 capital-status block
+        # renders "composite {score}/100" from this field).
+        self.assertEqual(c["score"], 65.4294)
 
     def test_valuation_conflict_via_anchor_recompute(self):
         # Anchors path (preferred): dcf_base 145.47 vs comps_mid 365 -> conflict.

@@ -35,6 +35,22 @@ Spec: `docs/specs/2026-07-21-G1-G4-capital-trust-spec.md`. Bar: no guesses, data
   Each FAILs on a genuine contradiction, SKIPs when inputs absent. **Live-defect catch:** the check
   FAILs on the real shipped GOOG `pdf_slots.json` ("the first positive-EV entry is 334.69" vs
   `ev_at_current=0.059`). +51 tests; full suite **1602 pass**.
+- **G4b + G5 — the decision contract GOVERNS page 1 (O10: govern, not disclose).** `render_report`
+  now builds `decision_contract.build_contract(bundle_docs)` in the render path, persists it as a
+  `module_decision.json` bundle artifact, and threads it into a new page-1 capital-status block. Evidence
+  (grade/score/composite table) is UNCHANGED; a contract-owned block leads "### The Call" rendering
+  **Evidence grade · Capital status (ELIGIBLE|WAIT) · Blockers · Action if unowned/owned · Hurdle-clearing
+  price** (every number a contract field: `score`, `hurdle_clearing_price` — `score` added to the contract).
+  When `capital_eligible=False` the GOVERNING headline leads with the capital status
+  (`CAPITAL STATUS: WAIT (HOLD_NO_ADD if owned)`) and the composite `action` is DEMOTED to a labeled
+  `_evidence read:_` annotation — no longer a bare buy instruction; eligible-case output is preserved
+  (headline unchanged, `· Capital status: ELIGIBLE` appended). New `report_qc.check_capital_action_governed`
+  (registered in `run_report_qc`) FAILs when `capital_eligible=False` yet the governing call carries a bare
+  `buy|accumulate` outside an "evidence read" line — enforcing `BUY|ACCUMULATE ⇒ capital_eligible`; SKIPs
+  when eligible / contract inputs absent. **Real-GOOG validation:** page 1 now shows Capital status WAIT,
+  the four blockers, WAIT_FOR_EVENT / HOLD_NO_ADD, hurdle-clearing 332.232; the composite "Accumulate" no
+  longer stands as the call; full report QC (incl. number_provenance + capital_action_governed) PASSES.
+  +12 tests; full suite **1614 pass / 26 skip**.
 
 ## Unreleased — 2026-07-21 · Outstanding-tasks O5 / O11 / O4
 

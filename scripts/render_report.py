@@ -42,6 +42,8 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+from scripts import decision_contract  # noqa: E402  (after sys.path setup)
+
 # Required module files for a FULL report (each missing -> exit 2 naming it).
 _REQUIRED_MODULES = [
     "module_technical.json",
@@ -239,18 +241,79 @@ def build_header_block(snapshot):
                   rows)
 
 
-def build_the_call(composite):
-    """The call line + a tension slot.
+# The capital-status label shown when the contract is INELIGIBLE. The word is the
+# governing directive (WAIT for new capital); the owned-position action carries the
+# HOLD_NO_ADD nuance in the capital-status block below.
+_CAPITAL_WAIT_LABEL = "WAIT"
 
-    Appends the composite confidence roll-up badge when the composite carries a
-    ``confidence`` block.  Badge text is word-only (digit-free) to pass QC.
+
+def build_capital_status(contract):
+    """Page-1 capital-status block, rendered ENTIRELY from the decision contract.
+
+    Separates EVIDENCE (grade/score/composite) from CAPITAL (eligibility + the
+    action the contract implies). Every number here is a contract field (grade,
+    score, hurdle_clearing_price) so the render's number-provenance surface stays
+    contract-owned. The block is a bullet list (not prose) — it is script-authored,
+    never a slot.
+
+    ``contract`` is the dict ``decision_contract.build_contract`` returns; a None
+    contract yields ``''`` (the block is simply omitted for older/absent bundles).
+    """
+    if not isinstance(contract, dict):
+        return ""
+    grade = contract.get("grade", "?")
+    score = contract.get("score")
+    eligible = contract.get("capital_eligible")
+    status = "ELIGIBLE" if eligible else _CAPITAL_WAIT_LABEL
+    blockers = contract.get("capital_blockers") or []
+    blockers_text = ", ".join(blockers) if blockers else "none"
+    lines = [
+        f"- **Evidence grade:** {grade} (composite {_fmt(score)}/100)",
+        f"- **Capital status:** {status}",
+        f"- **Blockers:** {blockers_text}",
+        f"- **Action if unowned:** {contract.get('action_unowned', '?')}",
+        f"- **Action if owned:** {contract.get('action_owned', '?')}",
+        f"- **Hurdle-clearing price:** {_fmt(contract.get('hurdle_clearing_price'))}",
+    ]
+    return "\n".join(lines)
+
+
+def build_the_call(composite, contract=None):
+    """The governing call line + a tension slot.
+
+    The contract (``decision_contract.build_contract``) GOVERNS the capital call:
+
+    - ``capital_eligible`` True (or no contract) -> keep the current evidence-led
+      headline ``**{grade} — {action}** (composite .../100, {profile} profile)``
+      and append a ``· Capital status: ELIGIBLE`` marker. Minimal change; the
+      eligible-case output is stable.
+    - ``capital_eligible`` False -> the GOVERNING headline leads with the capital
+      status (``**{grade} evidence · CAPITAL STATUS: WAIT (HOLD_NO_ADD if owned)**``)
+      and the composite ``action`` string is DEMOTED to a clearly-labeled
+      ``_evidence read:_`` annotation — never a bare buy instruction on the
+      governing line.
+
+    The composite confidence roll-up badge (word-only, digit-free) is preserved in
+    both branches.
     """
     grade = composite.get("grade", "?")
     action = composite.get("action", "?")
     score = composite.get("score")
     profile = composite.get("profile", "?")
-    line = (f"**{grade} — {action}** (composite {_fmt(score)}/100, "
-            f"{profile} profile)")
+
+    eligible = contract.get("capital_eligible") if isinstance(contract, dict) else None
+
+    if eligible is False:
+        owned = contract.get("action_owned", "HOLD_NO_ADD")
+        line = (f"**{grade} evidence · CAPITAL STATUS: {_CAPITAL_WAIT_LABEL} "
+                f"({owned} if owned)** (composite {_fmt(score)}/100, "
+                f"{profile} profile)")
+    else:
+        line = (f"**{grade} — {action}** (composite {_fmt(score)}/100, "
+                f"{profile} profile)")
+        if eligible is True:
+            line += " · Capital status: ELIGIBLE"
+
     # Roll-up confidence badge (word-only).
     conf = composite.get("confidence") if isinstance(composite, dict) else None
     if isinstance(conf, dict) and conf.get("level"):
@@ -261,6 +324,12 @@ def build_the_call(composite):
             line += f" · Confidence: {glyph} ({why})"
         else:
             line += f" · Confidence: {glyph}"
+
+    # When capital is INELIGIBLE the composite action must never stand as a bare
+    # buy instruction: demote it to a labeled evidence read on its own line.
+    if eligible is False:
+        line += f"\n\n_evidence read:_ {action}"
+
     return line + "\n\n<!-- SLOT:tension -->"
 
 
@@ -372,7 +441,7 @@ def build_event_playbook(snapshot, tradeplan):
     return "\n".join(parts)
 
 
-def build_page1(snapshot, composite, tradeplan):
+def build_page1(snapshot, composite, tradeplan, contract=None):
     parts = [
         "## Page 1 — Decision",
         "",
@@ -380,7 +449,14 @@ def build_page1(snapshot, composite, tradeplan):
         "",
         "### The Call",
         "",
-        build_the_call(composite),
+    ]
+    # Capital-status block (contract-governed) leads "### The Call"; omitted when
+    # no contract is available (older bundles degrade to the evidence-only call).
+    capital_status = build_capital_status(contract)
+    if capital_status:
+        parts.extend([capital_status, ""])
+    parts.extend([
+        build_the_call(composite, contract),
         "",
         "### Composite",
         "",
@@ -391,7 +467,7 @@ def build_page1(snapshot, composite, tradeplan):
         build_tradeplan_table(tradeplan),
         "",
         build_event_playbook(snapshot, tradeplan),
-    ]
+    ])
     return "\n".join(parts)
 
 
@@ -848,8 +924,11 @@ def build_full_report(bundle_docs, bundle=None):
     ticker = (snapshot.get("meta", {}) or {}).get("ticker", "UNKNOWN")
     as_of_date = (snapshot.get("meta", {}) or {}).get("as_of_utc", "")[:10]
 
+    # G4b: the canonical decision contract GOVERNS the page-1 capital call.
+    contract = decision_contract.build_contract(bundle_docs)
+
     page1 = build_page1(snapshot, bundle_docs["module_composite"],
-                        bundle_docs["module_tradeplan"])
+                        bundle_docs["module_tradeplan"], contract)
     page2 = build_page2(bundle_docs["module_technical"],
                         bundle_docs["module_fundamental"],
                         bundle_docs["module_sentiment"],
@@ -1111,6 +1190,15 @@ def main(argv=None):
     out = args.out or _default_out(args.bundle, docs["snapshot"], delta=False)
     with open(out, "w") as fh:
         fh.write(report)
+
+    # G4b: persist the decision contract as a bundle artifact alongside the other
+    # modules (same serialization as the decision_contract CLI). It ALWAYS lands in
+    # the bundle dir (not the report's parent), next to module_composite.json.
+    contract = decision_contract.build_contract(docs)
+    decision_path = os.path.join(args.bundle, "module_decision.json")
+    with open(decision_path, "w") as fh:
+        json.dump(contract, fh, indent=2, sort_keys=True)
+
     print(out)
     return 0
 
