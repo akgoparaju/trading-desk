@@ -556,5 +556,84 @@ class TestCli(unittest.TestCase):
         self.assertEqual(rc, 2)
 
 
+# --------------------------------------------------------------------------- #
+# 6. O19: entry_state field (deterministic, derived from blockers + eligibility).
+# --------------------------------------------------------------------------- #
+
+class TestEntryStateDerivation(unittest.TestCase):
+    """_derive_entry_state: four-state disclosure, deterministic precedence."""
+
+    def test_earnings_blocker_yields_wait_for_event(self):
+        # EARNINGS_WITHIN_1_DAY takes priority over everything.
+        state = dc._derive_entry_state(
+            ["EV_BELOW_HURDLE", "EARNINGS_WITHIN_1_DAY"], False)
+        self.assertEqual(state, "WAIT_FOR_EVENT")
+
+    def test_earnings_only_blocker_yields_wait_for_event(self):
+        state = dc._derive_entry_state(["EARNINGS_WITHIN_1_DAY"], False)
+        self.assertEqual(state, "WAIT_FOR_EVENT")
+
+    def test_ev_below_hurdle_without_earnings_yields_watch_zone(self):
+        # EV_BELOW_HURDLE (no earnings blocker) -> WATCH_ZONE
+        state = dc._derive_entry_state(["EV_BELOW_HURDLE"], False)
+        self.assertEqual(state, "WATCH_ZONE")
+
+    def test_ev_not_robust_alone_yields_no_entry(self):
+        # EV_NOT_ROBUST but neither EARNINGS nor EV_BELOW_HURDLE
+        # -> capital_eligible=False -> NO_ENTRY_AT_CURRENT
+        state = dc._derive_entry_state(["EV_NOT_ROBUST_UNDER_UNCERTAINTY"], False)
+        self.assertEqual(state, "NO_ENTRY_AT_CURRENT")
+
+    def test_eligible_yields_hurdle_clearing_entry(self):
+        # No blockers, capital_eligible True -> HURDLE_CLEARING_ENTRY
+        state = dc._derive_entry_state([], True)
+        self.assertEqual(state, "HURDLE_CLEARING_ENTRY")
+
+    def test_low_confidence_only_ineligible_yields_no_entry(self):
+        # LOW_COMPOSITE_CONFIDENCE only -> ineligible, neither earnings nor EV
+        state = dc._derive_entry_state(["LOW_COMPOSITE_CONFIDENCE"], False)
+        self.assertEqual(state, "NO_ENTRY_AT_CURRENT")
+
+
+class TestEntryStateInContract(unittest.TestCase):
+    """entry_state on the full contract (build_contract integration)."""
+
+    def test_goog_contract_entry_state_wait_for_event(self):
+        # GOOG: EARNINGS_WITHIN_1_DAY in blockers -> WAIT_FOR_EVENT
+        c = dc.build_contract(_goog_docs())
+        self.assertIn("EARNINGS_WITHIN_1_DAY", c["capital_blockers"])
+        self.assertEqual(c["entry_state"], "WAIT_FOR_EVENT")
+
+    def test_eligible_contract_entry_state_hurdle_clearing(self):
+        # Clean bundle: no blockers, capital_eligible True
+        docs = {
+            "module_composite": _composite_with_scenarios(
+                ev_at_current=0.20, confidence_level="HIGH", grade="A"),
+            "module_fundamental": _fundamental(conflict=False),
+            "snapshot": _snapshot(days_to_event=30),
+        }
+        c = dc.build_contract(docs)
+        self.assertIs(c["capital_eligible"], True)
+        self.assertEqual(c["entry_state"], "HURDLE_CLEARING_ENTRY")
+
+    def test_ev_below_hurdle_no_earnings_entry_state_watch_zone(self):
+        # EV below hurdle, no earnings within 1d -> WATCH_ZONE
+        docs = {
+            "module_composite": _composite_with_scenarios(
+                ev_at_current=0.05, confidence_level="HIGH"),
+            "module_fundamental": _fundamental(conflict=False),
+            "snapshot": _snapshot(days_to_event=30),
+        }
+        c = dc.build_contract(docs)
+        self.assertIn("EV_BELOW_HURDLE", c["capital_blockers"])
+        self.assertNotIn("EARNINGS_WITHIN_1_DAY", c["capital_blockers"])
+        self.assertEqual(c["entry_state"], "WATCH_ZONE")
+
+    def test_entry_state_field_present_in_contract_output(self):
+        # entry_state must be a key in the contract dict.
+        c = dc.build_contract(_goog_docs())
+        self.assertIn("entry_state", c)
+
+
 if __name__ == "__main__":
     unittest.main()

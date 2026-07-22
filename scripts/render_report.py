@@ -437,6 +437,19 @@ def build_tradeplan_table(tradeplan, contract=None):
         )
     rows.append(["Size", size_value])
 
+    # O19: Risk-units row (Portfolio-OS handoff) -- present only when risk_units
+    # was computed (i.e. at least one leg was available).
+    ru = sp.get("risk_units") or {}
+    if ru and ru.get("shares_per_risk_unit") is not None:
+        rows.append([
+            "Risk-units",
+            (f"{_fmt(ru.get('shares_per_risk_unit'))} sh per "
+             f"${ru.get('risk_budget_usd', 1000)} risk · "
+             f"binding {ru.get('binding_leg')} "
+             f"{_fmt(ru.get('binding_loss_per_share'))}/sh "
+             f"(ref entry {_fmt(ru.get('entry_ref'))})")
+        ])
+
     hedge = sp.get("hedge", {}) or {}
     if hedge.get("required"):
         strikes = hedge.get("strikes_from") or []

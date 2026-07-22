@@ -2444,5 +2444,96 @@ class TestSizeGovernanaceE2E(unittest.TestCase):
                               f"expected SKIP for eligible bundle, got: {res}")
 
 
+# --------------------------------------------------------------------------- #
+# O19: Risk-units row in build_tradeplan_table.
+# --------------------------------------------------------------------------- #
+
+class TestBuildTradeplanTableRiskUnits(unittest.TestCase):
+    """Risk-units row: present when risk_units populated, absent otherwise."""
+
+    def _make_tradeplan_with_risk_units(self, ru=None):
+        """A minimal tradeplan dict; if ru is provided, includes risk_units."""
+        sp = {
+            "dont_chase": {"above": 99.75, "convention": "5% above top entry"},
+            "entries": [],
+            "exits": {},
+            "invalidation": {
+                "technical_leg": {"level": 82.0, "condition": "weekly close below"},
+                "fundamental_leg": {"metric": "HBM revenue growth",
+                                    "threshold": "< 20%"},
+            },
+            "sizing": {
+                "recommended_pct": 0.04,
+                "cap_pct": 0.04,
+                "f_star": 0.28,
+            },
+            "hedge": {"required": False},
+        }
+        if ru is not None:
+            sp["risk_units"] = ru
+        return {"stock_plan": sp, "expression": {"recommended_for_profile": "stock"}}
+
+    def _risk_units_block(self):
+        """A realistic risk_units block matching the GOOG fixture values."""
+        return {
+            "entry_ref": 334.69,
+            "loss_per_share_technical": 12.9469,
+            "loss_per_share_stress": 17.7543,
+            "loss_per_share_event_gap": 16.4926,
+            "binding_loss_per_share": 17.7543,
+            "binding_leg": "stress",
+            "risk_budget_usd": 1000,
+            "shares_per_risk_unit": 56.32,
+            "arithmetic": (
+                "entry_ref=334.69 (entries[0].level); "
+                "technical: 334.69-321.7431=12.9469/sh; "
+                "stress: 334.69-316.9357=17.7543/sh; "
+                "event_gap: 334.69x0.049277=16.4926/sh; "
+                "binding=stress 17.7543/sh; "
+                "shares_per_risk_unit=1000/17.7543=56.32 sh per $1000 risk"
+            ),
+        }
+
+    def test_risk_units_row_present_when_populated(self):
+        import re
+        tp = self._make_tradeplan_with_risk_units(self._risk_units_block())
+        table = rr.build_tradeplan_table(tp)
+        # The row must appear by its label.
+        self.assertIn("Risk-units", table)
+        # It must show shares_per_risk_unit, budget, binding leg, and entry_ref.
+        m = re.search(r"\|\s*Risk-units\s*\|([^|\n]+)\|", table, re.IGNORECASE)
+        self.assertIsNotNone(m, "Risk-units row not found in table")
+        cell = m.group(1).strip()
+        self.assertIn("56.32", cell)          # shares_per_risk_unit
+        self.assertIn("1000", cell)           # risk_budget_usd
+        self.assertIn("stress", cell)         # binding_leg
+        self.assertIn("17.75", cell)          # binding_loss_per_share (partial match)
+        self.assertIn("334.69", cell)         # entry_ref
+
+    def test_risk_units_row_absent_when_none(self):
+        # No risk_units key -> row must not appear.
+        tp = self._make_tradeplan_with_risk_units(ru=None)
+        table = rr.build_tradeplan_table(tp)
+        self.assertNotIn("Risk-units", table)
+
+    def test_risk_units_row_absent_when_shares_per_unit_none(self):
+        # risk_units present but shares_per_risk_unit None -> row omitted.
+        ru = self._risk_units_block()
+        ru["shares_per_risk_unit"] = None
+        tp = self._make_tradeplan_with_risk_units(ru=ru)
+        table = rr.build_tradeplan_table(tp)
+        self.assertNotIn("Risk-units", table)
+
+    def test_risk_units_row_position_after_size(self):
+        # Risk-units row must appear AFTER the Size row in the table.
+        import re
+        tp = self._make_tradeplan_with_risk_units(self._risk_units_block())
+        table = rr.build_tradeplan_table(tp)
+        size_pos = table.find("| Size")
+        ru_pos = table.find("| Risk-units")
+        self.assertGreater(ru_pos, size_pos,
+                           "Risk-units row must follow the Size row")
+
+
 if __name__ == "__main__":
     unittest.main()

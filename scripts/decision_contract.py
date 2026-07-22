@@ -301,6 +301,33 @@ def map_actions(blockers, grade, capital_eligible):
 
 
 # --------------------------------------------------------------------------- #
+# O19: Entry-state (deterministic, derived from blockers + eligibility).
+# --------------------------------------------------------------------------- #
+
+def _derive_entry_state(capital_blockers, capital_eligible):
+    """Derive the four-state entry_state disclosure field from the blocker set.
+
+    Precedence (deterministic, no heuristics):
+      1. EARNINGS_WITHIN_1_DAY in blockers  -> WAIT_FOR_EVENT
+      2. EV_BELOW_HURDLE in blockers        -> WATCH_ZONE
+         (price is above the hurdle-clearing entry; wait for it to come to you)
+      3. capital_eligible is True           -> HURDLE_CLEARING_ENTRY
+      4. else                               -> NO_ENTRY_AT_CURRENT
+
+    This is a DISCLOSURE field complementing ``action_unowned``.  It does NOT
+    block the report -- it labels the current price vs the entry ladder for the
+    Portfolio-OS handoff.
+    """
+    if "EARNINGS_WITHIN_1_DAY" in capital_blockers:
+        return "WAIT_FOR_EVENT"
+    if "EV_BELOW_HURDLE" in capital_blockers:
+        return "WATCH_ZONE"
+    if capital_eligible:
+        return "HURDLE_CLEARING_ENTRY"
+    return "NO_ENTRY_AT_CURRENT"
+
+
+# --------------------------------------------------------------------------- #
 # The contract builder (pure).
 # --------------------------------------------------------------------------- #
 
@@ -388,6 +415,14 @@ def build_contract(docs):
     action_unowned, action_owned = map_actions(
         capital_blockers, grade, capital_eligible)
 
+    # -- O19: entry_state (deterministic, derived from blockers + eligibility) --
+    # Four-state disclosure field for the Portfolio-OS handoff.  Precedence:
+    #   1. EARNINGS_WITHIN_1_DAY in blockers -> WAIT_FOR_EVENT
+    #   2. EV_BELOW_HURDLE in blockers       -> WATCH_ZONE
+    #   3. capital_eligible True             -> HURDLE_CLEARING_ENTRY
+    #   4. else                              -> NO_ENTRY_AT_CURRENT
+    entry_state = _derive_entry_state(capital_blockers, capital_eligible)
+
     return {
         "skill": SKILL,
         "contract_version": CONTRACT_VERSION,
@@ -413,6 +448,8 @@ def build_contract(docs):
         "capital_eligible": capital_eligible,
         "action_unowned": action_unowned,
         "action_owned": action_owned,
+        # -- O19: entry_state -----------------------------------------------
+        "entry_state": entry_state,
     }
 
 

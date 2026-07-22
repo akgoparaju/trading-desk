@@ -967,5 +967,213 @@ class TestSynthesizeCLI(unittest.TestCase):
         self.assertNotIn("recommended_for_profile_options_tilted", exp)
 
 
+# --------------------------------------------------------------------------- #
+# O19: build_risk_units -- arithmetic, guards, binding-leg selection.
+# --------------------------------------------------------------------------- #
+
+# GOOG-fixture values (from the real 2026-07-21 bundle, all arithmetic):
+#   entry_ref        = 334.69   (entries[0].level)
+#   technical_stop   = 321.7431 (invalidation.technical_leg.level)
+#   stress_level     = 316.9357 (downside_map stress_scenario row)
+#   implied_move     = 0.049277115291572984 (snapshot.sentiment.implied_move_next_earnings_pct)
+_GOOG_ENTRY_REF    = 334.69
+_GOOG_TECH_STOP    = 321.7431
+_GOOG_STRESS       = 316.9357
+_GOOG_IMPLIED_MOVE = 0.049277115291572984
+
+
+class TestBuildRiskUnits(unittest.TestCase):
+    """Pure arithmetic tests for build_risk_units (O19, GOOG fixture + guards)."""
+
+    def _ru(self, entry_ref=_GOOG_ENTRY_REF, technical_stop=_GOOG_TECH_STOP,
+            stress_level=_GOOG_STRESS, implied_move=_GOOG_IMPLIED_MOVE):
+        return tp.build_risk_units(entry_ref, technical_stop, stress_level,
+                                   implied_move)
+
+    # -- GOOG fixture: all three legs present ---------------------------------
+
+    def test_goog_loss_technical(self):
+        # entry_ref - technical_stop = 334.69 - 321.7431 = 12.9469
+        ru = self._ru()
+        self.assertAlmostEqual(ru["loss_per_share_technical"], 12.9469, places=4)
+
+    def test_goog_loss_stress(self):
+        # entry_ref - stress_level = 334.69 - 316.9357 = 17.7543
+        ru = self._ru()
+        self.assertAlmostEqual(ru["loss_per_share_stress"], 17.7543, places=4)
+
+    def test_goog_loss_event_gap(self):
+        # entry_ref * implied_move = 334.69 * 0.049277115... = 16.4926
+        ru = self._ru()
+        self.assertAlmostEqual(ru["loss_per_share_event_gap"], 16.4926, places=3)
+
+    def test_goog_binding_is_stress(self):
+        # stress 17.7543 > event_gap 16.4926 > technical 12.9469
+        ru = self._ru()
+        self.assertEqual(ru["binding_leg"], "stress")
+        self.assertAlmostEqual(ru["binding_loss_per_share"],
+                               ru["loss_per_share_stress"], places=6)
+
+    def test_goog_shares_per_risk_unit(self):
+        # 1000 / 17.7543 ≈ 56.32
+        ru = self._ru()
+        self.assertAlmostEqual(ru["shares_per_risk_unit"], 1000 / 17.7543, places=2)
+
+    def test_goog_entry_ref_carried(self):
+        ru = self._ru()
+        self.assertEqual(ru["entry_ref"], 334.69)
+
+    def test_goog_risk_budget_usd_is_1000(self):
+        ru = self._ru()
+        self.assertEqual(ru["risk_budget_usd"], 1000)
+
+    def test_goog_arithmetic_discloses_binding_leg(self):
+        ru = self._ru()
+        self.assertIn("stress", ru["arithmetic"])
+        self.assertIn("binding", ru["arithmetic"].lower())
+
+    def test_goog_arithmetic_discloses_entry_ref(self):
+        ru = self._ru()
+        self.assertIn("entry_ref", ru["arithmetic"])
+        # The entry ref value should appear
+        self.assertIn("334.69", ru["arithmetic"])
+
+    # -- Guard: missing technical_stop -> that leg None, max over remaining ----
+
+    def test_missing_technical_stop_leg_null(self):
+        ru = self._ru(technical_stop=None)
+        self.assertIsNone(ru["loss_per_share_technical"])
+        # stress and event_gap still compute; binding should be stress
+        self.assertIsNotNone(ru["loss_per_share_stress"])
+        self.assertIsNotNone(ru["loss_per_share_event_gap"])
+        self.assertIsNotNone(ru["binding_loss_per_share"])
+
+    def test_missing_stress_level_leg_null(self):
+        ru = self._ru(stress_level=None)
+        self.assertIsNone(ru["loss_per_share_stress"])
+        self.assertIsNotNone(ru["loss_per_share_technical"])
+        self.assertIsNotNone(ru["loss_per_share_event_gap"])
+
+    def test_missing_implied_move_leg_null(self):
+        ru = self._ru(implied_move=None)
+        self.assertIsNone(ru["loss_per_share_event_gap"])
+        self.assertIsNotNone(ru["loss_per_share_technical"])
+        self.assertIsNotNone(ru["loss_per_share_stress"])
+
+    def test_missing_stress_and_implied_move_binding_is_technical(self):
+        # Only technical leg available -> binding = technical
+        ru = self._ru(stress_level=None, implied_move=None)
+        self.assertEqual(ru["binding_leg"], "technical")
+        self.assertAlmostEqual(ru["binding_loss_per_share"],
+                               ru["loss_per_share_technical"], places=6)
+
+    # -- Guard: ALL legs missing -> None (never fabricated) -------------------
+
+    def test_all_legs_missing_returns_none(self):
+        ru = tp.build_risk_units(_GOOG_ENTRY_REF,
+                                 technical_stop=None,
+                                 stress_level=None,
+                                 implied_move=None)
+        self.assertIsNone(ru)
+
+    def test_entry_ref_none_returns_none(self):
+        ru = tp.build_risk_units(None, _GOOG_TECH_STOP, _GOOG_STRESS,
+                                 _GOOG_IMPLIED_MOVE)
+        self.assertIsNone(ru)
+
+
+class TestRiskUnitsInPlan(unittest.TestCase):
+    """risk_units wired into build_stock_plan_module (integration via CLI)."""
+
+    def setUp(self):
+        import shutil
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _write_risk_doc_with_stress(self):
+        """A module_risk.json with a stress_scenario row at 70.0."""
+        downside_map = [
+            {"level": 95.0, "type": "swing_low", "basis": "ohlcv",
+             "pct_from_last": -0.05},
+            {"level": 94.0, "type": "valuation_floor", "basis": "valuation",
+             "method": "pe_5yr_median x eps_ntm", "pct_from_last": -0.06},
+            {"level": 90.0, "type": "ma200", "basis": "ohlcv",
+             "pct_from_last": -0.10},
+            {"level": 82.0, "type": "swing_low", "basis": "ohlcv",
+             "pct_from_last": -0.18},
+            {"level": 70.0, "type": "stress_scenario", "basis": "judgment",
+             "risk": "HBM oversupply", "pct_from_last": -0.30},
+        ]
+        return {
+            "skill": "risk-analytics",
+            "rubric_version": "1.0.0",
+            "ticker": "MU",
+            "as_of": "2026-07-16",
+            "score": 40,
+            "tables": {"downside_map": downside_map},
+        }
+
+    def _write_snapshot_with_implied_move(self, implied_move=0.08):
+        """A snapshot with implied_move_next_earnings_pct."""
+        ne = {"date": "2026-07-30", "time": "post-market", "consensus_eps": 1.9}
+        return {
+            "meta": {"ticker": "MU", "as_of_utc": "2026-07-16T00:00:00Z"},
+            "price": {"last": _LAST},
+            "events": {"next_earnings": ne},
+            "sentiment": {
+                "iv_pctile_1yr": 20.0,
+                "implied_move_next_earnings_pct": implied_move,
+            },
+            "fundamentals": {"eps_ntm_consensus": 5.5},
+        }
+
+    def _run_cli(self):
+        cmd = [sys.executable, SCRIPT, "--stock-plan", "--bundle", self.dir]
+        cmd += _base_fund_flags()
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    def _read(self):
+        with open(os.path.join(self.dir, "module_tradeplan.json")) as fh:
+            return json.load(fh)
+
+    def test_risk_units_present_when_stress_and_implied_move_available(self):
+        _write_bundle(self.dir,
+                      composite=_composite_doc(),
+                      technical=_technical_doc(),
+                      risk=self._write_risk_doc_with_stress(),
+                      snapshot=self._write_snapshot_with_implied_move())
+        proc = self._run_cli()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        doc = self._read()
+        ru = doc["stock_plan"].get("risk_units")
+        self.assertIsNotNone(ru, "risk_units should be present")
+        self.assertIsNotNone(ru.get("shares_per_risk_unit"))
+        self.assertEqual(ru["risk_budget_usd"], 1000)
+        self.assertIsNotNone(ru.get("binding_leg"))
+        self.assertIn("arithmetic", ru)
+
+    def test_risk_units_missing_stress_and_implied_move_still_computes_technical(self):
+        # No stress row, no implied_move -> only technical leg; risk_units still
+        # non-None (binding=technical).  The all-legs-None guard is covered
+        # at the unit level (TestBuildRiskUnits.test_all_legs_missing_returns_none).
+        _write_bundle(self.dir,
+                      composite=_composite_doc(),
+                      technical=_technical_doc(),
+                      risk=_risk_doc(),      # <-- no stress_scenario row
+                      snapshot=_snapshot_doc())   # <-- no implied_move
+        proc = self._run_cli()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        doc = self._read()
+        ru = doc["stock_plan"].get("risk_units")
+        # The fixture has a technical_stop (82.0 is below entry_2=90.0),
+        # so at least the technical leg is present -> risk_units is not None.
+        self.assertIsNotNone(ru)
+        # Both optional legs should be None.
+        self.assertIsNone(ru["loss_per_share_stress"])
+        self.assertIsNone(ru["loss_per_share_event_gap"])
+        # Binding must be technical (only present leg).
+        self.assertEqual(ru["binding_leg"], "technical")
+
+
 if __name__ == "__main__":
     unittest.main()

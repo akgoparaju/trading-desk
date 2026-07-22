@@ -5,6 +5,28 @@
 From the GOOG review validation (`jutsu-trading-desk/docs/reviews/2026-07-21-goog-review-validation.md`).
 Spec: `docs/specs/2026-07-21-G1-G4-capital-trust-spec.md`. Bar: no guesses, data-driven, 95% confidence.
 
+- **O19 — risk-unit sizing output + entry-state field (Portfolio-OS handoff).** Two additive
+  fields, pure arithmetic from existing bundle leaves, no new calibration constants.
+  (1) `stock_plan.risk_units` block in `module_tradeplan.json`: `loss_per_share` per leg
+  (`technical = entry_ref − technical_stop`; `stress = entry_ref − stress_level`;
+  `event_gap = entry_ref × implied_move_next_earnings_pct`); `binding_leg = argmax(present legs)`;
+  `shares_per_risk_unit = _RISK_BUDGET_USD / binding_loss_per_share` where `_RISK_BUDGET_USD = 1000`
+  is a named module const (the "shares per $1,000 risk budget" unit, disclosed). Any absent
+  input → that leg `null`, excluded from the max; all legs absent → `risk_units = None` (never
+  fabricated). Arithmetic disclosure string mirrors other modules' style. Sources:
+  `entry_ref = entries[0].level`; `technical_stop = invalidation.technical_leg.level`;
+  `stress_level` = first `stress_scenario`-type `downside_map` row (or `null`);
+  `implied_move = snapshot.sentiment.implied_move_next_earnings_pct` (or `null`).
+  (2) `entry_state` field on `decision_contract.build_contract`: deterministic four-state disclosure
+  (`WAIT_FOR_EVENT` / `WATCH_ZONE` / `HURDLE_CLEARING_ENTRY` / `NO_ENTRY_AT_CURRENT`) derived from
+  blockers + eligibility. (3) `build_tradeplan_table` in `render_report`: adds a **Risk-units** row
+  after Size when `risk_units` is populated:
+  `"56.3 sh per $1,000 risk · binding stress 17.75/sh (ref entry 334.69)"`. (4) `report_qc`:
+  `risk_units.arithmetic` added to whitelisted string sources.
+  **GOOG E2E:** binding = stress (17.75/sh), shares ≈ 56.32/$1k; `entry_state = WAIT_FOR_EVENT`;
+  rendered Risk-units row present; `number_provenance` PASS. +31 tests; full suite
+  **1676 pass / 26 skip**.
+
 - **G1 — reconciled issuer market cap (verified score-moving bug).** Page 1, `fcf_yield`, and the risk
   net-cash ratio were computed off `mktcap_computed` (`last × SharesOutstanding`), which for a
   multi-class issuer is ONE share class only — GOOG showed **$1.932T** vs the correct issuer cap

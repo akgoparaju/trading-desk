@@ -93,6 +93,11 @@ _PROVEN_SUPPORT_TYPES = {"swing_low", "ma50", "ma200", "put_wall"}
 # Don't-chase convention: 5% above the top entry.
 _DONT_CHASE_PCT = 0.05
 
+# Risk-unit sizing (O19): the Portfolio-OS reference budget per risk unit.
+# This is a DISCLOSED, NAMED constant -- "shares per $1,000 risk budget" -- not a
+# calibration value.  Change it here if the review's unit changes; never inline it.
+_RISK_BUDGET_USD = 1000
+
 # Hedge: fires when binary-event size >= this, OR iv_pctile <= the cheap threshold.
 _HEDGE_SIZE_THRESHOLD = 0.05
 _HEDGE_IV_PCTILE_THRESHOLD = 25
@@ -476,6 +481,113 @@ def build_hedge(binary30d, recommended_pct, iv_pctile, downside_map):
 
 
 # --------------------------------------------------------------------------- #
+# Risk-unit sizing (O19, Portfolio-OS handoff).
+# --------------------------------------------------------------------------- #
+
+def build_risk_units(entry_ref, technical_stop, stress_level, implied_move):
+    """Compute the risk-unit block (O19): loss-per-share by leg, binding leg, and
+    shares-per-risk-unit for a disclosed $1,000 budget (_RISK_BUDGET_USD).
+
+    Every number is ARITHMETIC from existing bundle fields (no calibration):
+      ``entry_ref``       stock_plan.entries[0].level  (the FIRST entry, disclosed ref)
+      ``technical_stop``  stock_plan.invalidation.technical_leg.level
+      ``stress_level``    the stress_scenario row level from module_risk.tables.downside_map
+                          (None if that row is absent)
+      ``implied_move``    snapshot.sentiment.implied_move_next_earnings_pct
+                          (None if absent)
+
+    Guard: any leg whose input is None is set to None and excluded from the max.
+    If NO leg can be computed (all None or entry_ref None) -> returns None (never
+    fabricated).
+
+    Returns a dict with:
+      ``entry_ref``                  the disclosed reference entry (entries[0].level)
+      ``loss_per_share_technical``   entry_ref - technical_stop  (or None)
+      ``loss_per_share_stress``      entry_ref - stress_level    (or None)
+      ``loss_per_share_event_gap``   entry_ref * implied_move    (or None)
+      ``binding_loss_per_share``     max of present legs         (or None)
+      ``binding_leg``                name of the binding leg      (or None)
+      ``risk_budget_usd``            _RISK_BUDGET_USD (the disclosed unit)
+      ``shares_per_risk_unit``       risk_budget_usd / binding_loss_per_share (or None)
+      ``arithmetic``                 disclosure string (mirrors the other modules' style)
+    """
+    if entry_ref is None:
+        return None
+
+    # Per-leg arithmetic (pure subtraction / multiplication; None if input absent).
+    loss_technical = (
+        _clean(float(entry_ref) - float(technical_stop))
+        if technical_stop is not None else None
+    )
+    loss_stress = (
+        _clean(float(entry_ref) - float(stress_level))
+        if stress_level is not None else None
+    )
+    loss_event_gap = (
+        _clean(float(entry_ref) * float(implied_move))
+        if implied_move is not None else None
+    )
+
+    # Collect present legs for max() -- legs with None values are excluded.
+    leg_map = {
+        "technical": loss_technical,
+        "stress": loss_stress,
+        "event_gap": loss_event_gap,
+    }
+    present = {name: val for name, val in leg_map.items() if val is not None}
+    if not present:
+        return None
+
+    binding_leg = max(present, key=present.__getitem__)
+    binding_loss = present[binding_leg]
+    shares_per_unit = _clean(_RISK_BUDGET_USD / float(binding_loss))
+
+    # Arithmetic disclosure string (mirrors the style of other modules).
+    parts = [
+        f"entry_ref={_fmt(_clean(entry_ref))} (entries[0].level)"
+    ]
+    if technical_stop is not None:
+        parts.append(
+            f"technical: {_fmt(_clean(entry_ref))}-{_fmt(_clean(technical_stop))}"
+            f"={_fmt(loss_technical)}/sh"
+        )
+    else:
+        parts.append("technical: n/a (technical_stop absent)")
+    if stress_level is not None:
+        parts.append(
+            f"stress: {_fmt(_clean(entry_ref))}-{_fmt(_clean(stress_level))}"
+            f"={_fmt(loss_stress)}/sh"
+        )
+    else:
+        parts.append("stress: n/a (stress_scenario row absent)")
+    if implied_move is not None:
+        parts.append(
+            f"event_gap: {_fmt(_clean(entry_ref))}x{_fmt(implied_move)}"
+            f"={_fmt(loss_event_gap)}/sh"
+        )
+    else:
+        parts.append("event_gap: n/a (implied_move absent)")
+    parts.append(
+        f"binding={binding_leg} {_fmt(binding_loss)}/sh; "
+        f"shares_per_risk_unit={_RISK_BUDGET_USD}/{_fmt(binding_loss)}"
+        f"={_fmt(shares_per_unit)} sh per ${_RISK_BUDGET_USD} risk"
+    )
+    arithmetic = "; ".join(parts)
+
+    return {
+        "entry_ref": _clean(entry_ref),
+        "loss_per_share_technical": loss_technical,
+        "loss_per_share_stress": loss_stress,
+        "loss_per_share_event_gap": loss_event_gap,
+        "binding_loss_per_share": binding_loss,
+        "binding_leg": binding_leg,
+        "risk_budget_usd": _RISK_BUDGET_USD,
+        "shares_per_risk_unit": shares_per_unit,
+        "arithmetic": arithmetic,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Don't-chase.
 # --------------------------------------------------------------------------- #
 
@@ -673,6 +785,23 @@ def build_stock_plan_module(composite, technical, risk, snapshot, profile,
     # -- don't-chase -------------------------------------------------------
     dont_chase = build_dont_chase(entry_1_level)
 
+    # -- risk-unit sizing (O19, Portfolio-OS handoff) ----------------------
+    # entry_ref  = entries[0].level  (FIRST entry, the disclosed reference)
+    # technical_stop = invalidation.technical_leg.level
+    # stress_level   = first stress_scenario row in downside_map (or None)
+    # implied_move   = snapshot.sentiment.implied_move_next_earnings_pct (or None)
+    entry_ref = entries[0]["level"] if entries else None
+    technical_stop = invalidation.get("technical_leg", {}).get("level")
+    stress_level = next(
+        (row["level"] for row in downside_map
+         if row.get("type") == "stress_scenario" and row.get("level") is not None),
+        None,
+    )
+    implied_move = sentiment.get("implied_move_next_earnings_pct") if isinstance(
+        sentiment, dict) else None
+    risk_units = build_risk_units(entry_ref, technical_stop, stress_level,
+                                  implied_move)
+
     # -- expression (preliminary) ------------------------------------------
     expression = decide_expression(dtc, catalyst_in_thesis, profile, iv_minus_rv)
     expression["catalyst_in_thesis_justification"] = catalyst_in_thesis_justification
@@ -691,6 +820,7 @@ def build_stock_plan_module(composite, technical, risk, snapshot, profile,
             "sizing": sizing,
             "hedge": hedge,
             "dont_chase": dont_chase,
+            "risk_units": risk_units,
         },
         "expression": expression,
         "flags": {

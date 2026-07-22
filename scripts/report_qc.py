@@ -225,6 +225,8 @@ def _iter_whitelisted_string_numbers(docs):
     sources.append(_dig(tp, "expression", "executability_note"))
     # invalidation fundamental_leg strings (metric/threshold/justification text).
     sources.append(_dig(sp, "invalidation", "fundamental_leg"))
+    # O19: risk_units arithmetic disclosure string (numbers LLM prose may cite).
+    sources.append(_dig(sp, "risk_units", "arithmetic"))
 
     opts = docs.get("module_options") or {}
     for st in (opts.get("recommended_structures") or []):
