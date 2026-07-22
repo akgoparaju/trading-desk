@@ -123,6 +123,51 @@ from scripts import sector_scales
 
 RUBRIC_VERSION = "1.2.0"
 SKILL_NAME = "fundamental"
+
+# --------------------------------------------------------------------------- #
+# Adjusted-financials validation (O14 — adjusted_financials.json bridge)
+# --------------------------------------------------------------------------- #
+
+_ADJUSTED_REQUIRED_NUMERIC = ("core_eps_fwd", "core_roe")
+
+
+def validate_adjusted(adjusted) -> list:
+    """Return a list of named issues for an adjusted_financials dict ([] valid).
+
+    Requires core_eps_fwd and core_roe: numeric and positive. one_time_items
+    must be a list; each item must have a non-empty label and source.
+    citations must be a non-empty dict. Every problem is reported so a
+    malformed file names all issues at once.
+    """
+    issues = []
+    if not isinstance(adjusted, dict):
+        return ["adjusted is not a JSON object"]
+    for key in _ADJUSTED_REQUIRED_NUMERIC:
+        v = adjusted.get(key)
+        if v is None:
+            issues.append(f"missing required key: {key}")
+        elif not isinstance(v, (int, float)) or isinstance(v, bool):
+            issues.append(f"{key} must be numeric")
+        elif v <= 0:
+            issues.append(f"{key} must be positive (got {v})")
+    items = adjusted.get("one_time_items")
+    if not isinstance(items, list):
+        issues.append("one_time_items must be a list")
+    else:
+        for i, item in enumerate(items):
+            if not isinstance(item, dict):
+                issues.append(f"one_time_items[{i}] must be a dict")
+                continue
+            label = item.get("label")
+            source = item.get("source")
+            if not isinstance(label, str) or not label.strip():
+                issues.append(f"one_time_items[{i}].label must be non-empty")
+            if not isinstance(source, str) or not source.strip():
+                issues.append(f"one_time_items[{i}].source must be non-empty")
+    citations = adjusted.get("citations")
+    if not isinstance(citations, dict) or not citations:
+        issues.append("citations must be a non-empty dict")
+    return issues
 # Top-level mode disclosure tracks the valuation mode actually used (ORCL live
 # finding: the static "not applied" note shipped on runs where FSI initiation
 # HAD run and anchors scored the valuation — a false disclosure).
@@ -233,7 +278,8 @@ def _clean(x):
 #    fcf (8) + moat/positioning judgment flag (10)
 # --------------------------------------------------------------------------- #
 
-def score_quality(fund, moat=None, moat_justification=None) -> dict:
+def score_quality(fund, moat=None, moat_justification=None,
+                  adjusted=None) -> dict:
     """Revenue growth (12) + margins (gm 7 + om 5) + roe (8) + FCF margin (8) +
     moat/positioning judgment flag (10).
 
@@ -243,8 +289,11 @@ def score_quality(fund, moat=None, moat_justification=None) -> dict:
         null -> 0.
     om (om_ttm): >=0.25 -> 5; [0.15,0.25) -> 4; [0.05,0.15) -> 2; <0.05 -> 1;
         null -> 0.
-    roe (percent OR fraction): value > 3 is treated as a percent and divided by
-        100 (the normalization is labeled in the arithmetic); then >=0.30 -> 8;
+    roe: when adjusted.core_roe is present and numeric, score off core_roe
+        INSTEAD of the snapshot roe (the snapshot TTM roe may be inflated by a
+        one-time gain). Same tier bands. Both are disclosed in arithmetic.
+        Without adjusted: roe (percent OR fraction): value > 3 treated as percent
+        and divided by 100 (labeled in arithmetic); then >=0.30 -> 8;
         [0.15,0.30) -> 6; [0.05,0.15) -> 3; <0.05 -> 1; null -> 0.
     FCF margin = fcf_ttm / rev_ttm: >=0.20 -> 8; [0.10,0.20) -> 6; [0,0.10) -> 3;
         <0 -> 1; either null (or rev_ttm 0) -> 0.
@@ -259,6 +308,15 @@ def score_quality(fund, moat=None, moat_justification=None) -> dict:
     roe = fund.get("roe")
     fcf = fund.get("fcf_ttm")
     rev = fund.get("rev_ttm")
+
+    # O14: adjusted ROE — use core_roe when available, disclosing gaap+core.
+    adj = adjusted if isinstance(adjusted, dict) else {}
+    core_roe = adj.get("core_roe")
+    gaap_roe_ttm = adj.get("gaap_roe_ttm")
+    use_core_roe = (core_roe is not None
+                    and isinstance(core_roe, (int, float))
+                    and not isinstance(core_roe, bool)
+                    and core_roe > 0)
 
     parts = []
     evaluable = 0
@@ -314,8 +372,28 @@ def score_quality(fund, moat=None, moat_justification=None) -> dict:
         parts.append("om_ttm: n/a (+0)")
 
     # -- returns on capital / roe (percent-vs-fraction normalization) ------
+    # O14: when adjusted.core_roe is present, score off core_roe and disclose both.
     roe_norm = None
-    if roe is not None:
+    if use_core_roe:
+        evaluable += 1
+        # core_roe is always a fraction (from the FSI model, validated > 0).
+        roe_norm = _clean(core_roe)
+        if roe_norm >= 0.30:
+            roe_pts = 8
+        elif roe_norm >= 0.15:
+            roe_pts = 6
+        elif roe_norm >= 0.05:
+            roe_pts = 3
+        else:  # < 0.05
+            roe_pts = 1
+        # Disclose both core and gaap.
+        if gaap_roe_ttm is not None:
+            gaap_note = f" (gaap_ttm {_fmt(gaap_roe_ttm)}, ex one-time)"
+        else:
+            gaap_note = ""
+        parts.append(
+            f"roe core {_fmt(roe_norm)}{gaap_note} -> {roe_pts}/8")
+    elif roe is not None:
         evaluable += 1
         if roe > 3:
             roe_norm = _clean(roe / 100.0)
@@ -388,7 +466,7 @@ def score_quality(fund, moat=None, moat_justification=None) -> dict:
 # 2. Valuation (max 50): pe-vs-history (20) + PEG (15) + FCF yield (15)
 # --------------------------------------------------------------------------- #
 
-def score_valuation(val) -> dict:
+def score_valuation(val, adjusted=None, last=None) -> dict:
     """Fwd P/E vs own 5-yr median (20) + PEG (15) + FCF yield (15).
 
     multiple vs history: ratio = pe_fwd / pe_5yr_median (both > 0 required, else
@@ -398,6 +476,9 @@ def score_valuation(val) -> dict:
         (discount to own history); (0.75,1.0] -> 14; (1.0,1.25] -> 8; >1.25 -> 3.
         The arithmetic string carries the ``pe_median_method`` label so the
         approximation is disclosed.
+    O14: when adjusted.core_eps_fwd is present and last is available, pe_fwd_core
+        = last / core_eps_fwd is used instead of the snapshot pe_fwd. Both GAAP
+        and core are disclosed in the arithmetic string.
     PEG (peg): (0,1.0] -> 15; (1.0,2.0] -> 10; (2.0,3.0] -> 5; >3.0 -> 2;
         null or <=0 -> 0.
     FCF yield (fcf_yield): >=0.05 -> 15; [0.03,0.05) -> 11; [0.015,0.03) -> 7;
@@ -408,6 +489,23 @@ def score_valuation(val) -> dict:
     pe_method = val.get("pe_median_method")
     peg = val.get("peg")
     fcf_yield = val.get("fcf_yield")
+
+    # O14: compute core pe_fwd when adjusted present.
+    adj = adjusted if isinstance(adjusted, dict) else {}
+    core_eps_fwd = adj.get("core_eps_fwd")
+    consensus_eps_fwd = adj.get("consensus_eps_fwd")
+    gaap_roe_ttm = adj.get("gaap_roe_ttm")  # not used here but carried
+    pe_fwd_core = None
+    if (core_eps_fwd is not None and isinstance(core_eps_fwd, (int, float))
+            and not isinstance(core_eps_fwd, bool) and core_eps_fwd > 0
+            and last is not None and isinstance(last, (int, float))
+            and not isinstance(last, bool)):
+        pe_fwd_core = _clean(last / core_eps_fwd)
+    # pe_fwd_gaap is the snapshot pe_fwd (for disclosure).
+    pe_fwd_gaap = _clean(pe_fwd) if pe_fwd is not None else None
+
+    # effective pe_fwd for ratio: core when available, else snapshot.
+    effective_pe_fwd = pe_fwd_core if pe_fwd_core is not None else pe_fwd
 
     parts = []
     evaluable = 0
@@ -423,9 +521,9 @@ def score_valuation(val) -> dict:
     # treated as n/a (NOT counted toward ``evaluable``, exactly like a null input),
     # so the dimension renormalizes over the remaining components instead of banding
     # on a bogus number.
-    if (pe_fwd is not None and pe_fwd > 0
+    if (effective_pe_fwd is not None and effective_pe_fwd > 0
             and pe_median is not None and pe_median > 0):
-        ratio = pe_fwd / pe_median
+        ratio = effective_pe_fwd / pe_median
         if ratio < 0.2 or ratio > 5.0:
             pe_pts = 0
             parts.append(
@@ -446,10 +544,21 @@ def score_valuation(val) -> dict:
             else:  # > 1.25
                 pe_pts = 3
                 band = "rich premium to own history"
-            parts.append(
-                f"pe_fwd {_fmt(_clean(pe_fwd))} / pe_5yr_median "
-                f"{_fmt(_clean(pe_median))} (method {pe_method}) = "
-                f"{_fmt(_clean(ratio))} -> {pe_pts}/20 ({band})")
+            # O14 disclosure: show core vs gaap when core pe_fwd is in use.
+            if pe_fwd_core is not None and pe_fwd_gaap is not None:
+                parts.append(
+                    f"pe_fwd core {_fmt(_clean(pe_fwd_core))} "
+                    f"(last {_fmt(_clean(last))} / core_eps_fwd "
+                    f"{_fmt(_clean(core_eps_fwd))}, gaap "
+                    f"{_fmt(pe_fwd_gaap)} on flattered consensus "
+                    f"{_fmt(_clean(consensus_eps_fwd))}) "
+                    f"/ pe_5yr_median {_fmt(_clean(pe_median))} "
+                    f"= {_fmt(_clean(ratio))} -> {pe_pts}/20 ({band})")
+            else:
+                parts.append(
+                    f"pe_fwd {_fmt(_clean(effective_pe_fwd))} / pe_5yr_median "
+                    f"{_fmt(_clean(pe_median))} (method {pe_method}) = "
+                    f"{_fmt(_clean(ratio))} -> {pe_pts}/20 ({band})")
     else:
         pe_pts = 0
         parts.append(
@@ -647,18 +756,29 @@ def _comps_range_position(last, anchors):
     return pts, arithmetic
 
 
-def _own_history_position(pe_fwd, pe_median, pe_method):
+def _own_history_position(pe_fwd, pe_median, pe_method,
+                          pe_fwd_core=None, pe_fwd_gaap=None,
+                          core_eps_fwd=None, consensus_eps_fwd=None,
+                          last=None):
     """Own-history multiple component (max 8). The v1.1 pe_fwd/pe_5yr_median band
     rescaled from 20 to 8, keeping the [0.2,5.0] sanity band (outside -> n/a).
 
     Rescaled tiers (8 x v1.1_fraction): <=0.75 -> 8; (0.75,1.0] -> 5.6;
     (1.0,1.25] -> 3.2; > 1.25 -> 1.2. Returns (points, arithmetic_str,
-    evaluable_bool)."""
-    if not (pe_fwd is not None and pe_fwd > 0
+    evaluable_bool).
+
+    O14: when pe_fwd_core is provided (last / core_eps_fwd), it is used as the
+    pe_fwd for the own-history ratio instead of the snapshot pe_fwd. Both GAAP and
+    core are disclosed in the arithmetic string.
+    """
+    # Use core pe_fwd when available; fall back to snapshot pe_fwd.
+    effective_pe_fwd = pe_fwd_core if (pe_fwd_core is not None
+                                        and pe_fwd_core > 0) else pe_fwd
+    if not (effective_pe_fwd is not None and effective_pe_fwd > 0
             and pe_median is not None and pe_median > 0):
         return 0, (f"own_history: n/a (pe_fwd or pe_5yr_median null/non-positive; "
                    f"method {pe_method}) (+0)"), False
-    ratio = pe_fwd / pe_median
+    ratio = effective_pe_fwd / pe_median
     if ratio < 0.2 or ratio > 5.0:
         return 0, (
             f"own_history: pe_fwd/pe_5yr_median ratio {_fmt(_clean(ratio))} outside "
@@ -676,10 +796,27 @@ def _own_history_position(pe_fwd, pe_median, pe_method):
     else:  # > 1.25
         pts = _clean(3 * 8 / 20)  # 1.2
         band = "rich premium to own history"
-    arithmetic = (
-        f"own_history: pe_fwd {_fmt(_clean(pe_fwd))} / pe_5yr_median "
-        f"{_fmt(_clean(pe_median))} (method {pe_method}) = {_fmt(_clean(ratio))} "
-        f"-> {_fmt(pts)}/{_OWNHIST_MAX} ({band})")
+
+    # Build the arithmetic string with core/gaap disclosure when adjusted.
+    if pe_fwd_core is not None and pe_fwd_core > 0 and pe_fwd_gaap is not None:
+        # Show the derivation (last / core_eps_fwd) when last is available.
+        if last is not None and core_eps_fwd is not None:
+            deriv = (f"last {_fmt(_clean(last))} / core_eps_fwd "
+                     f"{_fmt(_clean(core_eps_fwd))}")
+        else:
+            deriv = None
+        gaap_note = (f"gaap {_fmt(_clean(pe_fwd_gaap))} on flattered consensus "
+                     f"{_fmt(_clean(consensus_eps_fwd))}")
+        paren = f"({deriv}, {gaap_note})" if deriv else f"({gaap_note})"
+        arithmetic = (
+            f"pe_fwd core {_fmt(_clean(effective_pe_fwd))} {paren} "
+            f"/ pe_5yr_median {_fmt(_clean(pe_median))} (method {pe_method}) = "
+            f"{_fmt(_clean(ratio))} -> {_fmt(pts)}/{_OWNHIST_MAX} ({band})")
+    else:
+        arithmetic = (
+            f"own_history: pe_fwd {_fmt(_clean(effective_pe_fwd))} / pe_5yr_median "
+            f"{_fmt(_clean(pe_median))} (method {pe_method}) = {_fmt(_clean(ratio))} "
+            f"-> {_fmt(pts)}/{_OWNHIST_MAX} ({band})")
     return pts, arithmetic, True
 
 
@@ -758,12 +895,13 @@ def _justified_band_position(scale, snapshot, anchors):
 
 
 def score_valuation_anchored(val, anchors, last, scale=None,
-                             snapshot=None) -> dict:
+                             snapshot=None, adjusted=None) -> dict:
     """Anchored-mode valuation (max 50, v1.2.0). See module docstring for the
     component design. ``val`` is the snapshot valuation block (for own-history +
     fcf_yield + PEG display); ``anchors`` is the validated anchors dict; ``last``
     is the current price; ``scale`` (optional) is a validated sector scale;
-    ``snapshot`` (optional) is the full snapshot (for a dotted metric_source).
+    ``snapshot`` (optional) is the full snapshot (for a dotted metric_source);
+    ``adjusted`` (optional) is a validated adjusted_financials dict (O14).
 
     PEG is NOT scored here -- it is surfaced separately by build_module as
     ``peg_display``. Every component that resolves to n/a is treated like a null
@@ -774,6 +912,18 @@ def score_valuation_anchored(val, anchors, last, scale=None,
     pe_median = val.get("pe_5yr_median")
     pe_method = val.get("pe_median_method")
     fcf_yield = val.get("fcf_yield")
+
+    # O14: compute core pe_fwd for own-history when adjusted present.
+    adj = adjusted if isinstance(adjusted, dict) else {}
+    core_eps_fwd = adj.get("core_eps_fwd")
+    consensus_eps_fwd = adj.get("consensus_eps_fwd")
+    pe_fwd_core = None
+    if (core_eps_fwd is not None and isinstance(core_eps_fwd, (int, float))
+            and not isinstance(core_eps_fwd, bool) and core_eps_fwd > 0
+            and last is not None and isinstance(last, (int, float))
+            and not isinstance(last, bool)):
+        pe_fwd_core = _clean(last / core_eps_fwd)
+    pe_fwd_gaap = _clean(pe_fwd) if pe_fwd is not None else None
 
     parts = []
     evaluable = 0
@@ -788,8 +938,12 @@ def score_valuation_anchored(val, anchors, last, scale=None,
     evaluable += 1
     parts.append(comps_str)
 
-    # 3. Own-history multiple.
-    own_pts, own_str, own_ok = _own_history_position(pe_fwd, pe_median, pe_method)
+    # 3. Own-history multiple (O14: use core pe_fwd when available).
+    own_pts, own_str, own_ok = _own_history_position(
+        pe_fwd, pe_median, pe_method,
+        pe_fwd_core=pe_fwd_core, pe_fwd_gaap=pe_fwd_gaap,
+        core_eps_fwd=core_eps_fwd, consensus_eps_fwd=consensus_eps_fwd,
+        last=last)
     if own_ok:
         evaluable += 1
     parts.append(own_str)
@@ -858,7 +1012,8 @@ def build_valuation_table(val) -> dict:
 # --------------------------------------------------------------------------- #
 
 def score(fund, val, moat=None, moat_justification=None,
-          anchors=None, last=None, scale=None, snapshot=None) -> dict:
+          anchors=None, last=None, scale=None, snapshot=None,
+          adjusted=None) -> dict:
     """Assemble the two subscores and the (possibly renormalized) 0-100 score.
 
     A dimension whose ``evaluable`` is False (all its scored inputs null) is
@@ -870,17 +1025,21 @@ def score(fund, val, moat=None, moat_justification=None,
     number) the valuation dimension uses ANCHORED MODE
     (score_valuation_anchored); otherwise it uses SNAPSHOT MODE
     (score_valuation, the v1.1 floor). Quality/moat are identical in both modes.
+
+    O14: ``adjusted`` (optional validated adjusted_financials dict) threads into
+    quality (core_roe replaces snapshot roe) and valuation own-history (core
+    pe_fwd replaces snapshot pe_fwd). Absent -> byte-identical to today.
     """
     val_block = val if isinstance(val, dict) else {}
     if anchors is not None and isinstance(last, (int, float)) \
             and not isinstance(last, bool):
         val_sub = score_valuation_anchored(val_block, anchors, last, scale,
-                                           snapshot)
+                                           snapshot, adjusted=adjusted)
     else:
-        val_sub = score_valuation(val_block)
+        val_sub = score_valuation(val_block, adjusted=adjusted, last=last)
     subs = [
         score_quality(fund if isinstance(fund, dict) else {},
-                      moat, moat_justification),
+                      moat, moat_justification, adjusted=adjusted),
         val_sub,
     ]
 
@@ -935,7 +1094,8 @@ def _find_snapshot(bundle):
 
 
 def build_module(snapshot, moat=None, moat_justification=None,
-                 anchors=None, scale=None, bundle_dir=None) -> dict:
+                 anchors=None, scale=None, bundle_dir=None,
+                 adjusted=None) -> dict:
     """Build the full module_fundamental.json document from a parsed snapshot.
 
     The moat judgment flag (v1.1.0) is threaded into the quality scoring and
@@ -948,6 +1108,13 @@ def build_module(snapshot, moat=None, moat_justification=None,
     (a validated sector scale dict) supplies the justified-band component and is
     recorded as ``sector_scale`` (name@version). Absent ``anchors`` the SNAPSHOT
     MODE (v1.1 floor) is used and PEG stays scored.
+
+    O14: ``adjusted`` (optional validated adjusted_financials dict) supplies
+    core_eps_fwd and core_roe. When present, these replace the snapshot pe_fwd
+    (own-history component) and roe (quality component). Both GAAP and core are
+    disclosed in the arithmetic strings. When absent, behavior is byte-identical
+    to today. A ``adjusted_financials_applied`` block is added to the doc when
+    adjusted is present.
     """
     fund = snapshot.get("fundamentals", {}) if isinstance(snapshot, dict) else {}
     val = snapshot.get("valuation", {}) if isinstance(snapshot, dict) else {}
@@ -956,7 +1123,8 @@ def build_module(snapshot, moat=None, moat_justification=None,
     last = price.get("last") if isinstance(price, dict) else None
 
     scored = score(fund, val, moat, moat_justification,
-                   anchors=anchors, last=last, scale=scale, snapshot=snapshot)
+                   anchors=anchors, last=last, scale=scale, snapshot=snapshot,
+                   adjusted=adjusted)
 
     anchored = anchors is not None and isinstance(last, (int, float)) \
         and not isinstance(last, bool)
@@ -994,6 +1162,33 @@ def build_module(snapshot, moat=None, moat_justification=None,
         }
     if scored["renormalization_note"]:
         doc["renormalization_note"] = scored["renormalization_note"]
+
+    # O14: adjusted_financials_applied disclosure block (omitted when absent).
+    if isinstance(adjusted, dict) and adjusted:
+        adj = adjusted
+        core_eps_fwd = adj.get("core_eps_fwd")
+        consensus_eps_fwd = adj.get("consensus_eps_fwd")
+        core_roe = adj.get("core_roe")
+        gaap_roe_ttm = adj.get("gaap_roe_ttm")
+        # Compute pe_fwd_core and pe_fwd_gaap for disclosure.
+        pe_fwd_core = None
+        if (core_eps_fwd is not None and isinstance(core_eps_fwd, (int, float))
+                and not isinstance(core_eps_fwd, bool) and core_eps_fwd > 0
+                and last is not None and isinstance(last, (int, float))
+                and not isinstance(last, bool)):
+            pe_fwd_core = _clean(last / core_eps_fwd)
+        pe_fwd_gaap = _clean(val.get("pe_fwd")) if val.get("pe_fwd") is not None \
+            else None
+        doc["adjusted_financials_applied"] = {
+            "core_eps_fwd": core_eps_fwd,
+            "consensus_eps_fwd": consensus_eps_fwd,
+            "pe_fwd_gaap": pe_fwd_gaap,
+            "pe_fwd_core": pe_fwd_core,
+            "core_roe": core_roe,
+            "gaap_roe_ttm": gaap_roe_ttm,
+            "one_time_items": adj.get("one_time_items", []),
+        }
+
     # Confidence / provenance layer (confidence-v1.0.0): deterministic, disclosure-
     # only. DEPTH reads doc["fundamental_mode"] (anchored -> HIGH, compressed ->
     # MEDIUM). Computed from THIS module's own doc + snapshot.
@@ -1023,6 +1218,12 @@ def main(argv=None):
                         help="path to a sector-scale JSON (sector_scales format); "
                              "supplies the anchored justified-band component. "
                              "Ignored in snapshot mode.")
+    parser.add_argument("--adjusted", default=None,
+                        help="path to adjusted_financials.json (O14); when present, "
+                             "core_eps_fwd replaces snapshot pe_fwd in the "
+                             "own-history component and core_roe replaces snapshot "
+                             "roe in the quality component. Both GAAP and core are "
+                             "disclosed. Absent -> byte-identical to today.")
     parser.add_argument("--out", default=None,
                         help="output path (default <bundle>/module_fundamental.json)")
     args = parser.parse_args(argv)
@@ -1086,6 +1287,26 @@ def main(argv=None):
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
 
+    # O14: --adjusted flag (optional; absent -> no adjustment, byte-identical run).
+    adjusted = None
+    if args.adjusted is not None:
+        try:
+            with open(args.adjusted) as fh:
+                adjusted = json.load(fh)
+        except OSError as exc:
+            print(f"ERROR: cannot read adjusted {args.adjusted}: {exc}",
+                  file=sys.stderr)
+            return 2
+        except ValueError as exc:
+            print(f"ERROR: adjusted {args.adjusted} is not valid JSON: {exc}",
+                  file=sys.stderr)
+            return 2
+        issues = validate_adjusted(adjusted)
+        if issues:
+            print("ERROR: invalid adjusted " + args.adjusted + ": "
+                  + "; ".join(issues), file=sys.stderr)
+            return 2
+
     snap_path = _find_snapshot(args.bundle)
     if snap_path is None:
         print(f"ERROR: no snapshot_*.json in {args.bundle}", file=sys.stderr)
@@ -1098,7 +1319,8 @@ def main(argv=None):
         return 2
 
     doc = build_module(snapshot, args.moat, args.moat_justification,
-                       anchors=anchors, scale=scale, bundle_dir=args.bundle)
+                       anchors=anchors, scale=scale, bundle_dir=args.bundle,
+                       adjusted=adjusted)
 
     out = args.out or os.path.join(args.bundle, "module_fundamental.json")
     with open(out, "w") as fh:

@@ -1,5 +1,68 @@
 # Changelog
 
+## Unreleased — 2026-07-22 · O14 adjusted-financials bridge
+
+New optional `--adjusted <adjusted_financials.json>` flag in `score_fundamental.py`
+threads FSI-transcribed core EPS and core ROE into the two affected score components,
+disclosing GAAP vs core without changing the score when one-time items do not cross
+a tier boundary. `coverage_qc.py` gains a new optional coherence check for the same
+artifact (SKIP when absent; not in `_REQUIRED_ARTIFACTS`).
+
+- **`scripts/score_fundamental.py` — `--adjusted` flag (O14).**
+  New `validate_adjusted()` function validates the artifact schema (core_eps_fwd,
+  core_roe numeric+positive; one_time_items list with non-empty label+source;
+  citations non-empty). The flag is threaded through `main → build_module → score →
+  score_quality / score_valuation / score_valuation_anchored / _own_history_position`.
+  Absent `--adjusted` → byte-identical to today (the graceful floor, asserted in tests).
+
+- **Quality ROE component** (`score_quality`): when `adjusted.core_roe` is present
+  and numeric+positive, score off `core_roe` instead of the snapshot's inflated TTM
+  roe. Same tier bands (≥0.30 → 8, etc.). Arithmetic discloses both:
+  `"roe core 0.318 (gaap_ttm 0.389, ex one-time) -> 8/8"`. A `core_roe` that
+  crosses a tier boundary moves the score (tested with a tier-crossing fixture).
+
+- **Valuation own-history component** (`_own_history_position`, `score_valuation`,
+  `score_valuation_anchored`): when `adjusted.core_eps_fwd` is present and `last`
+  is available, recomputes `pe_fwd_core = last / core_eps_fwd` and uses it as the
+  pe_fwd for the own-history ratio. `pe_5yr_median` is NOT touched. Arithmetic
+  discloses GAAP vs core: `"pe_fwd core 32.4 (gaap 24.65 on flattered consensus
+  14.25) / pe_5yr_median 10.88 = 2.98 -> 1.2/8 (rich premium)"`. A core_eps_fwd
+  that crosses the ratio band moves the score (tested with a tier-crossing fixture).
+
+- **Disclosure block** `doc["adjusted_financials_applied"]`: emitted in the module
+  JSON when `--adjusted` is present; carries `core_eps_fwd`, `consensus_eps_fwd`,
+  `pe_fwd_gaap`, `pe_fwd_core`, `core_roe`, `gaap_roe_ttm`, `one_time_items`.
+  Omitted when `--adjusted` absent.
+
+- **`scripts/coverage_qc.py` — `check_adjusted_financials` (O14).**
+  New optional check: `passed=None` (SKIP) when `adjusted_financials.json` is
+  absent; `passed=True` when valid; `passed=False` when malformed. NOT added to
+  `_REQUIRED_ARTIFACTS`. Wired into `run_coverage_qc` as the 9th (final) check.
+  CLI table and `_status` already handled `None` returns as "SKIP".
+
+- **GOOG validation (E2E):** with the real `coverage/adjusted_financials.json`,
+  `score_fundamental` scores 66.2 both with and without `--adjusted` (score-neutral;
+  both tiers hold). `adjusted_financials_applied` shows `pe_fwd_core ≈ 32.38` /
+  `core_roe 0.318` / the Q1'26 one-time item. `coverage_qc` on the GOOG coverage
+  dir: all 9 checks PASS including `adjusted_financials`.
+
+- **Tests:** 44 new tests in `tests/test_score_fundamental.py` (validate_adjusted,
+  graceful floor byte-identity, quality core_roe, quality tier-crossing, own-history
+  core pe_fwd, own-history tier-crossing, GOOG fixture score-neutral + disclosure,
+  CLI --adjusted flag) and `tests/test_coverage_qc.py` (absent → SKIP,
+  valid → PASS, malformed variants → FAIL, overall PASS/FAIL plumbing, real GOOG).
+  Full suite: 1753 passed, 2 skipped (baseline 1709+2).
+
+- **Files changed:**
+  - `scripts/score_fundamental.py` — `validate_adjusted`, `score_quality` (+adjusted),
+    `score_valuation` (+adjusted, +last), `score_valuation_anchored` (+adjusted),
+    `_own_history_position` (+pe_fwd_core/pe_fwd_gaap params), `score` (+adjusted),
+    `build_module` (+adjusted, disclosure block), `main` (--adjusted CLI flag)
+  - `scripts/coverage_qc.py` — `check_adjusted_financials`, `run_coverage_qc` (+1
+    check), `_apply_waivers` + `_status` (handle passed=None SKIP)
+  - `tests/test_score_fundamental.py` — O14 test classes (6 classes, 44 tests)
+  - `tests/test_coverage_qc.py` — `TestAdjustedFinancialsCheck` (14 tests)
+
 ## 0.15.1 — 2026-07-22 · O20 report polish (PDF metadata + bookmarks + untruncate)
 
 PDF metadata + bookmarks + invalidation untruncation for `render_pdf.py`. No new

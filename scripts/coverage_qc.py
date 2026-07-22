@@ -503,6 +503,64 @@ def check_valuation_depth(coverage_dir, mode):
                    f"{comps_floor}, scenario values present ({mode})")
 
 
+def check_adjusted_financials(coverage_dir):
+    """Optional coherence check for adjusted_financials.json (O14).
+
+    Returns SKIP (passed=None) when the file is absent — not a failure.
+    When present: parses; core_eps_fwd and core_roe numeric+positive;
+    one_time_items a list with non-empty label+source per item; citations
+    non-empty. Mirrors anchors_coherent's style/return.
+    """
+    path = os.path.join(coverage_dir, "adjusted_financials.json")
+    if not os.path.isfile(path):
+        return _result("adjusted_financials", None,
+                       "adjusted_financials.json absent (optional — skipped)")
+    try:
+        adj = _load_json(path)
+    except (OSError, ValueError) as exc:
+        return _result("adjusted_financials", False,
+                       f"adjusted_financials.json does not parse: {exc}")
+    if not isinstance(adj, dict):
+        return _result("adjusted_financials", False,
+                       "adjusted_financials.json is not a JSON object")
+
+    problems = []
+    for key in ("core_eps_fwd", "core_roe"):
+        v = adj.get(key)
+        if v is None:
+            problems.append(f"missing required key: {key}")
+        elif not isinstance(v, (int, float)) or isinstance(v, bool):
+            problems.append(f"{key} must be numeric")
+        elif v <= 0:
+            problems.append(f"{key} must be positive (got {v})")
+
+    items = adj.get("one_time_items")
+    if not isinstance(items, list):
+        problems.append("one_time_items must be a list")
+    else:
+        for i, item in enumerate(items):
+            if not isinstance(item, dict):
+                problems.append(f"one_time_items[{i}] must be a dict")
+                continue
+            label = item.get("label")
+            source = item.get("source")
+            if not isinstance(label, str) or not label.strip():
+                problems.append(f"one_time_items[{i}].label must be non-empty")
+            if not isinstance(source, str) or not source.strip():
+                problems.append(f"one_time_items[{i}].source must be non-empty")
+
+    citations = adj.get("citations")
+    if not isinstance(citations, dict) or not citations:
+        problems.append("citations must be a non-empty dict")
+
+    if problems:
+        return _result("adjusted_financials", False,
+                       "invalid adjusted_financials.json: " + "; ".join(problems))
+    return _result("adjusted_financials", True,
+                   "adjusted_financials.json valid: core_eps_fwd + core_roe "
+                   "numeric+positive, one_time_items and citations present")
+
+
 def check_anchors_coherent(coverage_dir):
     apath = os.path.join(coverage_dir, "valuation_anchors.json")
     vpath = os.path.join(coverage_dir, "valuation.md")
@@ -552,7 +610,12 @@ def check_anchors_coherent(coverage_dir):
 # --------------------------------------------------------------------------- #
 
 def run_coverage_qc(coverage_dir, mode="full"):
-    """Run all coverage checks for `mode` ("full"|"shallow"); return result dicts."""
+    """Run all coverage checks for `mode` ("full"|"shallow"); return result dicts.
+
+    The adjusted_financials check (O14) is OPTIONAL: absent file -> SKIP (not
+    a failure). It is appended after the required checks so the existing
+    8-check table is extended by one optional row.
+    """
     return [
         check_artifacts_present(coverage_dir),
         check_manifest_shape(coverage_dir, mode),
@@ -562,6 +625,7 @@ def run_coverage_qc(coverage_dir, mode="full"):
         check_model_depth(coverage_dir, mode),
         check_valuation_depth(coverage_dir, mode),
         check_anchors_coherent(coverage_dir),
+        check_adjusted_financials(coverage_dir),
     ]
 
 
@@ -590,6 +654,7 @@ def _apply_waivers(results, waiver_reasons):
             res["detail"] = f"WAIVED: {reason}: {res['detail']}"
         elif res["passed"] is False:
             unwaived += 1
+        # passed is None -> SKIP: does not count as failure.
     return results, unwaived
 
 
@@ -600,6 +665,7 @@ def _status(res, waiver_names):
         return "PASS"
     if res["passed"] is False:
         return "FAIL"
+    # passed is None -> optional check skipped (file absent).
     return "SKIP"
 
 

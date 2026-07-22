@@ -1396,5 +1396,357 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(a, b)
 
 
+# =========================================================================== #
+# O14 — adjusted-financials bridge (v1.2.0 addendum)
+# =========================================================================== #
+
+# A valid adjusted_financials dict for tests.
+_ADJUSTED_GOOG = {
+    "core_eps_fwd": 10.85,
+    "consensus_eps_fwd": 14.2522,
+    "core_roe": 0.318,
+    "gaap_roe_ttm": 0.389,
+    "one_time_items": [
+        {"label": "Q1'26 unrealized equity-securities gain",
+         "pre_tax_usd_m": 37700, "period": "2026Q1",
+         "source": "coverage/research.md §Q1-2026"},
+    ],
+    "as_of": "2026-07-21",
+    "citations": {"core_eps_fwd": "coverage/model.md §projections_base FY2026E"},
+}
+
+
+class TestValidateAdjusted(unittest.TestCase):
+    """Unit tests for the validate_adjusted() function."""
+
+    def test_valid_adjusted_no_issues(self):
+        self.assertEqual(sf.validate_adjusted(_ADJUSTED_GOOG), [])
+
+    def test_not_a_dict(self):
+        issues = sf.validate_adjusted(["x"])
+        self.assertTrue(any("not a JSON object" in i for i in issues))
+
+    def test_missing_core_eps_fwd(self):
+        adj = {**_ADJUSTED_GOOG}
+        del adj["core_eps_fwd"]
+        issues = sf.validate_adjusted(adj)
+        self.assertTrue(any("core_eps_fwd" in i for i in issues))
+
+    def test_missing_core_roe(self):
+        adj = {**_ADJUSTED_GOOG}
+        del adj["core_roe"]
+        issues = sf.validate_adjusted(adj)
+        self.assertTrue(any("core_roe" in i for i in issues))
+
+    def test_nonpositive_core_eps_fwd(self):
+        adj = {**_ADJUSTED_GOOG, "core_eps_fwd": -1.0}
+        issues = sf.validate_adjusted(adj)
+        self.assertTrue(any("positive" in i for i in issues))
+
+    def test_nonnumeric_core_roe(self):
+        adj = {**_ADJUSTED_GOOG, "core_roe": "high"}
+        issues = sf.validate_adjusted(adj)
+        self.assertTrue(any("numeric" in i for i in issues))
+
+    def test_one_time_items_not_a_list(self):
+        adj = {**_ADJUSTED_GOOG, "one_time_items": {}}
+        issues = sf.validate_adjusted(adj)
+        self.assertTrue(any("list" in i for i in issues))
+
+    def test_one_time_item_missing_label(self):
+        item = {"pre_tax_usd_m": 1000, "period": "2026Q1",
+                "source": "coverage/research.md §test"}
+        adj = {**_ADJUSTED_GOOG, "one_time_items": [item]}
+        issues = sf.validate_adjusted(adj)
+        self.assertTrue(any("label" in i for i in issues))
+
+    def test_one_time_item_empty_source(self):
+        item = {"label": "gain", "pre_tax_usd_m": 1000, "period": "2026Q1",
+                "source": ""}
+        adj = {**_ADJUSTED_GOOG, "one_time_items": [item]}
+        issues = sf.validate_adjusted(adj)
+        self.assertTrue(any("source" in i for i in issues))
+
+    def test_empty_citations_fails(self):
+        adj = {**_ADJUSTED_GOOG, "citations": {}}
+        issues = sf.validate_adjusted(adj)
+        self.assertTrue(any("citations" in i for i in issues))
+
+
+class TestGracefulFloor(unittest.TestCase):
+    """adjusted=None -> byte-identical module doc to today (the graceful floor)."""
+
+    def _snap(self, **over):
+        snap = {
+            "fundamentals": _fund(), "valuation": _val(),
+            "price": {"last": 70.0},
+            "meta": {"ticker": "MU", "as_of_utc": "2026-07-15T00:00:00Z"},
+        }
+        snap.update(over)
+        return snap
+
+    def test_adjusted_none_equals_no_adjusted_snapshot_mode(self):
+        # score() with adjusted=None must produce byte-identical output to score()
+        # without the adjusted kwarg at all (snapshot mode, no anchors).
+        snap = self._snap()
+        doc_default = sf.build_module(snap)
+        doc_none = sf.build_module(snap, adjusted=None)
+        import json
+        self.assertEqual(json.dumps(doc_default, sort_keys=True),
+                         json.dumps(doc_none, sort_keys=True))
+
+    def test_adjusted_none_equals_no_adjusted_anchored_mode(self):
+        # Same assertion for anchored mode.
+        snap = self._snap()
+        doc_default = sf.build_module(snap, anchors=_anchors())
+        doc_none = sf.build_module(snap, anchors=_anchors(), adjusted=None)
+        import json
+        self.assertEqual(json.dumps(doc_default, sort_keys=True),
+                         json.dumps(doc_none, sort_keys=True))
+
+    def test_no_adjusted_financials_applied_block_when_absent(self):
+        # When adjusted=None the disclosure block must not appear.
+        doc = sf.build_module(self._snap())
+        self.assertNotIn("adjusted_financials_applied", doc)
+
+
+class TestAdjustedQuality(unittest.TestCase):
+    """Quality ROE: core_roe present -> score off core_roe, disclose gaap+core."""
+
+    def test_core_roe_used_in_scoring(self):
+        # adjusted.core_roe=0.318 -> roe >=0.30 -> 8/8; snapshot roe=0.05 would be 3.
+        adj = {**_ADJUSTED_GOOG, "core_roe": 0.318}
+        fund_low_roe = _fund(roe=0.05)   # would score 3/8 without core_roe
+        sub = sf.score_quality(fund_low_roe, adjusted=adj)
+        self.assertEqual(sub["inputs"]["roe_points"], 8)
+
+    def test_core_roe_arithmetic_discloses_gaap_and_core(self):
+        # The arithmetic string must name both core and gaap_ttm.
+        sub = sf.score_quality(_fund(), adjusted=_ADJUSTED_GOOG)
+        arith = sub["arithmetic"]
+        self.assertIn("core", arith)
+        self.assertIn("gaap_ttm", arith)
+        self.assertIn("0.318", arith)
+        self.assertIn("0.389", arith)
+
+    def test_core_roe_tier_change_crosses_band(self):
+        # A core_roe of 0.28 is in [0.15,0.30) -> 6/8.
+        # The snapshot roe=0.36 would be 8/8.
+        # Proves adjusted can MOVE the score (tier change from snapshot).
+        adj = {**_ADJUSTED_GOOG, "core_roe": 0.28, "gaap_roe_ttm": 0.36}
+        fund_high_roe = _fund(roe=0.36)
+        sub_with = sf.score_quality(fund_high_roe, adjusted=adj)
+        sub_without = sf.score_quality(fund_high_roe)
+        self.assertEqual(sub_without["inputs"]["roe_points"], 8)  # snapshot -> 8
+        self.assertEqual(sub_with["inputs"]["roe_points"], 6)     # core 0.28 -> 6
+
+    def test_no_adjusted_uses_snapshot_roe(self):
+        # Without adjusted, snapshot roe is used (unchanged baseline).
+        sub = sf.score_quality(_fund(roe=0.36))
+        self.assertEqual(sub["inputs"]["roe_points"], 8)
+        self.assertNotIn("core", sub["arithmetic"])
+
+    def test_adjusted_financials_applied_present_in_module_doc(self):
+        # build_module with adjusted -> disclosure block present.
+        snap = {"fundamentals": _fund(), "valuation": _val(),
+                "price": {"last": 100.0},
+                "meta": {"ticker": "TEST", "as_of_utc": "2026-07-22T00:00:00Z"}}
+        doc = sf.build_module(snap, adjusted=_ADJUSTED_GOOG)
+        self.assertIn("adjusted_financials_applied", doc)
+        block = doc["adjusted_financials_applied"]
+        self.assertIn("core_eps_fwd", block)
+        self.assertIn("core_roe", block)
+        self.assertIn("pe_fwd_core", block)
+        self.assertIn("pe_fwd_gaap", block)
+        self.assertIn("one_time_items", block)
+
+
+class TestAdjustedOwnHistory(unittest.TestCase):
+    """Own-history: core_eps_fwd present -> pe_fwd recomputed, gaap+core disclosed."""
+
+    def test_core_eps_fwd_recomputes_pe_fwd_in_anchored_mode(self):
+        # last=351.37, core_eps_fwd=10.85 -> pe_fwd_core=32.38... > 1.25 * 10.88 -> 1.2/8
+        # snapshot pe_fwd=24.65 / 10.88 = 2.27 also > 1.25 -> 1.2/8 (same tier, GOOG case)
+        adj = _ADJUSTED_GOOG
+        val_block = {"pe_fwd": 24.65, "pe_5yr_median": 10.88,
+                     "pe_median_method": "approx_current_eps", "fcf_yield": 0.033}
+        pts, arith, ok = sf._own_history_position(
+            24.65, 10.88, "approx_current_eps",
+            pe_fwd_core=32.38, pe_fwd_gaap=24.65,
+            core_eps_fwd=10.85, consensus_eps_fwd=14.25)
+        self.assertTrue(ok)
+        self.assertIn("core", arith)
+        self.assertIn("gaap", arith)
+        # ratio = 32.38 / 10.88 = 2.975 > 1.25 -> 1.2/8
+        self.assertEqual(pts, 1.2)
+
+    def test_core_eps_fwd_tier_change_crosses_band(self):
+        # pe_5yr_median=20; last=100; core_eps_fwd gives pe_core=100/7.0=14.29 -> ratio=0.71 <=0.75 -> 8/8
+        # snapshot pe_fwd=22 -> ratio=22/20=1.1 in (1.0,1.25] -> 3.2/8 (crosses tier)
+        pts_core, _, _ = sf._own_history_position(
+            22.0, 20.0, "approx_current_eps",
+            pe_fwd_core=14.29, pe_fwd_gaap=22.0,
+            core_eps_fwd=7.0, consensus_eps_fwd=None)
+        pts_snap, _, _ = sf._own_history_position(22.0, 20.0, "approx_current_eps")
+        self.assertEqual(pts_snap, 3.2)   # snapshot -> modest premium
+        self.assertEqual(pts_core, 8)     # core -> discount (crosses tier)
+
+    def test_own_history_arithmetic_discloses_gaap_core(self):
+        # Arithmetic string must contain core and gaap labels.
+        _, arith, _ = sf._own_history_position(
+            24.65, 10.88, "approx_current_eps",
+            pe_fwd_core=32.38, pe_fwd_gaap=24.65,
+            core_eps_fwd=10.85, consensus_eps_fwd=14.25)
+        self.assertIn("core", arith)
+        self.assertIn("gaap", arith)
+
+    def test_no_core_eps_fwd_uses_snapshot_pe(self):
+        # Without pe_fwd_core, own_history uses snapshot pe_fwd unchanged.
+        pts_default, arith, ok = sf._own_history_position(18.0, 20.0, "approx_current_eps")
+        self.assertEqual(pts_default, 5.6)  # 0.9 in (0.75,1.0] -> 5.6
+        self.assertNotIn("core", arith)
+
+
+class TestAdjustedGOOGFixture(unittest.TestCase):
+    """GOOG fixture: score neutral with adjusted, but disclosure present."""
+
+    def setUp(self):
+        import json
+        snap_path = (
+            "/Users/ankugo/dev/jutsu-trading-desk/trading_desk_GOOG/"
+            "detail_reports_2026-07-21/snapshot_GOOG_2026-07-21.json")
+        anchors_path = (
+            "/Users/ankugo/dev/jutsu-trading-desk/trading_desk_GOOG/"
+            "coverage/valuation_anchors.json")
+        adj_path = (
+            "/Users/ankugo/dev/jutsu-trading-desk/trading_desk_GOOG/"
+            "coverage/adjusted_financials.json")
+        try:
+            with open(snap_path) as f:
+                self.snap = json.load(f)
+            with open(anchors_path) as f:
+                self.anchors = json.load(f)
+            with open(adj_path) as f:
+                self.adjusted = json.load(f)
+        except OSError:
+            self.skipTest("GOOG bundle files not accessible")
+
+    def test_goog_score_neutral(self):
+        # Score with and without adjusted must be identical (GOOG tiers hold).
+        doc_without = sf.build_module(
+            self.snap, moat="wide",
+            moat_justification="C4", anchors=self.anchors)
+        doc_with = sf.build_module(
+            self.snap, moat="wide",
+            moat_justification="C4", anchors=self.anchors,
+            adjusted=self.adjusted)
+        self.assertEqual(doc_without["score"], doc_with["score"])
+
+    def test_goog_adjusted_financials_applied_present(self):
+        doc = sf.build_module(
+            self.snap, moat="wide",
+            moat_justification="C4", anchors=self.anchors,
+            adjusted=self.adjusted)
+        self.assertIn("adjusted_financials_applied", doc)
+        block = doc["adjusted_financials_applied"]
+        # pe_fwd_core ≈ 32.4 (351.37/10.85)
+        self.assertAlmostEqual(block["pe_fwd_core"], 351.37 / 10.85, delta=0.05)
+        # core_roe = 0.318
+        self.assertAlmostEqual(block["core_roe"], 0.318, delta=0.001)
+        # one_time_items has at least one entry
+        self.assertGreater(len(block["one_time_items"]), 0)
+
+    def test_goog_own_history_arithmetic_shows_core_pe(self):
+        doc = sf.build_module(
+            self.snap, moat="wide",
+            moat_justification="C4", anchors=self.anchors,
+            adjusted=self.adjusted)
+        val_sub = next(s for s in doc["subscores"] if s["name"] == "valuation")
+        self.assertIn("core", val_sub["arithmetic"])
+        self.assertIn("gaap", val_sub["arithmetic"])
+
+    def test_goog_quality_arithmetic_shows_core_roe(self):
+        doc = sf.build_module(
+            self.snap, moat="wide",
+            moat_justification="C4", anchors=self.anchors,
+            adjusted=self.adjusted)
+        qual_sub = next(s for s in doc["subscores"] if s["name"] == "quality")
+        self.assertIn("core", qual_sub["arithmetic"])
+        self.assertIn("gaap_ttm", qual_sub["arithmetic"])
+
+
+class TestAdjustedCLI(unittest.TestCase):
+    """CLI tests for the --adjusted flag."""
+
+    def setUp(self):
+        import shutil
+        import tests.test_build_snapshot as tb
+        self.tb = tb
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        tb.BundleBuilder(self.dir).build_full()
+        proc = tb._run_build(self.dir)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def _run(self, extra=None):
+        cmd = [sys.executable, SCRIPT, "--bundle", self.dir]
+        if extra:
+            cmd += extra
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    def _write_adjusted(self, obj):
+        path = os.path.join(self.dir, "adjusted_financials.json")
+        with open(path, "w") as fh:
+            if isinstance(obj, str):
+                fh.write(obj)
+            else:
+                json.dump(obj, fh)
+        return path
+
+    def test_cli_adjusted_absent_byte_identical(self):
+        # Running with and without --adjusted (when absent) must produce identical JSON.
+        out1 = os.path.join(self.dir, "run_no_adj.json")
+        out2 = os.path.join(self.dir, "run_no_adj_flag.json")
+        p1 = self._run(extra=["--out", out1])
+        p2 = self._run(extra=["--out", out2])
+        self.assertEqual(p1.returncode, 0, p1.stderr)
+        self.assertEqual(p2.returncode, 0, p2.stderr)
+        with open(out1) as fh:
+            a = fh.read()
+        with open(out2) as fh:
+            b = fh.read()
+        self.assertEqual(a, b)
+
+    def test_cli_adjusted_valid_adds_disclosure_block(self):
+        path = self._write_adjusted(_ADJUSTED_GOOG)
+        proc = self._run(extra=["--adjusted", path])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        out = os.path.join(self.dir, "module_fundamental.json")
+        with open(out) as fh:
+            doc = json.load(fh)
+        self.assertIn("adjusted_financials_applied", doc)
+
+    def test_cli_adjusted_malformed_exit2(self):
+        # Missing core_eps_fwd -> validate_adjusted fails -> exit 2.
+        bad = {k: v for k, v in _ADJUSTED_GOOG.items() if k != "core_eps_fwd"}
+        path = self._write_adjusted(bad)
+        proc = self._run(extra=["--adjusted", path])
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("core_eps_fwd", proc.stderr)
+
+    def test_cli_adjusted_bad_json_exit2(self):
+        path = self._write_adjusted("{not json")
+        proc = self._run(extra=["--adjusted", path])
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("not valid JSON", proc.stderr)
+
+    def test_cli_adjusted_no_file_exit2(self):
+        proc = self._run(
+            extra=["--adjusted",
+                   os.path.join(self.dir, "nonexistent_adj.json")])
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("cannot read", proc.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

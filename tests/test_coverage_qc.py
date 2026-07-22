@@ -541,5 +541,161 @@ class Cli(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
 
 
+# --------------------------------------------------------------------------- #
+# O14 — check_adjusted_financials (optional; SKIP when absent)
+# --------------------------------------------------------------------------- #
+
+def _valid_adjusted():
+    return {
+        "core_eps_fwd": 10.85,
+        "consensus_eps_fwd": 14.2522,
+        "core_roe": 0.318,
+        "gaap_roe_ttm": 0.389,
+        "one_time_items": [
+            {"label": "Q1'26 unrealized equity-securities gain",
+             "pre_tax_usd_m": 37700, "period": "2026Q1",
+             "source": "coverage/research.md §Q1-2026"},
+        ],
+        "as_of": "2026-07-21",
+        "citations": {"core_eps_fwd": "coverage/model.md §projections_base"},
+    }
+
+
+def _write_adjusted(cov_dir, obj):
+    path = os.path.join(cov_dir, "adjusted_financials.json")
+    with open(path, "w") as fh:
+        if isinstance(obj, str):
+            fh.write(obj)
+        else:
+            json.dump(obj, fh)
+    return path
+
+
+class TestAdjustedFinancialsCheck(unittest.TestCase):
+    """check_adjusted_financials: absent -> SKIP; valid -> PASS; malformed -> FAIL."""
+
+    def test_absent_file_returns_skip(self):
+        with tempfile.TemporaryDirectory() as td:
+            # No adjusted_financials.json present.
+            result = cq.check_adjusted_financials(td)
+            self.assertIsNone(result["passed"],
+                              "absent file should be SKIP (passed=None)")
+            self.assertIn("absent", result["detail"].lower())
+
+    def test_valid_adjusted_passes(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_adjusted(td, _valid_adjusted())
+            result = cq.check_adjusted_financials(td)
+            self.assertIs(result["passed"], True, result["detail"])
+
+    def test_missing_core_eps_fwd_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            adj = {k: v for k, v in _valid_adjusted().items()
+                   if k != "core_eps_fwd"}
+            _write_adjusted(td, adj)
+            result = cq.check_adjusted_financials(td)
+            self.assertIs(result["passed"], False)
+            self.assertIn("core_eps_fwd", result["detail"])
+
+    def test_missing_core_roe_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            adj = {k: v for k, v in _valid_adjusted().items() if k != "core_roe"}
+            _write_adjusted(td, adj)
+            result = cq.check_adjusted_financials(td)
+            self.assertIs(result["passed"], False)
+            self.assertIn("core_roe", result["detail"])
+
+    def test_nonpositive_core_eps_fwd_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            adj = {**_valid_adjusted(), "core_eps_fwd": 0.0}
+            _write_adjusted(td, adj)
+            result = cq.check_adjusted_financials(td)
+            self.assertIs(result["passed"], False)
+            self.assertIn("positive", result["detail"])
+
+    def test_one_time_item_empty_source_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            adj = _valid_adjusted()
+            adj["one_time_items"] = [
+                {"label": "gain", "pre_tax_usd_m": 1000, "period": "2026Q1",
+                 "source": ""}
+            ]
+            _write_adjusted(td, adj)
+            result = cq.check_adjusted_financials(td)
+            self.assertIs(result["passed"], False)
+            self.assertIn("source", result["detail"])
+
+    def test_one_time_item_empty_label_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            adj = _valid_adjusted()
+            adj["one_time_items"] = [
+                {"label": "", "pre_tax_usd_m": 1000, "period": "2026Q1",
+                 "source": "coverage/research.md"}
+            ]
+            _write_adjusted(td, adj)
+            result = cq.check_adjusted_financials(td)
+            self.assertIs(result["passed"], False)
+            self.assertIn("label", result["detail"])
+
+    def test_empty_citations_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            adj = {**_valid_adjusted(), "citations": {}}
+            _write_adjusted(td, adj)
+            result = cq.check_adjusted_financials(td)
+            self.assertIs(result["passed"], False)
+            self.assertIn("citations", result["detail"])
+
+    def test_bad_json_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_adjusted(td, "{not json")
+            result = cq.check_adjusted_financials(td)
+            self.assertIs(result["passed"], False)
+            self.assertIn("parse", result["detail"])
+
+    def test_absent_does_not_affect_overall_pass(self):
+        # A coverage dir without adjusted_financials.json should still PASS
+        # overall (SKIP is not a failure).
+        with tempfile.TemporaryDirectory() as td:
+            cov = _write_coverage(td)  # no adjusted_financials.json
+            results = cq.run_coverage_qc(cov, mode="full")
+            failed = [r for r in results if r["passed"] is False]
+            self.assertEqual(failed, [], f"unexpected failures: {failed}")
+            # The adjusted_financials check is present and is SKIP.
+            by_name = {r["check"]: r for r in results}
+            self.assertIn("adjusted_financials", by_name)
+            self.assertIsNone(by_name["adjusted_financials"]["passed"])
+
+    def test_present_valid_passes_alongside_required_checks(self):
+        # A coverage dir WITH a valid adjusted_financials.json passes all checks.
+        with tempfile.TemporaryDirectory() as td:
+            cov = _write_coverage(td)
+            _write_adjusted(cov, _valid_adjusted())
+            results = cq.run_coverage_qc(cov, mode="full")
+            failed = [r for r in results if r["passed"] is False]
+            self.assertEqual(failed, [], f"unexpected failures: {failed}")
+            by_name = {r["check"]: r for r in results}
+            self.assertIs(by_name["adjusted_financials"]["passed"], True)
+
+    def test_present_malformed_fails_overall(self):
+        # A coverage dir with a malformed adjusted_financials.json fails overall.
+        with tempfile.TemporaryDirectory() as td:
+            cov = _write_coverage(td)
+            adj = {k: v for k, v in _valid_adjusted().items()
+                   if k != "core_eps_fwd"}
+            _write_adjusted(cov, adj)
+            results = cq.run_coverage_qc(cov, mode="full")
+            by_name = {r["check"]: r for r in results}
+            self.assertIs(by_name["adjusted_financials"]["passed"], False)
+
+    def test_goog_real_coverage_passes(self):
+        # Validate against the real GOOG coverage dir (integration gate).
+        goog_cov = (
+            "/Users/ankugo/dev/jutsu-trading-desk/trading_desk_GOOG/coverage")
+        if not os.path.isdir(goog_cov):
+            self.skipTest("GOOG coverage dir not accessible")
+        result = cq.check_adjusted_financials(goog_cov)
+        self.assertIs(result["passed"], True, result["detail"])
+
+
 if __name__ == "__main__":
     unittest.main()
