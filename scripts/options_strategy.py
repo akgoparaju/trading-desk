@@ -388,9 +388,13 @@ def pick_short_by_delta(contracts, expiry, opt_type, target_delta,
     Wave 4B candidate-breadth: the primary pick is the strike whose |delta| is closest
     to ``target_delta``. If that strike's OI is below the liquidity floor, retry at each
     adjacent delta in ``retries`` (e.g. 0.25 / 0.35) and return the first liquid pick.
-    Falls back to the primary pick when no adjacent delta is liquid either (the liquidity
-    gate then declines it downstream -- breadth is exhausted, not hidden). Returns None
-    only when there are no contracts of that type at the expiry.
+    When no adjacent DELTA is liquid either, fall back to a nearest-liquid-STRIKE snap
+    (``pick_by_delta_liquid``): the delta-retry targets can themselves resolve to 0-OI
+    half-dollar strikes (the real GOOG bull_put_spread: 0.30d short put landed on 332.5
+    OI 0, and 0.25/0.35 mapped to other thin strikes, while 330 / 335 were deeply liquid).
+    Only when NO strike at the expiry is liquid does the illiquid primary come back (the
+    liquidity gate then declines it downstream -- breadth is exhausted, not hidden).
+    Returns None only when there are no contracts of that type at the expiry.
     """
     primary = pick_by_delta(contracts, expiry, opt_type, target_delta)
     if primary is None:
@@ -405,31 +409,73 @@ def pick_short_by_delta(contracts, expiry, opt_type, target_delta,
         c_oi = cand.get("oi")
         if c_oi is not None and c_oi >= _MIN_OI:
             return cand
-    return primary
+    return pick_by_delta_liquid(contracts, expiry, opt_type, target_delta)
+
+
+def pick_by_delta_liquid(contracts, expiry, opt_type, target_delta):
+    """Delta-pick a strike, then SNAP to the nearest LIQUID strike by proximity.
+
+    ``pick_by_delta`` can land on a 0-OI half-dollar strike sitting BETWEEN two
+    deeply-liquid round strikes (observed: 332.5 OI 0 between 330 / 335, both large
+    OI). Retrying adjacent DELTA targets (``pick_short_by_delta``) can't fix that --
+    the neighbours BY STRIKE are the liquid ones. So if the primary pick is illiquid,
+    snap to the listed strike minimizing ``abs(strike - primary_strike)`` among those
+    with ``oi >= _MIN_OI``; tie-break to the closest |delta| to target, then the lower
+    strike (stable). "Liquid" here = OI floor only -- the full spread check stays in
+    ``leg_liquid`` downstream; this only removes the 0-OI-hole failure.
+
+    Returns None only when there are no contracts of that type at the expiry. When NO
+    liquid strike exists at all, returns the primary unchanged (the liquidity gate then
+    declines it -- breadth is exhausted, disclosed, never hidden).
+    """
+    primary = pick_by_delta(contracts, expiry, opt_type, target_delta)
+    if primary is None:
+        return None
+    oi = primary.get("oi")
+    if oi is not None and oi >= _MIN_OI:
+        return primary
+    liquid = [c for c in _legs(contracts, expiry, opt_type)
+              if c.get("oi") is not None and c["oi"] >= _MIN_OI]
+    if not liquid:
+        return primary
+    return min(liquid, key=lambda c: (abs(c["strike"] - primary["strike"]),
+                                      abs(abs(c["delta"]) - target_delta),
+                                      c["strike"]))
 
 
 def pick_long_put_below(contracts, expiry, short_strike):
-    """The next lower listed put strike below ``short_strike`` (the long-put wing).
+    """The long-put wing below ``short_strike`` -- the nearest LIQUID listed strike.
 
-    Targets a 5-10% width of spot but mechanically takes the nearest lower listed
-    strike so the wing sits 1-2 strikes out; returns None if none below.
+    Targets a 5-10% width of spot, taking the highest listed put strike below the short
+    so the wing sits 1-2 strikes out. Prefers the nearest strike with OI >= ``_MIN_OI``,
+    skipping 0-OI half-dollar strikes: the real GOOG bull_put_spread had a liquid 335
+    short but the wing landed on the next-listed 332.5 (OI 0) and declined, when the liquid
+    330 sat one strike further out. Falls back to the nearest listed strike when none below
+    is liquid, so the liquidity gate still discloses. Returns None if none below.
     """
     puts = [c for c in contracts
             if c.get("expiration") == expiry and c.get("type") == "put"
             and "strike" in c and c["strike"] < short_strike]
     if not puts:
         return None
-    return max(puts, key=lambda c: c["strike"])
+    liquid = [c for c in puts if c.get("oi") is not None and c["oi"] >= _MIN_OI]
+    return max(liquid or puts, key=lambda c: c["strike"])
 
 
 def pick_long_call_above(contracts, expiry, short_strike):
-    """The next higher listed call strike above ``short_strike`` (bear-call wing)."""
+    """The bear-call wing above ``short_strike`` -- the nearest LIQUID listed strike.
+
+    Nearest higher listed call strike, preferring OI >= ``_MIN_OI`` (skipping 0-OI
+    strikes); falls back to the nearest listed strike when none above is liquid so the
+    liquidity gate still discloses. Returns None if none above.
+    """
     calls = [c for c in contracts
              if c.get("expiration") == expiry and c.get("type") == "call"
              and "strike" in c and c["strike"] > short_strike]
     if not calls:
         return None
-    return min(calls, key=lambda c: c["strike"])
+    liquid = [c for c in calls if c.get("oi") is not None and c["oi"] >= _MIN_OI]
+    return min(liquid or calls, key=lambda c: c["strike"])
 
 
 def _strike_at_or_below(contracts, expiry, opt_type, level):
@@ -679,18 +725,29 @@ def _debit_vertical(long_leg, short_leg, name, side):
 
 
 def build_long_call_vertical(contracts, expiry):
-    """Long call vertical: long ~0.55Δ call, short the ~0.30Δ call above it."""
-    long = pick_by_delta(contracts, expiry, "call", _LONG_CALL_DELTA)
-    short = pick_by_delta(contracts, expiry, "call", _SHORT_DELTA)
+    """Long call vertical: long ~0.55Δ call, short the ~0.30Δ call above it.
+
+    Both legs snap off 0-OI holes to the nearest liquid strike (``pick_by_delta_liquid``)
+    so a debit vertical isn't declined on a half-dollar 0-OI strike wedged between
+    liquid rounds. If snapping collapses long and short onto the SAME strike, decline
+    (no zero-width vertical).
+    """
+    long = pick_by_delta_liquid(contracts, expiry, "call", _LONG_CALL_DELTA)
+    short = pick_by_delta_liquid(contracts, expiry, "call", _SHORT_DELTA)
     if long is None or short is None or short["strike"] <= long["strike"]:
         return None
     return _debit_vertical(long, short, "long_call_vertical", "call")
 
 
 def build_long_put_vertical(contracts, expiry):
-    """Long put vertical: long ~0.55Δ put, short the ~0.30Δ put below it."""
-    long = pick_by_delta(contracts, expiry, "put", _LONG_PUT_DELTA)
-    short = pick_by_delta(contracts, expiry, "put", _SHORT_DELTA)
+    """Long put vertical: long ~0.55Δ put, short the ~0.30Δ put below it.
+
+    Both legs snap off 0-OI holes to the nearest liquid strike (``pick_by_delta_liquid``);
+    if snapping collapses long and short onto the SAME strike, decline (no zero-width
+    vertical).
+    """
+    long = pick_by_delta_liquid(contracts, expiry, "put", _LONG_PUT_DELTA)
+    short = pick_by_delta_liquid(contracts, expiry, "put", _SHORT_DELTA)
     if long is None or short is None or short["strike"] >= long["strike"]:
         return None
     return _debit_vertical(long, short, "long_put_vertical", "put")

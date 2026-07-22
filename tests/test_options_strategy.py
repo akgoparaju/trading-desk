@@ -585,15 +585,31 @@ class TestLiquidityGate(unittest.TestCase):
         ok, reason = opts.leg_liquid(leg)
         self.assertTrue(ok)
 
-    def test_illiquid_leg_moves_structure_to_declined(self):
-        chain = _chain_with_illiquid()   # long-put 85 has oi 5.
+    def test_illiquid_wing_snaps_to_liquid_strike_not_declined(self):
+        # O5: the long-put WING no longer forces a decline when the next-listed strike is
+        # illiquid -- it snaps past the 0-OI 85 to the liquid 80 (the GOOG bull_put_spread
+        # fix: a liquid 335 short whose next-listed 332.5 wing was OI 0, one strike from the
+        # liquid 330). bull_put_spread now RECOMMENDS on liquid legs 90/80.
+        chain = _chain_with_illiquid()   # long-put 85 has oi 5; 80/75/70 stay liquid.
         rec, declined, tried = opts.select_structures(
             chain, _NEAR_EXP, "bullish", "rich_vs_realized", one_sigma=8.0)
-        # bull_put_spread needs the 85 long leg -> declined; CSP (only 90) survives.
-        rec_names = {s["name"] for s in rec}
-        dec_names = {d["name"] for d in declined}
-        self.assertIn("bull_put_spread", dec_names)
-        self.assertIn("cash_secured_put", rec_names)
+        bps = next((s for s in rec if s["name"] == "bull_put_spread"), None)
+        self.assertIsNotNone(bps)
+        strikes = sorted(l["strike"] for l in bps["legs"])
+        self.assertEqual(strikes, [80.0, 90.0])   # wing snapped past illiquid 85 to 80
+        self.assertIn("cash_secured_put", {s["name"] for s in rec})
+
+    def test_bull_put_spread_declined_when_all_wings_illiquid(self):
+        # Decline coverage preserved: when EVERY put below the short is illiquid, the wing
+        # falls back to the nearest listed (85) and the liquidity gate declines it (breadth
+        # exhausted, disclosed -- not hidden).
+        chain = _chain_with_illiquid()
+        for c in chain:
+            if c["expiration"] == _NEAR_EXP and c["type"] == "put" and c["strike"] < 90:
+                c["oi"] = 5
+        rec, declined, tried = opts.select_structures(
+            chain, _NEAR_EXP, "bullish", "rich_vs_realized", one_sigma=8.0)
+        self.assertIn("bull_put_spread", {d["name"] for d in declined})
 
     def test_wide_spread_leg_declined(self):
         chain = _chain_with_wide_spread()   # short-put 90 spread 3.00.
@@ -1237,6 +1253,110 @@ class TestCrushGateCLI(unittest.TestCase):
         for s in doc["recommended_structures"]:
             self.assertIn("survives_crush", s)
             self.assertIn("crush_ev", s)
+
+
+# --------------------------------------------------------------------------- #
+# O5: strike-proximity snapping off 0-OI holes (pick_by_delta_liquid).
+# --------------------------------------------------------------------------- #
+
+def _c(strike, delta, oi, typ="call", expiry="2026-08-21"):
+    return {"strike": strike, "delta": delta, "oi": oi, "type": typ,
+            "expiration": expiry, "bid": 1.0, "ask": 1.05}
+
+
+class TestPickByDeltaLiquid(unittest.TestCase):
+    def test_pick_by_delta_liquid_snaps_zero_oi_to_nearest_liquid(self):
+        contracts = [_c(330, 0.58, 800), _c(332.5, 0.55, 0), _c(335, 0.50, 900)]
+        self.assertEqual(
+            opts.pick_by_delta(contracts, "2026-08-21", "call", 0.55)["strike"], 332.5)
+        self.assertEqual(
+            opts.pick_by_delta_liquid(contracts, "2026-08-21", "call", 0.55)["strike"], 330)
+
+    def test_pick_by_delta_liquid_returns_primary_when_none_liquid(self):
+        contracts = [_c(330, 0.58, 10), _c(332.5, 0.55, 0), _c(335, 0.50, 5)]
+        self.assertEqual(
+            opts.pick_by_delta_liquid(contracts, "2026-08-21", "call", 0.55)["strike"], 332.5)
+
+    def test_pick_by_delta_liquid_equals_plain_when_primary_liquid(self):
+        contracts = [_c(330, 0.58, 800), _c(332.5, 0.55, 500), _c(335, 0.50, 900)]
+        self.assertEqual(
+            opts.pick_by_delta_liquid(contracts, "2026-08-21", "call", 0.55),
+            opts.pick_by_delta(contracts, "2026-08-21", "call", 0.55))
+
+
+class TestDebitVerticalSnapping(unittest.TestCase):
+    def test_long_call_vertical_assembles_on_liquid_strikes_when_delta_pick_is_zero_oi(self):
+        exp = "2026-08-21"
+        contracts = [
+            _c(330, 0.58, 800, "call", exp), _c(332.5, 0.55, 0, "call", exp),
+            _c(335, 0.50, 900, "call", exp), _c(337.5, 0.32, 0, "call", exp),
+            _c(340, 0.30, 700, "call", exp),
+        ]
+        v = opts.build_long_call_vertical(contracts, exp)
+        self.assertIsNotNone(v)
+        strikes = sorted(leg["strike"] for leg in v["legs"])
+        self.assertTrue(all(s in (330, 335, 340) for s in strikes))
+
+
+class TestShortDeltaStrikeSnapping(unittest.TestCase):
+    """The SHORT-leg picker (credit spreads / CSP) must also snap to a liquid STRIKE
+    when its adjacent-delta retries all land on illiquid strikes -- the real GOOG
+    bull_put_spread failure (short put delta-picked 332.5 OI 0; 330/335 liquid)."""
+
+    def test_pick_short_by_delta_snaps_to_liquid_strike_when_delta_retries_also_illiquid(self):
+        exp = "2026-08-21"
+        # 0.30d primary = 332.5 (OI 0); delta-retries 0.35->331.5 (OI 0), 0.25->333.5 (OI 0)
+        # also illiquid; nearest liquid STRIKES 330 (OI 800) / 335 (OI 900); the strike-snap
+        # tie-break (equal 2.5 distance) breaks by |delta-0.30|: 0.38 beats 0.20 -> 330.
+        contracts = [
+            _c(330, 0.38, 800, "put", exp), _c(331.5, 0.35, 0, "put", exp),
+            _c(332.5, 0.30, 0, "put", exp), _c(333.5, 0.25, 0, "put", exp),
+            _c(335, 0.20, 900, "put", exp),
+        ]
+        self.assertEqual(
+            opts.pick_by_delta(contracts, exp, "put", 0.30)["strike"], 332.5)  # illiquid primary
+        self.assertEqual(
+            opts.pick_short_by_delta(contracts, exp, "put", 0.30)["strike"], 330)  # snapped
+
+    def test_pick_short_by_delta_keeps_delta_retry_when_adjacent_delta_is_liquid(self):
+        # Regression: the adjacent-delta retry still fires BEFORE the strike-snap when an
+        # adjacent delta IS liquid (the snap is only a final fallback).
+        exp = "2026-08-21"
+        contracts = [
+            _c(330, 0.38, 0, "put", exp), _c(332.5, 0.30, 0, "put", exp),
+            _c(333.5, 0.25, 800, "put", exp), _c(335, 0.20, 0, "put", exp),
+        ]
+        self.assertEqual(
+            opts.pick_short_by_delta(contracts, exp, "put", 0.30)["strike"], 333.5)
+
+
+class TestLongWingSnapping(unittest.TestCase):
+    """The long-WING pickers (credit-spread protective leg) must skip 0-OI strikes and
+    take the nearest LIQUID listed strike -- the actual GOOG bull_put_spread blocker: a
+    liquid 335 short put, but the wing landed on the next-listed 332.5 (OI 0) instead of
+    the liquid 330 one strike further out."""
+
+    def test_pick_long_put_below_skips_illiquid_to_nearest_liquid(self):
+        exp = "2026-08-21"
+        contracts = [
+            _c(327.5, -0.25, 0, "put", exp), _c(330, -0.26, 2000, "put", exp),
+            _c(332.5, -0.28, 0, "put", exp), _c(335, -0.31, 4000, "put", exp),
+        ]
+        self.assertEqual(opts.pick_long_put_below(contracts, exp, 335)["strike"], 330)
+
+    def test_pick_long_put_below_falls_back_to_nearest_listed_when_none_liquid(self):
+        exp = "2026-08-21"
+        contracts = [_c(330, -0.26, 0, "put", exp), _c(332.5, -0.28, 0, "put", exp),
+                     _c(335, -0.31, 4000, "put", exp)]
+        self.assertEqual(opts.pick_long_put_below(contracts, exp, 335)["strike"], 332.5)
+
+    def test_pick_long_call_above_skips_illiquid_to_nearest_liquid(self):
+        exp = "2026-08-21"
+        contracts = [
+            _c(330, 0.31, 4000, "call", exp), _c(332.5, 0.28, 0, "call", exp),
+            _c(335, 0.26, 2000, "call", exp), _c(337.5, 0.24, 0, "call", exp),
+        ]
+        self.assertEqual(opts.pick_long_call_above(contracts, exp, 330)["strike"], 335)
 
 
 if __name__ == "__main__":
