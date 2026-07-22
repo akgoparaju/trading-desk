@@ -243,10 +243,18 @@ def _fundamental_doc():
     }
 
 
-def _composite_doc(score=59.9, ev_at_current=_EV_AT_CURRENT, profile="balanced"):
+def _composite_doc(score=59.9, ev_at_current=_EV_AT_CURRENT, profile="balanced",
+                   confidence_level="HIGH"):
     """module_composite mirroring score_composite: dimensions (score/weight/
     contribution), thesis_conviction, ev (scenarios/ev_at_current/breakeven),
-    sensitivity (3 profiles w/ grade), flags."""
+    sensitivity (3 profiles w/ grade), flags.
+
+    ``confidence_level`` defaults to HIGH so the default fixture is capital-ELIGIBLE
+    under the O10b EV-uncertainty band (v1.1.0): with the wide bull/bear scenarios
+    (150/80 -> 70% spread) a LOW-confidence band would STRADDLE the hurdle and
+    trip EV_NOT_ROBUST_UNDER_UNCERTAINTY; a HIGH-confidence name (k=0.05 -> band
+    [14%,21%]) clears the hurdle robustly and stays eligible. Tests exercising the
+    LOW-confidence / ineligible path override this explicitly."""
     # dimensions: weights .25/.25/.20/.15/.15, scores 70/55/62/45/60 (thesis 60).
     dims = [
         {"name": "technical", "score": 70, "weight": 0.25,
@@ -317,6 +325,10 @@ def _composite_doc(score=59.9, ev_at_current=_EV_AT_CURRENT, profile="balanced")
         # composite-v1.1.0 (Goal C): tension auto-populates when the evidence spread
         # fires; this fixture's spread (70-45=25) does NOT exceed 25 -> stays null.
         "tension": None,
+        # composite roll-up confidence: read by the O10b EV-uncertainty band (the k
+        # selector) and by the confidence badge. HIGH by default (see docstring).
+        "confidence": {"level": confidence_level, "version": "1.0.0",
+                       "why": "fixture default"},
         "note": "composite-v1.1.0 PROVISIONAL",
         "signal": None,
     }
@@ -1919,13 +1931,23 @@ def _eligible_contract():
 
 
 def _ineligible_contract():
-    """The GOOG-shaped capital-INELIGIBLE contract (all four blockers)."""
+    """The GOOG-shaped capital-INELIGIBLE contract (all four blockers).
+
+    Carries the O10b EV-uncertainty band fields (PROVISIONAL v1.1.0) so the
+    capital-status block discloses the band line.
+    """
     return {
         "grade": "B", "score": 65.4294, "capital_eligible": False,
         "capital_blockers": ["EV_BELOW_HURDLE", "EARNINGS_WITHIN_1_DAY",
                              "LOW_COMPOSITE_CONFIDENCE", "VALUATION_MODEL_CONFLICT"],
         "action_unowned": "WAIT_FOR_EVENT", "action_owned": "HOLD_NO_ADD",
         "hurdle_clearing_price": 332.2321,
+        "ev_at_current": 0.059,
+        "ev_band": [-0.04203309901243704, 0.16003309901243704],
+        "ev_uncertainty_halfwidth": 0.10103309901243704,
+        "ev_uncertainty_k": 0.25,
+        "ev_uncertainty_confidence_level": "LOW",
+        "ev_robust_vs_hurdle": False,
     }
 
 
@@ -1953,6 +1975,20 @@ class TestBuildCapitalStatus(unittest.TestCase):
         self.assertIn("**Action if owned:** HOLD_NO_ADD", block)
         # Hurdle-clearing price rendered from the contract (%g -> 332.232).
         self.assertIn("**Hurdle-clearing price:** 332.232", block)
+
+    def test_ineligible_discloses_ev_band_line(self):
+        # O10b (PROVISIONAL v1.1.0): the EV-uncertainty band line, every number a
+        # contract field (percent-formatted with _pct).
+        block = rr.build_capital_status(_ineligible_contract())
+        self.assertIn(
+            "- **EV band (LOW-confidence, provisional):** "
+            "[-4.2%, 16.0%] around EV 5.9% · robust vs hurdle: no",
+            block)
+
+    def test_eligible_omits_ev_band_line(self):
+        # The eligible contract carries no ev_band -> the line is omitted.
+        block = rr.build_capital_status(_eligible_contract())
+        self.assertNotIn("EV band", block)
 
     def test_none_contract_yields_empty(self):
         self.assertEqual(rr.build_capital_status(None), "")

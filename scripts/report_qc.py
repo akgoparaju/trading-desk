@@ -455,6 +455,34 @@ def derived_delta_values(old_docs, new_docs):
     return vals
 
 
+def _contract_rendered_numbers(docs):
+    """Yield the numeric decision-contract fields the report renders that are NOT
+    already bundle leaves — the O10b EV-uncertainty band (v1.1.0).
+
+    render_report.build_capital_status renders ``ev_band`` ([low, high]) around
+    ``ev_at_current`` off the contract build_contract mints deterministically from
+    the bundle. The band endpoints and halfwidth are derived (ev_at_current ±
+    k·spread), so they have no direct leaf; the QC re-builds the same contract and
+    admits exactly those derived values. If the contract cannot be built (no
+    composite) this yields nothing (the band is not rendered either).
+    """
+    if not isinstance(docs.get("module_composite"), dict):
+        return
+    try:
+        contract = decision_contract.build_contract(docs)
+    except Exception:  # pragma: no cover - contract build is pure; defensive only
+        return
+    band = contract.get("ev_band")
+    if isinstance(band, (list, tuple)):
+        for v in band:
+            if isinstance(v, (int, float)):
+                yield v
+    for key in ("ev_uncertainty_halfwidth", "ev_at_current"):
+        v = contract.get(key)
+        if isinstance(v, (int, float)):
+            yield v
+
+
 def check_number_provenance(report_text, docs, extra_values=None,
                             previous_docs=None):
     """Every numeric / date / version token in the report traces to the bundle.
@@ -488,6 +516,13 @@ def check_number_provenance(report_text, docs, extra_values=None,
         docs.get("snapshot"),
         *[docs.get(k) for k in docs if k.startswith("module_")])
     allowed |= build_allowed_set(list(_iter_whitelisted_string_numbers(docs)))
+    # The page-1 capital-status block renders numbers straight off the decision
+    # contract. Most (grade/score/hurdle_clearing_price) are echoes of bundle
+    # leaves, but the O10b EV-uncertainty band (ev_band endpoints + halfwidth,
+    # v1.1.0) is a DERIVED number with no direct leaf. Fold the contract's
+    # render-surfaced numeric fields into the allowed set so the band traces to
+    # the (deterministic, bundle-derived) contract rather than orphaning.
+    allowed |= build_allowed_set(list(_contract_rendered_numbers(docs)))
     if previous_docs:
         allowed |= build_allowed_set(
             previous_docs.get("snapshot"),

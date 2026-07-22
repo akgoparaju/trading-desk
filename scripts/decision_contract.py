@@ -37,7 +37,36 @@ if sys.version_info < (3, 10):
     sys.exit("trading-desk requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
 
 SKILL = "decision-contract"
-CONTRACT_VERSION = "1.0.0"
+CONTRACT_VERSION = "1.1.0"
+
+# --------------------------------------------------------------------------- #
+# O10b PROVISIONAL constants (v1.1.0): the EV-uncertainty band.
+# These are DISCLOSED, versioned, and killable (the calibration philosophy: ship
+# a cited, versioned, falsifiable default; ratify or retire at B9). They are
+# module-level named consts so they are greppable and one-line-ratifiable.
+#
+# k(confidence) scales the bull-bear scenario spread into a half-width around the
+# point EV. Keyed on composite/data confidence as a v1.1.0 PROXY for forecast
+# uncertainty (the review's first numbers). See ``PROVISIONAL_NOTE`` for the
+# pre-registered B9 falsifier.
+# --------------------------------------------------------------------------- #
+_EV_BAND_K = {"LOW": 0.25, "MEDIUM": 0.15, "HIGH": 0.05}
+# Confidence level used (and k selected) when the composite confidence level is
+# absent or unrecognized: fall back to the WIDEST (most conservative) band.
+_EV_BAND_DEFAULT_LEVEL = "LOW"
+
+PROVISIONAL_NOTE = (
+    "decision-contract-v1.1.0 PROVISIONAL: EV-uncertainty band = k(confidence) x "
+    "(r_bull - r_bear), k={LOW:0.25,MEDIUM:0.15,HIGH:0.05} (review's first "
+    "numbers, keyed on composite/data confidence as a v1.1.0 proxy for forecast "
+    "uncertainty). Falsifier (B9): the k table and the "
+    "EV_NOT_ROBUST_UNDER_UNCERTAINTY gate are falsified if, across the "
+    "calibration set, (i) realized forward returns for LOW-confidence names land "
+    "within their disclosed ev_band at a rate inconsistent with a ~1-sigma "
+    "interval (provisionally: <40% or >90% coverage => k mis-scaled), or (ii) "
+    "names blocked ONLY by EV_NOT_ROBUST do not realize worse risk-adjusted "
+    "outcomes than names that passed. Not calibrated."
+)
 
 # The disagreement threshold above which the fundamental valuation module widens
 # its band + applies a confidence haircut (verified: score_fundamental writes
@@ -114,11 +143,101 @@ def _valuation_conflict(fundamental):
 
 
 # --------------------------------------------------------------------------- #
+# O10b: EV-uncertainty band (PROVISIONAL v1.1.0).
+# --------------------------------------------------------------------------- #
+
+def compute_ev_band(last, scenarios, ev_at_current, confidence_level):
+    """Compute the PROVISIONAL EV-uncertainty band from data already in the bundle.
+
+    The band GOVERNS the forecast distribution (resolving the residual half of
+    backlog O10: LOW confidence should widen, not merely disclose). It is a
+    half-width around the point EV proportional to the bull-bear scenario spread,
+    scaled by a confidence-keyed constant k (the v1.1.0 proxy for forecast
+    uncertainty; see ``PROVISIONAL_NOTE``).
+
+    Inputs (all sourced from the already-scored bundle):
+      ``last``              snapshot.price.last
+      ``scenarios``         module_composite.ev.scenarios ([{name,price_target,prob}])
+      ``ev_at_current``     module_composite.ev.ev_at_current
+      ``confidence_level``  module_composite.confidence.level
+
+    Returns a dict of the band fields. When the guard fails (< 2 scenarios, last
+    not > 0, or spread < 0), every band field is None so the caller emits a fully
+    absent band and does NOT add the new blocker.
+
+    Returns keys:
+      ``ev_band``                 [low, high] or None
+      ``ev_uncertainty_halfwidth``  k * spread, or None
+      ``ev_uncertainty_k``          the k used, or None
+      ``ev_uncertainty_confidence_level``  the level whose k was used (may be the
+                                    conservative LOW fallback), or None
+      ``ev_robust_vs_hurdle``       computed by the caller against the hurdle;
+                                    None here (filled in build_contract).
+    """
+    absent = {
+        "ev_band": None,
+        "ev_uncertainty_halfwidth": None,
+        "ev_uncertainty_k": None,
+        "ev_uncertainty_confidence_level": None,
+    }
+
+    # Guard: need a usable price, >= 2 scenarios with numeric targets, and a
+    # numeric point EV. Absent inputs -> no band (never fabricated).
+    if not isinstance(last, (int, float)) or last <= 0:
+        return dict(absent)
+    if not isinstance(ev_at_current, (int, float)):
+        return dict(absent)
+    targets = [
+        s.get("price_target") for s in (scenarios or [])
+        if isinstance(s, dict) and isinstance(s.get("price_target"), (int, float))
+    ]
+    if len(targets) < 2:
+        return dict(absent)
+
+    returns = [pt / last - 1.0 for pt in targets]
+    r_bull = max(returns)
+    r_bear = min(returns)
+    spread = r_bull - r_bear
+    if spread < 0:  # defensive; max-min is >= 0, but guard as specified.
+        return dict(absent)
+
+    # k selection: unrecognized/absent confidence -> the conservative (widest) k.
+    level = confidence_level if confidence_level in _EV_BAND_K else _EV_BAND_DEFAULT_LEVEL
+    k = _EV_BAND_K[level]
+
+    halfwidth = k * spread
+    return {
+        "ev_band": [ev_at_current - halfwidth, ev_at_current + halfwidth],
+        "ev_uncertainty_halfwidth": halfwidth,
+        "ev_uncertainty_k": k,
+        "ev_uncertainty_confidence_level": level,
+    }
+
+
+def ev_robust_vs_hurdle(ev_band, total_return_hurdle):
+    """True when the hurdle verdict is the SAME at both band ends (robust); False
+    when the band STRADDLES the hurdle; None when the band or hurdle is absent.
+
+    ``(ev_low >= hurdle) == (ev_high >= hurdle)`` -- a robust band clears (or
+    fails) the hurdle at both ends; a straddling band flips verdicts.
+    """
+    if not (isinstance(ev_band, (list, tuple)) and len(ev_band) == 2):
+        return None
+    if not isinstance(total_return_hurdle, (int, float)):
+        return None
+    ev_low, ev_high = ev_band
+    if not (isinstance(ev_low, (int, float)) and isinstance(ev_high, (int, float))):
+        return None
+    return (ev_low >= total_return_hurdle) == (ev_high >= total_return_hurdle)
+
+
+# --------------------------------------------------------------------------- #
 # Blocker + action rules (explicit; no heuristics).
 # --------------------------------------------------------------------------- #
 
 def compute_blockers(total_return_hurdle, ev_at_current, days_to_event,
-                     composite_confidence_level, valuation_conflict):
+                     composite_confidence_level, valuation_conflict,
+                     ev_band=None):
     """Return the ordered list of capital-blocker string codes.
 
     Each rule is explicit and independent; order is deterministic (the list is a
@@ -129,6 +248,12 @@ def compute_blockers(total_return_hurdle, ev_at_current, days_to_event,
       EARNINGS_WITHIN_1_DAY    days_to_event is not None and <= 1
       LOW_COMPOSITE_CONFIDENCE composite confidence.level == "LOW"
       VALUATION_MODEL_CONFLICT valuation_conflict is True
+      EV_NOT_ROBUST_UNDER_UNCERTAINTY  (O10b PROVISIONAL v1.1.0) the POINT EV
+        passes the hurdle (ev_at_current >= total_return_hurdle) but the
+        conservative end of the disclosed uncertainty band FAILS it
+        (ev_low < total_return_hurdle). When the point EV is already below the
+        hurdle, EV_BELOW_HURDLE covers it -> this blocker is NOT double-added.
+        Requires a computed ``ev_band`` ([low, high]); absent band -> skipped.
     """
     blockers = []
     if (ev_at_current is not None and total_return_hurdle is not None
@@ -140,6 +265,15 @@ def compute_blockers(total_return_hurdle, ev_at_current, days_to_event,
         blockers.append("LOW_COMPOSITE_CONFIDENCE")
     if valuation_conflict is True:
         blockers.append("VALUATION_MODEL_CONFLICT")
+    # O10b: the point PASSES the EV gate but the band's conservative end fails.
+    # Only when the point is >= hurdle (else EV_BELOW_HURDLE already fired).
+    if (isinstance(ev_band, (list, tuple)) and len(ev_band) == 2
+            and isinstance(ev_at_current, (int, float))
+            and isinstance(total_return_hurdle, (int, float))
+            and isinstance(ev_band[0], (int, float))
+            and ev_at_current >= total_return_hurdle
+            and ev_band[0] < total_return_hurdle):
+        blockers.append("EV_NOT_ROBUST_UNDER_UNCERTAINTY")
     return blockers
 
 
@@ -204,6 +338,18 @@ def build_contract(docs):
     # ev_at_current <- module_composite.ev.ev_at_current
     ev_at_current = ev.get("ev_at_current")
 
+    # -- O10b EV-uncertainty band (PROVISIONAL v1.1.0) ----------------------
+    # last <- snapshot.price.last ; scenarios <- module_composite.ev.scenarios ;
+    # confidence level <- module_composite.confidence.level. The band GOVERNS:
+    # a straddling band can add EV_NOT_ROBUST_UNDER_UNCERTAINTY (below).
+    last = _dig(snapshot, "price", "last")
+    band = compute_ev_band(
+        last=last,
+        scenarios=ev.get("scenarios"),
+        ev_at_current=ev_at_current,
+        confidence_level=_dig(composite, "confidence", "level"),
+    )
+
     # hurdle_clearing_price <- module_composite.ev.ev_breakeven_entry
     #   (the price at which EV clears the hurdle -- NOT the first positive-EV price).
     hurdle_clearing_price = ev.get("ev_breakeven_entry")
@@ -230,8 +376,12 @@ def build_contract(docs):
         days_to_event=days_to_event,
         composite_confidence_level=composite_confidence_level,
         valuation_conflict=valuation_conflict,
+        ev_band=band["ev_band"],
     )
     capital_eligible = len(capital_blockers) == 0
+
+    # ev_robust_vs_hurdle: same hurdle verdict at both band ends (None if no band).
+    robust = ev_robust_vs_hurdle(band["ev_band"], total_return_hurdle)
 
     action_unowned, action_owned = map_actions(
         capital_blockers, grade, capital_eligible)
@@ -250,6 +400,13 @@ def build_contract(docs):
         "hurdle_clearing_price": hurdle_clearing_price,
         "grade": grade,
         "score": score,
+        # -- O10b EV-uncertainty band (PROVISIONAL v1.1.0) ------------------
+        "ev_band": band["ev_band"],
+        "ev_uncertainty_halfwidth": band["ev_uncertainty_halfwidth"],
+        "ev_uncertainty_k": band["ev_uncertainty_k"],
+        "ev_uncertainty_confidence_level": band["ev_uncertainty_confidence_level"],
+        "ev_robust_vs_hurdle": robust,
+        "provisional_note": PROVISIONAL_NOTE,
         "capital_blockers": capital_blockers,
         "capital_eligible": capital_eligible,
         "action_unowned": action_unowned,

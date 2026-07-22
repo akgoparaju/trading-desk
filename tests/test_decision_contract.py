@@ -68,6 +68,24 @@ def _fundamental(*, conflict=True):
     }
 
 
+# The GOOG scenario set (bull/base/bear price_targets) build_contract reads for
+# the O10b EV-uncertainty band. Kept as a fixture so the band math is pinned to
+# the same numbers the real bundle carries.
+_GOOG_SCENARIOS = [
+    {"name": "bull", "price_target": 436.0, "prob": 0.3},
+    {"name": "base", "price_target": 365.0, "prob": 0.5},
+    {"name": "bear", "price_target": 294.0, "prob": 0.2},
+]
+
+
+def _composite_with_scenarios(scenarios=None, **kw):
+    """A composite stub carrying the ev.scenarios the band reads (defaults to the
+    real GOOG set)."""
+    comp = _composite(**kw)
+    comp["ev"]["scenarios"] = _GOOG_SCENARIOS if scenarios is None else scenarios
+    return comp
+
+
 def _snapshot(*, days_to_event=1, last=351.37):
     return {
         "meta": {"ticker": "GOOG", "as_of_utc": "2026-07-21T17:19:25Z"},
@@ -77,9 +95,13 @@ def _snapshot(*, days_to_event=1, last=351.37):
 
 
 def _goog_docs(**overrides):
-    """The full GOOG-shaped docs dict (the capital-blocked live case)."""
+    """The full GOOG-shaped docs dict (the capital-blocked live case).
+
+    Uses the scenario-carrying composite so the O10b EV-uncertainty band is
+    exercised on the real GOOG numbers.
+    """
     docs = {
-        "module_composite": _composite(),
+        "module_composite": _composite_with_scenarios(),
         "module_fundamental": _fundamental(conflict=True),
         "module_tradeplan": {"skill": "trade-plan"},
         "snapshot": _snapshot(),
@@ -305,6 +327,190 @@ class TestDegradationAndEligible(unittest.TestCase):
         c = dc.build_contract(docs)
         self.assertIsNone(c["horizon_months"])
         self.assertIsNone(c["annual_return_hurdle"])
+
+
+# --------------------------------------------------------------------------- #
+# 4b. O10b: EV-uncertainty band (PROVISIONAL v1.1.0).
+# --------------------------------------------------------------------------- #
+
+class TestEvBandMath(unittest.TestCase):
+    """The band math + k selection + guards (compute_ev_band is pure)."""
+
+    def test_goog_band_exact_values(self):
+        # r_bull = 436/351.37 - 1 ; r_bear = 294/351.37 - 1 ; spread ; k=0.25.
+        band = dc.compute_ev_band(
+            last=351.37, scenarios=_GOOG_SCENARIOS,
+            ev_at_current=0.059, confidence_level="LOW")
+        self.assertAlmostEqual(band["ev_uncertainty_k"], 0.25)
+        self.assertEqual(band["ev_uncertainty_confidence_level"], "LOW")
+        # spread ≈ 0.40414 ; halfwidth ≈ 0.10103.
+        self.assertAlmostEqual(band["ev_uncertainty_halfwidth"], 0.10103, places=5)
+        self.assertAlmostEqual(band["ev_band"][0], -0.04203, places=5)
+        self.assertAlmostEqual(band["ev_band"][1], 0.16003, places=5)
+
+    def test_k_selection_table(self):
+        for level, k in (("LOW", 0.25), ("MEDIUM", 0.15), ("HIGH", 0.05)):
+            band = dc.compute_ev_band(
+                last=100.0, scenarios=[{"price_target": 120.0},
+                                       {"price_target": 80.0}],
+                ev_at_current=0.05, confidence_level=level)
+            self.assertAlmostEqual(band["ev_uncertainty_k"], k, msg=level)
+            # spread = 0.4 -> halfwidth = k * 0.4.
+            self.assertAlmostEqual(band["ev_uncertainty_halfwidth"], k * 0.4,
+                                   places=6, msg=level)
+
+    def test_unrecognized_confidence_falls_back_to_low_k(self):
+        # Absent / unknown level -> the conservative (widest) LOW k.
+        for level in (None, "UNKNOWN", "medium"):  # case-sensitive: 'medium' != MEDIUM
+            band = dc.compute_ev_band(
+                last=100.0, scenarios=[{"price_target": 120.0},
+                                       {"price_target": 80.0}],
+                ev_at_current=0.05, confidence_level=level)
+            self.assertAlmostEqual(band["ev_uncertainty_k"], 0.25, msg=str(level))
+            self.assertEqual(band["ev_uncertainty_confidence_level"], "LOW",
+                             msg=str(level))
+
+    def test_guard_single_scenario_yields_none_band(self):
+        band = dc.compute_ev_band(
+            last=100.0, scenarios=[{"price_target": 120.0}],
+            ev_at_current=0.05, confidence_level="LOW")
+        self.assertIsNone(band["ev_band"])
+        self.assertIsNone(band["ev_uncertainty_halfwidth"])
+        self.assertIsNone(band["ev_uncertainty_k"])
+        self.assertIsNone(band["ev_uncertainty_confidence_level"])
+
+    def test_guard_nonpositive_last_yields_none_band(self):
+        for bad_last in (0, -10.0, None):
+            band = dc.compute_ev_band(
+                last=bad_last, scenarios=_GOOG_SCENARIOS,
+                ev_at_current=0.05, confidence_level="LOW")
+            self.assertIsNone(band["ev_band"], msg=str(bad_last))
+
+    def test_guard_absent_ev_yields_none_band(self):
+        band = dc.compute_ev_band(
+            last=100.0, scenarios=_GOOG_SCENARIOS,
+            ev_at_current=None, confidence_level="LOW")
+        self.assertIsNone(band["ev_band"])
+
+
+class TestEvRobustVsHurdle(unittest.TestCase):
+    """ev_robust_vs_hurdle: same verdict at both ends True, straddle False."""
+
+    def test_robust_true_when_both_ends_clear(self):
+        # both > hurdle 0.12.
+        self.assertIs(dc.ev_robust_vs_hurdle([0.13, 0.20], 0.12), True)
+
+    def test_robust_true_when_both_ends_fail(self):
+        # both < hurdle 0.12 (GOOG: -0.042 and 0.160 straddles; but both-below case).
+        self.assertIs(dc.ev_robust_vs_hurdle([-0.05, 0.10], 0.12), True)
+
+    def test_robust_false_when_band_straddles(self):
+        # low < hurdle, high >= hurdle -> verdicts flip -> not robust.
+        self.assertIs(dc.ev_robust_vs_hurdle([-0.04203, 0.16003], 0.12), False)
+
+    def test_robust_boundary_low_equals_hurdle_is_robust(self):
+        # ev_low == hurdle counts as "clears" (>=) at both ends -> robust.
+        self.assertIs(dc.ev_robust_vs_hurdle([0.12, 0.20], 0.12), True)
+
+    def test_none_when_band_or_hurdle_absent(self):
+        self.assertIsNone(dc.ev_robust_vs_hurdle(None, 0.12))
+        self.assertIsNone(dc.ev_robust_vs_hurdle([0.1, 0.2], None))
+        self.assertIsNone(dc.ev_robust_vs_hurdle([0.1], 0.12))
+
+
+class TestEvNotRobustBlocker(unittest.TestCase):
+    """The EV_NOT_ROBUST_UNDER_UNCERTAINTY blocker trigger boundary."""
+
+    def test_blocker_fires_when_point_passes_but_low_fails(self):
+        # point 0.13 >= hurdle 0.12 AND band low 0.05 < 0.12 -> blocker.
+        blockers = dc.compute_blockers(
+            total_return_hurdle=0.12, ev_at_current=0.13,
+            days_to_event=None, composite_confidence_level="HIGH",
+            valuation_conflict=False, ev_band=[0.05, 0.21])
+        self.assertIn("EV_NOT_ROBUST_UNDER_UNCERTAINTY", blockers)
+
+    def test_blocker_absent_when_point_below_hurdle(self):
+        # point 0.059 < hurdle -> EV_BELOW_HURDLE covers; NOT_ROBUST not added.
+        blockers = dc.compute_blockers(
+            total_return_hurdle=0.12, ev_at_current=0.059,
+            days_to_event=None, composite_confidence_level="HIGH",
+            valuation_conflict=False, ev_band=[-0.042, 0.160])
+        self.assertNotIn("EV_NOT_ROBUST_UNDER_UNCERTAINTY", blockers)
+        self.assertIn("EV_BELOW_HURDLE", blockers)  # the covering blocker
+
+    def test_blocker_absent_when_robust_pass(self):
+        # point 0.20 >= hurdle AND band low 0.15 >= hurdle -> robust, no blocker.
+        blockers = dc.compute_blockers(
+            total_return_hurdle=0.12, ev_at_current=0.20,
+            days_to_event=None, composite_confidence_level="HIGH",
+            valuation_conflict=False, ev_band=[0.15, 0.25])
+        self.assertNotIn("EV_NOT_ROBUST_UNDER_UNCERTAINTY", blockers)
+
+    def test_blocker_absent_when_no_band(self):
+        blockers = dc.compute_blockers(
+            total_return_hurdle=0.12, ev_at_current=0.13,
+            days_to_event=None, composite_confidence_level="HIGH",
+            valuation_conflict=False, ev_band=None)
+        self.assertNotIn("EV_NOT_ROBUST_UNDER_UNCERTAINTY", blockers)
+
+
+class TestGoogBandContract(unittest.TestCase):
+    """The full contract's O10b band fields on the GOOG fixture."""
+
+    def test_goog_band_fields_and_no_not_robust_blocker(self):
+        c = dc.build_contract(_goog_docs())
+        self.assertEqual(c["contract_version"], "1.1.0")
+        self.assertAlmostEqual(c["ev_band"][0], -0.04203, places=5)
+        self.assertAlmostEqual(c["ev_band"][1], 0.16003, places=5)
+        self.assertAlmostEqual(c["ev_uncertainty_halfwidth"], 0.10103, places=5)
+        self.assertAlmostEqual(c["ev_uncertainty_k"], 0.25)
+        self.assertEqual(c["ev_uncertainty_confidence_level"], "LOW")
+        self.assertIs(c["ev_robust_vs_hurdle"], False)
+        # GOOG point EV 0.059 < hurdle -> EV_BELOW_HURDLE covers; NOT_ROBUST absent.
+        self.assertNotIn("EV_NOT_ROBUST_UNDER_UNCERTAINTY", c["capital_blockers"])
+        # The existing four blockers are unchanged.
+        self.assertEqual(
+            c["capital_blockers"],
+            ["EV_BELOW_HURDLE", "EARNINGS_WITHIN_1_DAY",
+             "LOW_COMPOSITE_CONFIDENCE", "VALUATION_MODEL_CONFLICT"])
+        # provisional_note is carried, versioned, and names the B9 falsifier.
+        self.assertIn("decision-contract-v1.1.0 PROVISIONAL", c["provisional_note"])
+        self.assertIn("Falsifier (B9)", c["provisional_note"])
+        self.assertIn("EV_NOT_ROBUST_UNDER_UNCERTAINTY", c["provisional_note"])
+
+    def test_marginal_point_above_hurdle_blocks_and_ineligible(self):
+        # A marginal name: ev_at_current 0.13 (> hurdle 0.12), LOW conf, scenarios
+        # giving ev_low < 0.12 -> EV_NOT_ROBUST fires and capital is ineligible.
+        comp = _composite_with_scenarios(
+            scenarios=[{"price_target": 400.0}, {"price_target": 320.0}],
+            ev_at_current=0.13, confidence_level="LOW")
+        docs = {
+            "module_composite": comp,
+            "module_fundamental": _fundamental(conflict=False),
+            "snapshot": _snapshot(days_to_event=30, last=351.37),
+        }
+        c = dc.build_contract(docs)
+        self.assertGreaterEqual(c["ev_at_current"], c["total_return_hurdle"])
+        self.assertLess(c["ev_band"][0], c["total_return_hurdle"])
+        self.assertIn("EV_NOT_ROBUST_UNDER_UNCERTAINTY", c["capital_blockers"])
+        self.assertIs(c["capital_eligible"], False)
+        # EV_BELOW_HURDLE must NOT be present (point is above hurdle).
+        self.assertNotIn("EV_BELOW_HURDLE", c["capital_blockers"])
+
+    def test_band_none_when_scenarios_absent_no_blocker(self):
+        # A composite with no ev.scenarios -> band absent, no NOT_ROBUST blocker,
+        # and the existing blocker set is unchanged.
+        comp = _composite()  # no scenarios key
+        docs = {
+            "module_composite": comp,
+            "module_fundamental": _fundamental(conflict=True),
+            "snapshot": _snapshot(),
+        }
+        c = dc.build_contract(docs)
+        self.assertIsNone(c["ev_band"])
+        self.assertIsNone(c["ev_uncertainty_k"])
+        self.assertIsNone(c["ev_robust_vs_hurdle"])
+        self.assertNotIn("EV_NOT_ROBUST_UNDER_UNCERTAINTY", c["capital_blockers"])
 
 
 # --------------------------------------------------------------------------- #

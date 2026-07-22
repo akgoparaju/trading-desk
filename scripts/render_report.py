@@ -275,6 +275,18 @@ def build_capital_status(contract):
         f"- **Action if owned:** {contract.get('action_owned', '?')}",
         f"- **Hurdle-clearing price:** {_fmt(contract.get('hurdle_clearing_price'))}",
     ]
+    # O10b (PROVISIONAL v1.1.0): disclose the EV-uncertainty band when present.
+    # Every number is a contract field so number-provenance stays intact; the line
+    # is omitted for older/absent bundles that carry no band.
+    ev_band = contract.get("ev_band")
+    if isinstance(ev_band, (list, tuple)) and len(ev_band) == 2:
+        conf = contract.get("ev_uncertainty_confidence_level", "?")
+        robust = "yes" if contract.get("ev_robust_vs_hurdle") else "no"
+        lines.append(
+            f"- **EV band ({conf}-confidence, provisional):** "
+            f"[{_pct(ev_band[0])}, {_pct(ev_band[1])}] around EV "
+            f"{_pct(contract.get('ev_at_current'))} · robust vs hurdle: {robust}"
+        )
     return "\n".join(lines)
 
 

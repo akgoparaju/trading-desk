@@ -65,6 +65,32 @@ Spec: `docs/specs/2026-07-21-G1-G4-capital-trust-spec.md`. Bar: no guesses, data
   `"no new risk now — WAIT_FOR_EVENT; conditional 4.0% at the hurdle-clearing entry ladder, cap
   4.0%, f* 65.7%"`; `size_governed` PASS; `number_provenance` PASS. +11 tests; full suite
   **1625 pass / 26 skip**.
+- **O10b — EV-uncertainty band (PROVISIONAL v1.1.0; the residual half of O10: LOW confidence should
+  GOVERN the forecast distribution, not just disclose).** Spec:
+  `docs/specs/2026-07-21-O10b-ev-uncertainty-band.md`. `decision_contract` bumps `CONTRACT_VERSION`
+  **1.0.0 → 1.1.0** and computes an uncertainty band from data already in the bundle: from
+  `snapshot.price.last` + `module_composite.ev.scenarios`, `r_i = price_target_i/last − 1`,
+  `spread = max(r) − min(r)`; `halfwidth = k·spread` with a DISCLOSED confidence-keyed table
+  `_EV_BAND_K = {LOW:0.25, MEDIUM:0.15, HIGH:0.05}` (v1.1.0 proxy for forecast uncertainty; absent/
+  unrecognized confidence → conservative LOW k); `ev_band = [ev − halfwidth, ev + halfwidth]`. New
+  contract fields `ev_band`, `ev_uncertainty_halfwidth`, `ev_uncertainty_k`,
+  `ev_uncertainty_confidence_level`, `ev_robust_vs_hurdle` (`(ev_low≥hurdle)==(ev_high≥hurdle)`), and a
+  `provisional_note` carrying the pre-registered B9 falsifier. New ACTIVE blocker
+  `EV_NOT_ROBUST_UNDER_UNCERTAINTY` fires ONLY when the point EV passes the hurdle but the band's
+  conservative end fails it (`ev_at_current≥hurdle AND ev_low<hurdle`) — `EV_BELOW_HURDLE` already
+  covers the point-below case (no double-add); guard yields `ev_band=None` and skips the blocker when
+  <2 scenarios / `last≤0` / spread<0. `render_report.build_capital_status` discloses a provisional
+  band line off contract fields (`- **EV band ({conf}-confidence, provisional):** [{low%}, {high%}]
+  around EV {ev%} · robust vs hurdle: {yes|no}`), omitted when `ev_band` is None.
+  `report_qc.check_number_provenance` folds the contract's derived band endpoints + halfwidth into its
+  allowed set (the band is derived, not a leaf) so number-provenance stays PASS. **Real-GOOG
+  validation:** `ev_band ≈ [−0.042, 0.160]` (k=0.25 LOW, halfwidth ≈ 0.101), `ev_robust_vs_hurdle=False`;
+  because GOOG's point EV 0.059 < hurdle 0.12 the covering `EV_BELOW_HURDLE` fires and
+  `EV_NOT_ROBUST_UNDER_UNCERTAINTY` is NOT added → capital_blockers unchanged at 4; rendered line
+  `[-4.2%, 16.0%] around EV 5.9% · robust vs hurdle: no`; `number_provenance` PASS. The `_composite_doc`
+  render fixture now carries a HIGH-confidence rollup so its wide 150/80 scenario band clears the hurdle
+  robustly and stays eligible (an eligible name IS robustly-confident under the new gate). +20 tests;
+  full suite **1645 pass / 26 skip**.
 
 ## Unreleased — 2026-07-21 · Outstanding-tasks O5 / O11 / O4
 
