@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased — 2026-07-21 · Capital-trust fixes (GOOG review, G1–G4)
+## 0.15.0 — 2026-07-21 · GOOG-review capital-authorization spine + outstanding-tasks
+
+Shipped from the GOOG review validation: **G1** (reconciled issuer market cap), **G4a** (decision contract +
+semantic QC), **G4b/G5** (contract governs page-1 action), **G5b** (governs the Size row), **O10b**
+(EV-uncertainty band, PROVISIONAL; k softened to LOW 0.15 per user tuning), **O19** (risk-unit sizing +
+entry_state), plus post-0.14.0 **O5/O11/O4**. Roadmap remainder (O14/O15/O16/O17/O18/O20) is specced + tracked
+in `outstanding-tasks.md` — deferred for concrete reasons (data-blocked / no live defect / calibration / large
+rewrite / PDF not verifiable in-env), not skipped. Suite **1676 pass**.
+
+### Capital-trust fixes (GOOG review, G1–G4 + O10b + O19)
 
 From the GOOG review validation (`jutsu-trading-desk/docs/reviews/2026-07-21-goog-review-validation.md`).
 Spec: `docs/specs/2026-07-21-G1-G4-capital-trust-spec.md`. Bar: no guesses, data-driven, 95% confidence.
@@ -117,7 +126,7 @@ Spec: `docs/specs/2026-07-21-G1-G4-capital-trust-spec.md`. Bar: no guesses, data
   robustly and stays eligible (an eligible name IS robustly-confident under the new gate). +20 tests;
   full suite **1645 pass / 26 skip**.
 
-## Unreleased — 2026-07-21 · Outstanding-tasks O5 / O11 / O4
+### O5 / O11 / O4 (post-0.14.0 outstanding tasks, in 0.15.0)
 
 Three engineering items from the post-0.14.0 outstanding-tasks docket, each shipped TDD-first and
 validated on a real GOOG end-to-end (before/after read, not just green tests). Full suite **1555 pass**.
