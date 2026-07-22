@@ -497,6 +497,90 @@ def check_staleness(s):
     return _result("check_staleness", True, detail)
 
 
+# Round-trip tolerance for issuer cap vs issuer_total_shares_m x last (O15).
+# For a derived multi-class total this is exact by construction; the tolerance
+# only absorbs float noise (and any future filing-reconciled total, which may
+# differ from cap/price by a fraction of a percent).
+_SECMASTER_ROUNDTRIP_TOL = 0.02  # +-2%
+
+
+def check_security_master(s):
+    """Issuer/security-master coherence (O15): additive block, disclosure-not-block.
+
+    When present, the ``security_master`` block must be internally coherent with
+    the reconciled ``price`` block:
+      * ``issuer_mktcap`` == ``price.mktcap`` (the same G1-reconciled cap),
+      * ``class_shares_m`` <= ``issuer_total_shares_m`` (a listed class cannot
+        exceed the whole issuer) when BOTH are numeric,
+      * round-trip: ``issuer_mktcap`` ~= issuer_total_shares_m x 1e6 x last within
+        tolerance (exact by construction for a derived multi-class total),
+      * ``shares_source`` and ``reconciled_to_filing`` present.
+
+    A legitimately-derived block (``reconciled_to_filing`` False, disclosed
+    ``shares_source``) PASSES -- being unreconciled is disclosed, not a failure.
+    A degraded block (nulls + ``shares_source`` "unavailable") PASSES on the
+    cap-equality it can still assert; numeric-only coherence legs are skipped.
+    Absent block (older bundle predating O15) -> SKIP.
+    """
+    sm = _get(s, "security_master")
+    if not isinstance(sm, dict):
+        return _result("check_security_master", None,
+                       "SKIP: no security_master block (pre-O15 bundle)")
+
+    price = _get(s, "price")
+    price_mktcap = _get(price, "mktcap")
+    last = _get(price, "last")
+
+    issuer_mktcap = sm.get("issuer_mktcap")
+    class_shares_m = sm.get("class_shares_m")
+    issuer_total_m = sm.get("issuer_total_shares_m")
+    shares_source = sm.get("shares_source")
+    reconciled = sm.get("reconciled_to_filing")
+
+    problems = []
+
+    # 1. issuer_mktcap must equal the reconciled price.mktcap (same canonical cap).
+    #    Both null is acceptable (degraded bundle with no cap); a mismatch is not.
+    if _is_num(issuer_mktcap) or _is_num(price_mktcap):
+        if not (_is_num(issuer_mktcap) and _is_num(price_mktcap)
+                and issuer_mktcap == price_mktcap):
+            problems.append(
+                f"issuer_mktcap {issuer_mktcap} != price.mktcap {price_mktcap}")
+
+    # 2. a listed class cannot exceed the whole issuer (numeric-only leg).
+    if _is_num(class_shares_m) and _is_num(issuer_total_m):
+        if class_shares_m > issuer_total_m:
+            problems.append(
+                f"class_shares_m {class_shares_m} > issuer_total_shares_m "
+                f"{issuer_total_m}")
+
+    # 3. round-trip coherence: issuer_mktcap ~= issuer_total_shares_m x 1e6 x last.
+    if _is_num(issuer_mktcap) and issuer_mktcap > 0 \
+            and _is_num(issuer_total_m) and _is_num(last):
+        roundtrip = issuer_total_m * 1e6 * last
+        diff = abs(roundtrip - issuer_mktcap) / abs(issuer_mktcap)
+        if diff > _SECMASTER_ROUNDTRIP_TOL:
+            problems.append(
+                f"round-trip issuer_total x last = {roundtrip:.4g} vs "
+                f"issuer_mktcap {issuer_mktcap:.4g}: {diff:.2%} diff "
+                f"(tol {_SECMASTER_ROUNDTRIP_TOL:.0%})")
+
+    # 4. disclosure fields must be present (a derived/unreconciled block is fine,
+    #    but the disclosure itself must exist).
+    if not shares_source:
+        problems.append("shares_source absent")
+    if reconciled is None:
+        problems.append("reconciled_to_filing absent")
+
+    if problems:
+        return _result("check_security_master", False, "; ".join(problems))
+    return _result(
+        "check_security_master", True,
+        f"issuer_mktcap == price.mktcap; class<=issuer; round-trip within "
+        f"{_SECMASTER_ROUNDTRIP_TOL:.0%}; shares_source={shares_source!r}, "
+        f"reconciled_to_filing={reconciled}")
+
+
 ALL_CHECKS = [
     check_mktcap,
     check_ma_ordering,
@@ -505,6 +589,7 @@ ALL_CHECKS = [
     check_pe_arithmetic,
     check_net_cash,
     check_options_freshness,
+    check_security_master,
     check_provenance,
     check_staleness,
 ]

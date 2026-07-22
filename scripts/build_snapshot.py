@@ -39,7 +39,7 @@ if _REPO_ROOT not in sys.path:
 
 from scripts import chain, indicators
 
-SCHEMA_VERSION = "0.3.3"
+SCHEMA_VERSION = "0.4.0"
 
 # Files that MUST be present; their absence aborts the build.
 REQUIRED = ("global_quote", "overview", "daily_adjusted", "spy_daily_adjusted")
@@ -476,6 +476,116 @@ def build_price(quote, overview, rows, web_spot):
         # by the caller (build_snapshot) -- kept here so build_price stays a
         # pure function over its inputs without separate return values.
         "_latest_trading_day": latest_trading_day,
+    }
+
+
+# Multi-listing sibling share classes, keyed by ticker (O15). This is a STATIC,
+# EXPLICITLY-CURATED map: an entry exists ONLY when the sibling relationship is
+# known and verified, never guessed. GOOG (Class C) and GOOGL (Class A) are the
+# two publicly-listed Alphabet classes (Class B is unlisted). To add another
+# multi-listed issuer, add its verified pair here EXPLICITLY -- an unknown ticker
+# returns [] (never a fabricated sibling).
+_SHARE_CLASS_SIBLINGS = {
+    "GOOG": ["GOOGL"],
+    "GOOGL": ["GOOG"],
+}
+
+
+def _parse_share_class(name):
+    """Extract a share-class label from an AV overview Name, else None.
+
+    AV's COMPANY_OVERVIEW Name encodes the listed class for multi-class issuers
+    (e.g. "Alphabet Inc Class C" -> "C"). We look for a trailing "Class <X>"
+    token and return the label verbatim; no class token -> None (single-class or
+    unlabelled). Pure string parse, never a guess about the corporate structure.
+    """
+    if not isinstance(name, str):
+        return None
+    tokens = name.split()
+    for i, tok in enumerate(tokens):
+        if tok.lower() == "class" and i + 1 < len(tokens):
+            label = tokens[i + 1].strip().strip(".,")
+            return label or None
+    return None
+
+
+def build_security_master(price, overview, ticker):
+    """Issuer/security-master block: formalize the security-vs-issuer split (O15).
+
+    AV's COMPANY_OVERVIEW SharesOutstanding is a SINGLE listed share class (a
+    security-level count), while its MarketCapitalization is the ISSUER-level cap
+    (all classes). build_price already reconciled the authoritative cap into
+    ``price.mktcap`` (G1). This block makes the split first-class and QC-checkable
+    and reconciles the issuer share count from data already present -- NO guessing,
+    every derived figure carries a disclosed ``shares_source``. Pure over its
+    inputs; ADDITIVE (no scorer reads it).
+
+    issuer_total_shares_m derivation (disclosed source, never guessed):
+      * single-class basis (mktcap_basis in {"reconciled_agree", "computed_only"}):
+        this listed class IS the whole issuer, so issuer_total = class_shares_m,
+        shares_source="av_class_shares", reconciled_to_filing = (overview present).
+      * multi-class basis ("overview_authoritative"): AV's class share count
+        undercounts the issuer, so derive issuer_total = issuer_mktcap / last
+        (the authoritative issuer cap over the class price), shares_source=
+        "derived: issuer mktcap / class price", reconciled_to_filing=False. Exact
+        by construction against the issuer cap; disclosed as derived.
+      * degraded (no overview, or no usable last/cap to derive from): emit the
+        block with nulls and shares_source="unavailable" -- never fabricate.
+
+    issuer_diluted_shares_m == issuer_total_shares_m: the snapshot carries no
+    separate issuer-diluted source, so total is the best available diluted proxy
+    (disclosed by equality, not invented).
+    """
+    price = price if isinstance(price, dict) else {}
+    ov = overview if isinstance(overview, dict) else {}
+
+    last = price.get("last")
+    class_shares_m = price.get("shares_diluted_m")
+    issuer_mktcap = price.get("mktcap")
+    mktcap_basis = price.get("mktcap_basis")
+
+    share_class = _parse_share_class(ov.get("Name")) if ov else None
+    other_listed = list(_SHARE_CLASS_SIBLINGS.get(ticker, []))
+
+    def _num(x):
+        return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+    issuer_total_shares_m = None
+    shares_source = "unavailable"
+    reconciled_to_filing = False
+
+    if mktcap_basis == "overview_authoritative":
+        # Multi-class: AV class-share count undercounts the issuer. Derive the
+        # issuer share count from the authoritative issuer cap over the class
+        # price (exact vs the cap by construction). Disclosed as derived.
+        if _num(issuer_mktcap) and _num(last) and last > 0:
+            issuer_total_shares_m = issuer_mktcap / last / 1e6
+            shares_source = "derived: issuer mktcap / class price"
+            reconciled_to_filing = False
+        # else: degraded -> nulls + "unavailable" (fall through)
+    elif mktcap_basis in ("reconciled_agree", "computed_only"):
+        # Single-class: this listed class IS the whole issuer.
+        if _num(class_shares_m):
+            issuer_total_shares_m = class_shares_m
+            shares_source = "av_class_shares"
+            # Reconciled to the filing/vendor overview iff an overview was present.
+            reconciled_to_filing = bool(ov)
+    # Any other basis (e.g. computed_anomaly_retained) or absent inputs -> the
+    # issuer count is not derivable without guessing: leave null + "unavailable".
+
+    issuer_diluted_shares_m = issuer_total_shares_m
+
+    return {
+        "ticker": ticker,
+        "share_class": share_class,
+        "class_shares_m": class_shares_m,
+        "issuer_total_shares_m": issuer_total_shares_m,
+        "issuer_diluted_shares_m": issuer_diluted_shares_m,
+        "issuer_mktcap": issuer_mktcap,
+        "mktcap_basis": mktcap_basis,
+        "shares_source": shares_source,
+        "reconciled_to_filing": reconciled_to_filing,
+        "other_listed_classes": other_listed,
     }
 
 
@@ -1840,6 +1950,10 @@ def build_snapshot(bundle, ticker):
     # QF2: extract the vendor latest-trading-day stamp from the price block
     # (build_price stores it under a private key) and move it to meta.
     latest_trading_day = price.pop("_latest_trading_day", None)
+    # O15: issuer/security-master block -- formalizes the security-vs-issuer split
+    # already implicit in price (AV SharesOutstanding = one class; mktcap = issuer).
+    # Pure over the reconciled price block + overview; ADDITIVE (no scorer reads it).
+    security_master = build_security_master(price, overview, ticker)
     technicals = build_technicals(rows, series_source=series_source,
                                   next_earnings_date=next_earnings_date,
                                   earn_q=earn_q)
@@ -1918,6 +2032,7 @@ def build_snapshot(bundle, ticker):
             "qc": {"passed": None, "checks": [], "waivers": []},
         },
         "price": price,
+        "security_master": security_master,
         "technicals": technicals,
         "benchmark": benchmark,
         "fundamentals": fundamentals,

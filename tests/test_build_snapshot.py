@@ -454,7 +454,7 @@ class TestBuildSnapshotFull(unittest.TestCase):
         m = self.snap["meta"]
         self.assertEqual(m["ticker"], "MU")
         self.assertEqual(m["as_of_utc"], AS_OF)
-        self.assertEqual(m["schema_version"], "0.3.3")  # Wave 4B: 0.3.2 -> 0.3.3
+        self.assertEqual(m["schema_version"], "0.4.0")  # O15: 0.3.3 -> 0.4.0
         self.assertEqual(m["missing"], [])
         self.assertIn("qc", m)
         self.assertTrue(len(m["sources"]) >= 4)
@@ -922,7 +922,8 @@ class TestQCGate(unittest.TestCase):
         with open(self.snap_path) as fh:
             snap = json.load(fh)
         self.assertIs(snap["meta"]["qc"]["passed"], True)
-        self.assertTrue(len(snap["meta"]["qc"]["checks"]) == 9)
+        # O15 added check_security_master (10th check).
+        self.assertTrue(len(snap["meta"]["qc"]["checks"]) == 10)
 
     def test_gate_fails_on_corrupt_mktcap(self):
         # G1: ratio must be OUTSIDE the multi-class band (0.15, 1.0) to fail.
@@ -1337,10 +1338,10 @@ class TestA1EventAwareFields(unittest.TestCase):
         self.assertEqual(og["jump_count_2sigma"],
                          indicators.jump_count_2sigma(gaps))
 
-    def test_schema_version_is_0_3_3(self):
+    def test_schema_version_is_0_4_0(self):
         b = BundleBuilder(self.dir).build_full()
         snap = self._build(b)
-        self.assertEqual(snap["meta"]["schema_version"], "0.3.3")
+        self.assertEqual(snap["meta"]["schema_version"], "0.4.0")
 
 
 # --------------------------------------------------------------------------- #
@@ -1980,6 +1981,172 @@ class TestSectorDailyOptionalSource(unittest.TestCase):
         self.assertIsNotNone(bm["sector_ret_3m"])
         self.assertIsNotNone(bm["rel_sector_ret_3m"])
         self.assertIsNotNone(bm["rel_sector_ret_6m"])
+
+
+class TestSecurityMaster(unittest.TestCase):
+    """O15: build_security_master pure-function table + snapshot integration."""
+
+    def test_single_class_reconciled_agree(self):
+        from scripts import build_snapshot as bs
+        price = {
+            "last": 50.0,
+            "shares_diluted_m": 2000.0,
+            "mktcap": 100_000_000_000.0,
+            "mktcap_basis": "reconciled_agree",
+        }
+        overview = {"Name": "Acme Corp"}
+        sm = bs.build_security_master(price, overview, "ACME")
+        self.assertEqual(sm["ticker"], "ACME")
+        self.assertIsNone(sm["share_class"])
+        self.assertEqual(sm["class_shares_m"], 2000.0)
+        # single-class: issuer_total == class_shares_m
+        self.assertEqual(sm["issuer_total_shares_m"], 2000.0)
+        self.assertEqual(sm["issuer_diluted_shares_m"], 2000.0)
+        self.assertEqual(sm["shares_source"], "av_class_shares")
+        self.assertIs(sm["reconciled_to_filing"], True)  # overview present
+        self.assertEqual(sm["issuer_mktcap"], 100_000_000_000.0)
+        self.assertEqual(sm["other_listed_classes"], [])
+
+    def test_single_class_computed_only(self):
+        from scripts import build_snapshot as bs
+        # computed_only basis is single-class; issuer_total == class_shares_m.
+        price = {
+            "last": 50.0,
+            "shares_diluted_m": 2000.0,
+            "mktcap": 100_000_000_000.0,
+            "mktcap_basis": "computed_only",
+        }
+        sm = bs.build_security_master(price, {"Name": "Acme Corp"}, "ACME")
+        self.assertEqual(sm["issuer_total_shares_m"], 2000.0)
+        self.assertEqual(sm["shares_source"], "av_class_shares")
+        self.assertIs(sm["reconciled_to_filing"], True)
+
+    def test_multi_class_goog_derived(self):
+        from scripts import build_snapshot as bs
+        price = {
+            "last": 351.37,
+            "shares_diluted_m": 5499.638,
+            "mktcap": 4287617827000.0,
+            "mktcap_basis": "overview_authoritative",
+        }
+        overview = {"Name": "Alphabet Inc Class C"}
+        sm = bs.build_security_master(price, overview, "GOOG")
+        self.assertEqual(sm["ticker"], "GOOG")
+        self.assertEqual(sm["share_class"], "C")
+        self.assertEqual(sm["class_shares_m"], 5499.638)
+        # derived issuer total = mktcap / last / 1e6 ~= 12202.57 (spec: ~12202)
+        self.assertAlmostEqual(sm["issuer_total_shares_m"], 12202.572294, places=4)
+        self.assertEqual(int(sm["issuer_total_shares_m"]), 12202)  # ~12202 per spec
+        self.assertEqual(sm["issuer_diluted_shares_m"], sm["issuer_total_shares_m"])
+        self.assertEqual(sm["shares_source"], "derived: issuer mktcap / class price")
+        self.assertIs(sm["reconciled_to_filing"], False)
+        self.assertEqual(sm["issuer_mktcap"], 4287617827000.0)
+        self.assertEqual(sm["mktcap_basis"], "overview_authoritative")
+        self.assertEqual(sm["other_listed_classes"], ["GOOGL"])
+        # round-trip exact by construction against the cap.
+        self.assertAlmostEqual(
+            sm["issuer_total_shares_m"] * 1e6 * price["last"],
+            sm["issuer_mktcap"], places=0)
+
+    def test_googl_sibling_is_goog(self):
+        from scripts import build_snapshot as bs
+        price = {"last": 349.0, "shares_diluted_m": 6000.0,
+                 "mktcap": 4.2e12, "mktcap_basis": "overview_authoritative"}
+        sm = bs.build_security_master(price, {"Name": "Alphabet Inc Class A"}, "GOOGL")
+        self.assertEqual(sm["share_class"], "A")
+        self.assertEqual(sm["other_listed_classes"], ["GOOG"])
+
+    def test_unknown_ticker_no_sibling(self):
+        from scripts import build_snapshot as bs
+        price = {"last": 50.0, "shares_diluted_m": 2000.0,
+                 "mktcap": 100e9, "mktcap_basis": "reconciled_agree"}
+        sm = bs.build_security_master(price, {"Name": "Acme Corp"}, "ACME")
+        self.assertEqual(sm["other_listed_classes"], [])
+
+    def test_degraded_no_overview(self):
+        from scripts import build_snapshot as bs
+        # No overview + no derivable cap/last -> nulls + "unavailable".
+        price = {"last": None, "shares_diluted_m": None,
+                 "mktcap": None, "mktcap_basis": None}
+        sm = bs.build_security_master(price, None, "ACME")
+        self.assertIsNone(sm["share_class"])
+        self.assertIsNone(sm["issuer_total_shares_m"])
+        self.assertIsNone(sm["issuer_diluted_shares_m"])
+        self.assertIsNone(sm["issuer_mktcap"])
+        self.assertEqual(sm["shares_source"], "unavailable")
+        self.assertIs(sm["reconciled_to_filing"], False)
+        self.assertEqual(sm["other_listed_classes"], [])
+
+    def test_multi_class_degraded_when_no_last(self):
+        from scripts import build_snapshot as bs
+        # overview_authoritative but no usable price -> cannot derive -> unavailable.
+        price = {"last": None, "shares_diluted_m": 5499.638,
+                 "mktcap": 4.28e12, "mktcap_basis": "overview_authoritative"}
+        sm = bs.build_security_master(price, {"Name": "Alphabet Inc Class C"}, "GOOG")
+        self.assertIsNone(sm["issuer_total_shares_m"])
+        self.assertEqual(sm["shares_source"], "unavailable")
+
+    def test_parse_share_class_variants(self):
+        from scripts import build_snapshot as bs
+        self.assertEqual(bs._parse_share_class("Alphabet Inc Class C"), "C")
+        self.assertEqual(bs._parse_share_class("Berkshire Hathaway Class B"), "B")
+        self.assertIsNone(bs._parse_share_class("Apple Inc"))
+        self.assertIsNone(bs._parse_share_class(None))
+        self.assertIsNone(bs._parse_share_class(""))
+
+    def test_snapshot_has_security_master_sibling_of_price(self):
+        from scripts import build_snapshot as bs
+        d = tempfile.mkdtemp()
+        try:
+            BundleBuilder(d).build_full()
+            snap, _ = bs.build_snapshot(d, "MU")
+            self.assertIn("security_master", snap)
+            sm = snap["security_master"]
+            self.assertEqual(sm["ticker"], "MU")
+            self.assertEqual(sm["issuer_mktcap"], snap["price"]["mktcap"])
+            self.assertIn("shares_source", sm)
+            self.assertIn("reconciled_to_filing", sm)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_security_master_is_scorer_invariant(self):
+        """BYTE-IDENTICAL GUARD: the security_master block is additive/ignored.
+
+        Scoring fundamental + risk on a snapshot WITH vs WITHOUT the block must
+        produce byte-identical module output (the scorers never read it).
+        """
+        from scripts import build_snapshot as bs
+        from scripts import score_fundamental as sf
+        from scripts import score_risk as sr
+        d = tempfile.mkdtemp()
+        try:
+            BundleBuilder(d).build_full()
+            snap, _ = bs.build_snapshot(d, "MU")
+            self.assertIn("security_master", snap)
+
+            snap_without = {k: v for k, v in snap.items() if k != "security_master"}
+
+            fund_with = sf.build_module(snap)
+            fund_without = sf.build_module(snap_without)
+            self.assertEqual(
+                json.dumps(fund_with, sort_keys=True),
+                json.dumps(fund_without, sort_keys=True),
+                "score_fundamental changed when security_master added",
+            )
+
+            ladder = [
+                {"level": 96.0, "type": "ma50", "basis": "test"},
+                {"level": 110.0, "type": "swing_high", "basis": "test"},
+            ]
+            risk_with = sr.build_module(snap, ladder, 0.20, "test risk")
+            risk_without = sr.build_module(snap_without, ladder, 0.20, "test risk")
+            self.assertEqual(
+                json.dumps(risk_with, sort_keys=True),
+                json.dumps(risk_without, sort_keys=True),
+                "score_risk changed when security_master added",
+            )
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 if __name__ == "__main__":

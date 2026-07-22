@@ -121,9 +121,10 @@ class TestQCHappyPath(unittest.TestCase):
         failed = [c for c in r["checks"] if c["passed"] is False]
         self.assertEqual(failed, [], f"unexpected failures: {failed}")
 
-    def test_all_nine_checks_ran(self):
+    def test_all_ten_checks_ran(self):
+        # O15 added check_security_master (10th check).
         r = Q.run_qc(make_snapshot())
-        self.assertEqual(len(r["checks"]), 9)
+        self.assertEqual(len(r["checks"]), 10)
 
     def test_attestation_mentions_ticker_and_date(self):
         r = Q.run_qc(make_snapshot())
@@ -296,6 +297,123 @@ class TestWaivers(unittest.TestCase):
         s["price"]["mktcap_overview"] *= 10  # out-of-band → still FAIL
         r = Q.run_qc(s)
         self.assertIs(r["passed"], False)
+
+
+def _goog_secmaster_snapshot():
+    """Minimal snapshot carrying a valid derived multi-class GOOG security_master.
+
+    Mirrors the real GOOG shape: price.mktcap = issuer cap (overview_authoritative),
+    security_master.issuer_total_shares_m derived = mktcap / last (exact round-trip).
+    """
+    last = 351.37
+    issuer_mktcap = 4287617827000.0
+    issuer_total_m = issuer_mktcap / last / 1e6  # ~12202.57
+    return {
+        "price": {
+            "last": last,
+            "shares_diluted_m": 5499.638,
+            "mktcap": issuer_mktcap,
+            "mktcap_basis": "overview_authoritative",
+        },
+        "security_master": {
+            "ticker": "GOOG",
+            "share_class": "C",
+            "class_shares_m": 5499.638,
+            "issuer_total_shares_m": issuer_total_m,
+            "issuer_diluted_shares_m": issuer_total_m,
+            "issuer_mktcap": issuer_mktcap,
+            "mktcap_basis": "overview_authoritative",
+            "shares_source": "derived: issuer mktcap / class price",
+            "reconciled_to_filing": False,
+            "other_listed_classes": ["GOOGL"],
+        },
+    }
+
+
+class TestSecurityMasterCheck(unittest.TestCase):
+    def test_valid_goog_block_passes(self):
+        r = Q.check_security_master(_goog_secmaster_snapshot())
+        self.assertIs(r["passed"], True)
+
+    def test_derived_unreconciled_block_still_passes(self):
+        # reconciled_to_filing=False (derived) is DISCLOSURE, never a FAIL.
+        s = _goog_secmaster_snapshot()
+        self.assertIs(s["security_master"]["reconciled_to_filing"], False)
+        self.assertIs(Q.check_security_master(s)["passed"], True)
+
+    def test_issuer_mktcap_mismatch_fails(self):
+        s = _goog_secmaster_snapshot()
+        s["security_master"]["issuer_mktcap"] = 999.0  # != price.mktcap
+        r = Q.check_security_master(s)
+        self.assertIs(r["passed"], False)
+        self.assertIn("issuer_mktcap", r["detail"])
+
+    def test_class_exceeds_issuer_fails(self):
+        s = _goog_secmaster_snapshot()
+        s["security_master"]["issuer_total_shares_m"] = 1.0  # < class_shares_m
+        r = Q.check_security_master(s)
+        self.assertIs(r["passed"], False)
+        self.assertIn("class_shares_m", r["detail"])
+
+    def test_roundtrip_incoherence_fails(self):
+        s = _goog_secmaster_snapshot()
+        # Break the cap/shares/price identity while keeping class<=issuer and
+        # issuer_mktcap==price.mktcap: halve issuer_total so cap != shares*last.
+        s["security_master"]["issuer_total_shares_m"] = 6000.0
+        r = Q.check_security_master(s)
+        self.assertIs(r["passed"], False)
+        self.assertIn("round-trip", r["detail"])
+
+    def test_missing_disclosure_fields_fail(self):
+        s = _goog_secmaster_snapshot()
+        s["security_master"]["shares_source"] = None
+        s["security_master"]["reconciled_to_filing"] = None
+        r = Q.check_security_master(s)
+        self.assertIs(r["passed"], False)
+        self.assertIn("shares_source absent", r["detail"])
+        self.assertIn("reconciled_to_filing absent", r["detail"])
+
+    def test_absent_block_skips(self):
+        r = Q.check_security_master({"price": {"mktcap": 1.0, "last": 1.0}})
+        self.assertIsNone(r["passed"])
+        self.assertIn("SKIP", r["detail"])
+
+    def test_degraded_block_with_nulls_passes(self):
+        # No overview/last -> nulls + "unavailable"; the cap-equality it can still
+        # assert holds (both null), numeric legs skip -> PASS.
+        s = {
+            "price": {"last": None, "mktcap": None, "mktcap_basis": None},
+            "security_master": {
+                "ticker": "XYZ", "share_class": None,
+                "class_shares_m": None, "issuer_total_shares_m": None,
+                "issuer_diluted_shares_m": None, "issuer_mktcap": None,
+                "mktcap_basis": None, "shares_source": "unavailable",
+                "reconciled_to_filing": False, "other_listed_classes": [],
+            },
+        }
+        self.assertIs(Q.check_security_master(s)["passed"], True)
+
+    def test_gate_still_passes_with_valid_secmaster(self):
+        # Full gate: a clean snapshot augmented with a valid security_master
+        # keeps passing and now runs 10 checks with check_security_master PASS.
+        s = make_snapshot()
+        s["price"]["mktcap"] = s["price"]["mktcap_overview"]
+        s["price"]["mktcap_basis"] = "reconciled_agree"
+        s["security_master"] = {
+            "ticker": "AAA", "share_class": None,
+            "class_shares_m": 1000.0,
+            "issuer_total_shares_m": 1000.0,
+            "issuer_diluted_shares_m": 1000.0,
+            "issuer_mktcap": s["price"]["mktcap_overview"],
+            "mktcap_basis": "reconciled_agree",
+            "shares_source": "av_class_shares",
+            "reconciled_to_filing": True,
+            "other_listed_classes": [],
+        }
+        r = Q.run_qc(s)
+        self.assertIs(r["passed"], True)
+        checks = _names(r)
+        self.assertIs(checks["check_security_master"]["passed"], True)
 
 
 if __name__ == "__main__":

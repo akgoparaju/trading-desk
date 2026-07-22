@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.17.0 — 2026-07-22 · O15 issuer/security master (schema 0.4.0)
+
+Formalizes the security-level vs issuer-level split the snapshot previously left implicit. AV's
+COMPANY_OVERVIEW `SharesOutstanding` is a SINGLE listed share class (security-level) while its
+`MarketCapitalization` is the ISSUER-level cap (all classes); G1 already routed market-cap ratios
+through the reconciled `price.mktcap`. O15 makes the whole split a first-class, QC-checkable
+`security_master` block and reconciles the issuer share count from data already present. **ADDITIVE:
+no scorer reads the block, so every evidence/composite score is byte-identical to 0.16.0** — O15 moves
+no number. No live defect exists (G1 fixed the market-cap path); this is correctness/completeness +
+formalization + the schema bump. Suite **1835 pass, 2 skip** (was 1816/2; +19 new tests).
+
+- **`SCHEMA_VERSION "0.3.3" → "0.4.0"`** (`scripts/build_snapshot.py`). Migrated the version-pin
+  assertions in `tests/test_build_snapshot.py` (`test_meta_fields`, renamed `test_schema_version_is_0_4_0`).
+- **`build_security_master(price, overview, ticker)` (NEW, pure, stdlib-only).** Emits a top-level
+  `security_master` block (sibling of `price`): `ticker`, `share_class` (parsed from overview Name,
+  e.g. "Alphabet Inc Class C" → "C", else null), `class_shares_m` (AV one-class count),
+  `issuer_total_shares_m`, `issuer_diluted_shares_m`, `issuer_mktcap` (= `price.mktcap`),
+  `mktcap_basis` (= `price.mktcap_basis`), `shares_source`, `reconciled_to_filing`, `other_listed_classes`.
+  - `issuer_total_shares_m` derivation (disclosed, never guessed): single-class basis
+    (`reconciled_agree`/`computed_only`) → `= class_shares_m`, `shares_source="av_class_shares"`;
+    multi-class basis (`overview_authoritative`) → derive `issuer_mktcap / last`
+    (`shares_source="derived: issuer mktcap / class price"`, `reconciled_to_filing=false`). GOOG
+    (multi-class) → 12202.57M (≈12202). Absent/degraded inputs → nulls + `shares_source="unavailable"`.
+  - `other_listed_classes` from a STATIC, explicitly-curated sibling map (`_SHARE_CLASS_SIBLINGS`,
+    GOOG↔GOOGL only); unknown ticker → `[]` (never a fabricated sibling; add pairs explicitly).
+  - No denominator rewire: audited `shares_diluted_m` consumers are `check_mktcap` (correct) and the
+    per-security DTC/ADV metric (legitimately per-security) — no issuer-fundamental metric divides by
+    the one-class count, so the "rewire" is a no-op and was NOT invented.
+- **`qc.py check_security_master` (NEW, 10th snapshot-gate check).** Validates: block present +
+  `issuer_mktcap == price.mktcap`; `class_shares_m ≤ issuer_total_shares_m` (numeric-only leg);
+  round-trip `issuer_mktcap ≈ issuer_total_shares_m×1e6×last` within 2% (exact by construction for the
+  derived multi-class case); `shares_source`/`reconciled_to_filing` present. A legitimately-derived
+  (`reconciled_to_filing=false`) block PASSES with disclosure — it never FAILS on being unreconciled.
+  Absent block (pre-O15 bundle) → SKIP. `check_provenance` is unaffected (fixed block list).
+- **Tests.** `TestSecurityMaster` (build table: single-class, multi-class GOOG derived ≈12202,
+  degraded nulls, sibling map, Name parsing, snapshot integration) and a byte-identical scorer-invariant
+  guard (fundamental + risk `build_module` produce identical output with vs without the block).
+  `TestSecurityMasterCheck` (valid GOOG pass, mismatch/round-trip/class-exceeds/missing-disclosure fail,
+  absent skip, degraded pass, full-gate pass). Migrated the `len(checks) == 9 → 10` gate-count pins.
+
 ## 0.16.0 — 2026-07-22 · O14 + O17 FSI-transcription (adjusted financials + valuation reconciliation)
 
 The FSI initiation already computes the clean EPS + driver scenarios; this release transcribes them into the
