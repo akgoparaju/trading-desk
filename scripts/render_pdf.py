@@ -496,6 +496,20 @@ class Doc:
         self.total_pages = 0  # set before finalize for the p N/M footer
         self._page_no = 0
 
+        # PDF document metadata (Info dictionary).  Set once on canvas creation
+        # so every saved file carries searchable, reader-visible metadata.
+        date_s = (as_of or "")[:10]
+        _ver = render_report._plugin_version()
+        # "Trade Report" expands to "Trade Decision Report" for the title so the
+        # exec doc's title matches the canonical format <TICKER> Trade Decision
+        # Report <YYYY-MM-DD>; other doc types (Detail, Delta Note) use their
+        # name verbatim.
+        _TITLE_NAME = {"Trade Report": "Trade Decision Report"}
+        title_name = _TITLE_NAME.get(name, name)
+        self.c.setTitle("%s %s %s" % (ticker, title_name, date_s))
+        self.c.setAuthor("trading-desk plugin v%s" % _ver)
+        self.c.setSubject("%s — %s" % (ticker, name))
+
         # Palette (reportlab 0-1 tuples from tdstyle).
         self.ACCENT = tdstyle.ACCENT_RGB
         self.RED = tdstyle.RED_RGB
@@ -636,8 +650,15 @@ class Doc:
             self.hairline(x, y - 3.5, x + w, rgb=self.ACCENT, w=0.7)
         return y
 
-    def begin_page(self):
+    def begin_page(self, title=None):
+        """Start a new page.  When *title* is given, a PDF outline entry is
+        added so the page is reachable from the document's bookmark panel.
+        """
         self._page_no += 1
+        if title:
+            key = "page_%d" % self._page_no
+            self.c.bookmarkPage(key)
+            self.c.addOutlineEntry(title, key, level=0)
         return self.masthead()
 
     def end_page(self):
@@ -1054,8 +1075,18 @@ def _trade_plan_table(doc, x, y_top, w, tradeplan):
     for i, (item, rule, ev) in enumerate(rows):
         yy = ty - (i + 1) * row_h + 4
         doc.text(tc0, yy, item, font=doc.FONT_B, size=8, rgb=doc.INK)
-        doc.text(tc1, yy, doc.truncate(rule, doc.FONT, 8, rule_max_w),
-                 font=doc.FONT, size=8, rgb=doc.GRAY_DK)
+        if item == "Invalidation":
+            # Shrink-to-fit: reduce font size until the full text fits the
+            # column width.  The fixed row height (13.5pt) is preserved so
+            # no downstream rows are displaced.  Minimum size is 5.5pt.
+            inv_size = 8.0
+            while (inv_size > 5.5 and
+                   doc.string_width(rule, doc.FONT, inv_size) > rule_max_w):
+                inv_size -= 0.25
+            doc.text(tc1, yy, rule, font=doc.FONT, size=inv_size, rgb=doc.GRAY_DK)
+        else:
+            doc.text(tc1, yy, doc.truncate(rule, doc.FONT, 8, rule_max_w),
+                     font=doc.FONT, size=8, rgb=doc.GRAY_DK)
         if ev:
             doc.text(tc_ev, yy, ev, font=doc.FONT_B, size=8, rgb=doc.GREEN,
                      align="right")
@@ -1101,7 +1132,7 @@ def _load_brief(bundle, dim):
 
 
 def _draw_exec_page1(doc, bundle, docs, slots, diff, prev_date, plan=None):
-    top = doc.begin_page()
+    top = doc.begin_page("Page 1 — Decision")
     M = doc.MARGIN
     gutter = 14
     main_w = doc.CONTENT_W * 0.66
@@ -1213,7 +1244,7 @@ def _draw_exec_page1(doc, bundle, docs, slots, diff, prev_date, plan=None):
 
 
 def _draw_exec_page2(doc, bundle, docs, slots):
-    top = doc.begin_page()
+    top = doc.begin_page("Page 2 — Evidence")
     M = doc.MARGIN
     gutter = 16
     col_w = (doc.CONTENT_W - gutter) / 2
@@ -2972,7 +3003,7 @@ def render_detail(bundle, docs, slots, diff, prev_date, out_path):
     # WHY THIS CALL page (right after the exec repeat) — the argued case. When no
     # stamped context module exists, the one-line context disclosure rides at the
     # bottom of this page rather than opening a near-empty page of its own.
-    top = doc.begin_page()
+    top = doc.begin_page("Page 3 — Why This Call")
     y = _draw_why_this_call(doc, docs, top - 12)
     if not context_ok:
         _draw_context_disclosure(doc, y - 24)
@@ -2980,13 +3011,16 @@ def render_detail(bundle, docs, slots, diff, prev_date, out_path):
 
     # COMPANY CONTEXT page — only when a stamped module supplies the narrative.
     if context_ok:
-        top = doc.begin_page()
+        top = doc.begin_page("Page %d — Company Context" % (doc._page_no + 1))
         _draw_context_narrative(doc, docs, context, top - 12)
         doc.end_page()
 
     # Per-dimension pages (packed).
     for page_sections in pages:
-        top = doc.begin_page()
+        dim_names = " / ".join(
+            _DIM_LABELS.get(d, d.title()) for d, _k, _h in page_sections)
+        top = doc.begin_page("Page %d — Evidence: %s" % (
+            doc._page_no + 1, dim_names))
         y = top - 12
         for i, (dim, key, h) in enumerate(page_sections):
             if i > 0:
@@ -2998,7 +3032,7 @@ def render_detail(bundle, docs, slots, diff, prev_date, out_path):
         doc.end_page()
 
     # Options page — the FULL module render + the OPTIONS charts beneath it.
-    top = doc.begin_page()
+    top = doc.begin_page("Page %d — Options & Volatility" % (doc._page_no + 1))
     y = _draw_options_section(doc, bundle, docs, top - 12)
     present = [p for p in (_chart_png(bundle, c) for c in _OPTIONS_CHARTS) if p]
     chart_w = (doc.CONTENT_W - 12) / 2
@@ -3016,12 +3050,12 @@ def render_detail(bundle, docs, slots, diff, prev_date, out_path):
     doc.end_page()
 
     # Downside map + monitoring page.
-    top = doc.begin_page()
+    top = doc.begin_page("Page %d — Downside & Monitoring" % (doc._page_no + 1))
     _draw_downside_monitoring(doc, bundle, docs, top - 12)
     doc.end_page()
 
     # Appendix + integrity page.
-    top = doc.begin_page()
+    top = doc.begin_page("Page %d — Appendix & Integrity" % (doc._page_no + 1))
     y = _draw_appendix(doc, bundle, docs, top - 12)
     _draw_integrity_footer_page(doc, docs, y - 20)
     doc.end_page()
@@ -3029,7 +3063,7 @@ def render_detail(bundle, docs, slots, diff, prev_date, out_path):
     # METHODOLOGY appendix (transparency) — the final page(s). 100% script-generated
     # from the module JSONs + the active scale; height-aware (spills to a
     # METHODOLOGY (continued) page when the scale/weight tables are long).
-    top = doc.begin_page()
+    top = doc.begin_page("Page %d — Methodology" % (doc._page_no + 1))
     _draw_methodology(doc, bundle, docs, top - 12)
     doc.end_page()
 
@@ -3172,7 +3206,7 @@ def render_delta(bundle, docs, slots, diff, prev_date, out_path):
     ticker, as_of = _ticker_as_of(docs)
     doc = Doc(out_path, ticker, "Delta Note", as_of, _footer_bits(docs))
     doc.total_pages = 1
-    top = doc.begin_page()
+    top = doc.begin_page("Page 1 — Delta Note")
     M = doc.MARGIN
     gutter = 16
     col_w = (doc.CONTENT_W - gutter) / 2

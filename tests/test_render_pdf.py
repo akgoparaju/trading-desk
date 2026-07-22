@@ -1548,5 +1548,139 @@ class TestRenderSmoke(unittest.TestCase):
                 os.path.join(new, "MU_Trade_Report_2026-07-16.pdf")))
 
 
+# --------------------------------------------------------------------------- #
+# O20 — PDF metadata + bookmarks (venv-guarded, same skipUnless as smoke tests).
+# --------------------------------------------------------------------------- #
+
+@unittest.skipUnless(_CAN_RENDER, "reportlab+matplotlib required for render smoke")
+class TestO20ReportPolish(unittest.TestCase):
+    """O20: PDF metadata (Title/Author/Subject) and bookmark outline verification.
+
+    Strategy: render real PDFs to a temp dir, then assert on the raw bytes.
+    reportlab writes the /Info dictionary and the /Outlines tree in uncompressed
+    plain-text form, so raw-byte matching is robust without a pypdf dependency.
+    """
+
+    def _prep_stamped(self, d):
+        """Prepare a bundle with a stamped pdf_slots.json (reuse smoke helper)."""
+        _mk_bundle(d)
+        path = _write_slots(d, _clean_slots())
+        rc, out, err = _qc_slots(d, path)
+        self.assertEqual(rc, 0, out + err)
+
+    def _raw(self, path):
+        with open(path, "rb") as fh:
+            return fh.read()
+
+    # -- helpers ------------------------------------------------------------ #
+
+    def test_exec_pdf_title_carries_ticker_and_date(self):
+        """Trade Report PDF /Info /Title contains the ticker and snapshot date."""
+        with tempfile.TemporaryDirectory() as d:
+            self._prep_stamped(d)
+            rc, out, err = _render(d, "exec")
+            self.assertEqual(rc, 0, out + err)
+            data = self._raw(os.path.join(d, "MU_Trade_Report_2026-07-16.pdf"))
+            # Title is "MU Trade Decision Report 2026-07-16".
+            self.assertIn(b"MU Trade Decision Report 2026-07-16", data)
+
+    def test_exec_pdf_author_carries_plugin_version(self):
+        """Trade Report PDF /Info /Author starts with 'trading-desk plugin v'."""
+        with tempfile.TemporaryDirectory() as d:
+            self._prep_stamped(d)
+            _render(d, "exec")
+            data = self._raw(os.path.join(d, "MU_Trade_Report_2026-07-16.pdf"))
+            self.assertIn(b"trading-desk plugin v", data)
+
+    def test_exec_pdf_subject_carries_ticker(self):
+        """Trade Report PDF /Info /Subject contains the ticker."""
+        with tempfile.TemporaryDirectory() as d:
+            self._prep_stamped(d)
+            _render(d, "exec")
+            data = self._raw(os.path.join(d, "MU_Trade_Report_2026-07-16.pdf"))
+            # Subject is "MU — Trade Report" (em-dash encoded, but "MU" is plain).
+            self.assertIn(b"Subject (MU", data)
+
+    def test_exec_pdf_has_outline_entries(self):
+        """Trade Report PDF /Outlines tree is present and has two entries."""
+        with tempfile.TemporaryDirectory() as d:
+            self._prep_stamped(d)
+            _render(d, "exec")
+            data = self._raw(os.path.join(d, "MU_Trade_Report_2026-07-16.pdf"))
+            # The catalog must reference an Outlines dict.
+            self.assertIn(b"/Outlines", data)
+            # Two bookmark entries: Page 1 and Page 2.
+            self.assertIn(b"Page 1", data)
+            self.assertIn(b"Page 2", data)
+
+    def test_exec_pdf_outline_count_is_two(self):
+        """Trade Report outline root /Count equals 2 (one entry per exec page)."""
+        with tempfile.TemporaryDirectory() as d:
+            self._prep_stamped(d)
+            _render(d, "exec")
+            data = self._raw(os.path.join(d, "MU_Trade_Report_2026-07-16.pdf"))
+            # Find the Outlines object and check /Count.
+            m = re.search(rb"/Outlines\s+(\d+)\s+0\s+R", data)
+            self.assertIsNotNone(m, "no /Outlines reference in catalog")
+            obj_id = m.group(1)
+            obj_m = re.search(
+                rb"%s 0 obj\s*<<[^>]*?/Count\s+(\d+)" % re.escape(obj_id),
+                data, re.DOTALL)
+            self.assertIsNotNone(obj_m, "Outlines object not found")
+            count = int(obj_m.group(1))
+            self.assertEqual(count, 2)
+
+    def test_detail_pdf_title_carries_ticker_and_date(self):
+        """Detail PDF /Info /Title contains 'MU Detail 2026-07-16'."""
+        with tempfile.TemporaryDirectory() as d:
+            self._prep_stamped(d)
+            rc, out, err = _render(d, "detail")
+            self.assertEqual(rc, 0, out + err)
+            data = self._raw(os.path.join(d, "MU_Detail_2026-07-16.pdf"))
+            self.assertIn(b"MU Detail 2026-07-16", data)
+
+    def test_detail_pdf_author_carries_plugin_version(self):
+        """Detail PDF /Info /Author starts with 'trading-desk plugin v'."""
+        with tempfile.TemporaryDirectory() as d:
+            self._prep_stamped(d)
+            _render(d, "detail")
+            data = self._raw(os.path.join(d, "MU_Detail_2026-07-16.pdf"))
+            self.assertIn(b"trading-desk plugin v", data)
+
+    def test_detail_pdf_has_multi_page_outline(self):
+        """Detail PDF outline has entries for all major sections."""
+        with tempfile.TemporaryDirectory() as d:
+            self._prep_stamped(d)
+            _render(d, "detail")
+            data = self._raw(os.path.join(d, "MU_Detail_2026-07-16.pdf"))
+            self.assertIn(b"/Outlines", data)
+            # Exec pages
+            self.assertIn(b"Page 1", data)
+            self.assertIn(b"Page 2", data)
+            # Why This Call
+            self.assertIn(b"Page 3", data)
+            # Evidence dimension label appears in bookmark titles
+            self.assertIn(b"Evidence", data)
+            # Tail sections
+            self.assertIn(b"Options", data)
+            self.assertIn(b"Methodology", data)
+
+    def test_detail_pdf_outline_has_at_least_seven_entries(self):
+        """Detail outline /Count >= 7 (min: 2 exec + why + evidence + 3 tail)."""
+        with tempfile.TemporaryDirectory() as d:
+            self._prep_stamped(d)
+            _render(d, "detail")
+            data = self._raw(os.path.join(d, "MU_Detail_2026-07-16.pdf"))
+            m = re.search(rb"/Outlines\s+(\d+)\s+0\s+R", data)
+            self.assertIsNotNone(m)
+            obj_id = m.group(1)
+            obj_m = re.search(
+                rb"%s 0 obj\s*<<[^>]*?/Count\s+(\d+)" % re.escape(obj_id),
+                data, re.DOTALL)
+            self.assertIsNotNone(obj_m)
+            count = int(obj_m.group(1))
+            self.assertGreaterEqual(count, 7)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.15.1 — 2026-07-22 · O20 report polish (PDF metadata + bookmarks + untruncate)
+
+PDF metadata + bookmarks + invalidation untruncation for `render_pdf.py`. No new
+scoring logic or calibration constants.
+
+- **O20 — PDF document metadata.** `Doc.__init__` sets `/Info` Title/Author/Subject
+  on the reportlab canvas immediately after creation. Title: `<TICKER> Trade Decision
+  Report <YYYY-MM-DD>` (exec), `<TICKER> Detail <YYYY-MM-DD>`, `<TICKER> Delta Note
+  <YYYY-MM-DD>` — ticker and date pulled from `snapshot.meta` (never hardcoded).
+  Author: `trading-desk plugin v<version>` via `render_report._plugin_version()`.
+  Subject: `<TICKER> — <doc type>`. Applies to all three render paths.
+
+- **O20 — PDF outline / bookmarks.** `Doc.begin_page(title=None)` extended: when
+  `title` is provided, calls `c.bookmarkPage(key)` + `c.addOutlineEntry(title, key,
+  level=0)` so the PDF has a navigable panel. Exec gets 2 entries (Decision,
+  Evidence); Detail gets one per section (Decision, Evidence, Why This Call, optional
+  Company Context, per-dimension Evidence pages, Options & Volatility, Downside &
+  Monitoring, Appendix & Integrity, Methodology). Continuation pages opened from
+  inside `_draw_methodology` / `_draw_context_narrative` (FINDINGS continued,
+  METHODOLOGY continued) are not bookmarked — they are overflows of a parent section.
+
+- **O20 — Invalidation untruncation.** `_trade_plan_table` was applying
+  `doc.truncate()` to the Invalidation row identically to all other rows — clipping
+  long fundamental-invalidation thresholds. The row now uses shrink-to-fit (font size
+  walks down from 8pt in 0.25pt steps, floor 5.5pt) so the full text is visible
+  within the fixed row height. All other table rows continue to use truncate.
+  Confirmed on GOOG: full 223-char invalidation renders (was silently cut by ~87%).
+
+- **Tests:** 9 new `@skipUnless(_CAN_RENDER)` tests in `TestO20ReportPolish`
+  asserting Title/Author/Subject in raw PDF bytes and outline `/Count` / section
+  labels for both exec and detail renders. Files: `tests/test_render_pdf.py`,
+  `scripts/render_pdf.py`. Suite: **1709 passed, 2 skipped**.
+
 ## 0.15.0 — 2026-07-21 · GOOG-review capital-authorization spine + outstanding-tasks
 
 Shipped from the GOOG review validation: **G1** (reconciled issuer market cap), **G4a** (decision contract +
