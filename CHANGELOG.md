@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.18.0 — 2026-07-22 · Downstream integration contract (downstream FR-1/2/3/5-id/6)
+
+Makes the plugin's per-ticker output a stable, versioned, machine-consumable contract for a downstream
+governed portfolio-OS (a downstream portfolio-OS), per its reviewed integration requests. The heavy analytics were
+already computed; this release **consolidates + versions + exposes** them — near-zero new computation.
+The consolidated decision object is the single file a consumer reads and pins against. Suite **1924 pass,
+2 skip** (was 1894/2; +30 net new tests). Decision-contract gates verified PASS end-to-end on the live
+GOOG bundle (Step-4b and post-docket states).
+
+- **FR-1 — consolidated `module_decision.json` @ `contract_version 2.0.0`** (`scripts/decision_contract.py`).
+  ADDITIVE superset: every existing 1.1.0 capital-authorization field is retained (`action_owned/unowned`,
+  `capital_eligible`, `capital_blockers[]`, `ev_band`, `ev_robust_vs_hurdle`, `entry_state`,
+  `hurdle_clearing_price`, hurdles), and the full analysis contract is folded in as **native-shape-verbatim**
+  sections sourced from the already-scored bundle: `composite`, `dimensions[]`, `ev`, `flags`, `sizing`,
+  `plan`, `risk_units`, `invalidation`, `expression` (+ options executability), `valuation_anchors`,
+  `coverage`, `rubric_versions`, `run_utc`, `latest_trading_day`. `build_contract(docs)` stays **PURE**;
+  `load_docs()` expanded to the full module family + `coverage/*.json` (resolves the sibling `../coverage/`
+  layout). Omit-if-source-absent preserved — no field is ever fabricated. 43 top-level keys on the live GOOG run.
+- **FR-2 — structured `catalysts[]`** (assembled in `decision_contract`). Earnings + dividend elements from
+  `snapshot.events.{next_earnings,dividends,implied_move}` + `module_tradeplan.expression`; the ONE derivation
+  is `days_out` (calendar days from `as_of`). Prior prose-only earnings/ex-dividend dates are now
+  ISO-8601 machine fields with `type`, `in_thesis`, `implied_move_pct`.
+- **FR-3 — unified output `schema_version`** (`scripts/_artifact.py` NEW). `emit_json(doc, path, schema_version=
+  OUTPUT_SCHEMA_VERSION="1.0.0")` stamps a top-level `schema_version` at write-time **without mutating the
+  in-memory dict** (so pure build_* functions and their tests are byte-unaffected). Routed every scorer +
+  decision + render writer through it (`score_*`, `trade_plan`, `options_strategy`, `valuation_reconcile`,
+  `decision_contract`, `render_report`, `render_charts`, and the `_stamp_slots`/`_stamp_context` in-place
+  stampers). The snapshot keeps its own `meta.schema_version` (distinct concern); `manifest.json` (fetch-layer)
+  and the transcribed `coverage/*.json` are exempt. `rubric_version` (scoring version) is untouched.
+  `docs/CANONICAL_CONTRACT.md` gains a `contract_version: 1.0.0` + a CHANGELOG (the raw-file INPUT contract).
+- **FR-5 (id) — deterministic, refresh-stable `thesis.id`** (`decision_contract`). `thesis.registered_date =
+  coverage_manifest.generated_utc[:10]`; `thesis.id = "<TICKER>-<registered_date>"` (e.g. `GOOG-2026-07-21`).
+  Stable across refreshes with NO new carry-forward infra — coverage is built once and carried forward, so its
+  generation date is the natural, deterministic inception. `variant`/`catalyst_clarity` from composite flags;
+  `next_review` deferred (no deterministic bundle source — the heartbeat schedules off `catalysts[].date_iso`).
+- **FR-6 — enumerated technical-invalidation `operator`** (`scripts/trade_plan.py`). `technical_leg` gains an
+  `operator` ∈ `TECHNICAL_INVALIDATION_OPERATORS` (`weekly_close_below | close_below | close_above |
+  weekly_close_above | intraday_below | intraday_above`) deterministically mapped from the human `condition`
+  (unrecognized → `null`, never guessed); `condition`/`level` unchanged. A downstream monitor can now evaluate
+  invalidation mechanically. Carried through into `decision.invalidation.technical.operator`.
+- **`docs/decision.schema.json` (NEW)** — published JSON Schema (draft 2020-12) for the 2.0.0 object; `required`
+  = the capital block + core; added sections `additionalProperties: true` so module evolution won't break a
+  consumer's pin; pins the leaves the consumer binds (capital block, `invalidation.technical.operator` enum,
+  `catalysts[].{date_iso,type,days_out}`, `thesis.id`); `contract_version` const `"2.0.0"`.
+- **Blocking decision-contract QC gate** (`scripts/report_qc.py --decision-gates`), wired into the report-renderer
+  Step 4b + full-trade-analysis Phase 5 (blocking on every full run and refresh, mirroring the existing gate
+  pattern): **schema_version_present** (every scorer + decision module carries `schema_version`; snapshot /
+  fetch-manifest / coverage-inputs exempt), **decision_subset_of_bundle** (every non-derived numeric leaf in
+  `module_decision.json` equals a bundle value within 1e-6 — nothing fabricated; derived-leaf allowlist for
+  hurdles/ev_band/days_out/thesis.id/actions), **decision_schema_valid** (stdlib structural validator — no new
+  dependency; uses `jsonschema` if ever vendored). A stale pre-0.18.0 bundle correctly FAILS the presence check.
+
 ## 0.17.0 — 2026-07-22 · O15 issuer/security master (schema 0.4.0)
 
 Formalizes the security-level vs issuer-level split the snapshot previously left implicit. AV's

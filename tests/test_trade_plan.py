@@ -405,6 +405,110 @@ class TestInvalidation(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# FR-6: technical-invalidation operator enum.
+# --------------------------------------------------------------------------- #
+
+class TestTechnicalInvalidationOperator(unittest.TestCase):
+    """FR-6: build_invalidation emits operator alongside condition and level."""
+
+    def _inval(self):
+        """Standard invalidation from the fixture bundle (entries 95/90, ladder below)."""
+        entries = tp.build_entries(_LAST, _technical_doc()["ladder"],
+                                   _composite_doc()["ev"],
+                                   _risk_doc()["tables"]["downside_map"])
+        return tp.build_invalidation(entries, _technical_doc()["ladder"],
+                                     "GM stalls", "below 35%", "thesis pillar")
+
+    # (a) standard "weekly close below" → operator "weekly_close_below"
+    def test_standard_condition_maps_to_operator(self):
+        inval = self._inval()
+        self.assertEqual(inval["technical_leg"]["operator"], "weekly_close_below")
+
+    def test_operator_in_enum_constant(self):
+        # The emitted value must be a member of the published enum set.
+        inval = self._inval()
+        self.assertIn(inval["technical_leg"]["operator"],
+                      tp.TECHNICAL_INVALIDATION_OPERATORS)
+
+    # (b) unrecognized condition → operator None (never guess an enum)
+    def test_unrecognized_condition_returns_none(self):
+        op = tp._condition_to_operator("breaches support")
+        self.assertIsNone(op)
+
+    def test_unrecognized_condition_none_not_guessed(self):
+        # A plausible but non-canonical phrasing must not silently map.
+        op = tp._condition_to_operator("weekly close under")
+        self.assertIsNone(op)
+
+    def test_empty_string_returns_none(self):
+        op = tp._condition_to_operator("")
+        self.assertIsNone(op)
+
+    def test_non_string_returns_none(self):
+        self.assertIsNone(tp._condition_to_operator(None))
+        self.assertIsNone(tp._condition_to_operator(42))
+
+    # (c) condition and level are still present and unchanged
+    def test_condition_still_present_and_unchanged(self):
+        inval = self._inval()
+        self.assertEqual(inval["technical_leg"]["condition"], "weekly close below")
+
+    def test_level_still_present_and_unchanged(self):
+        # The fixture gives technical stop at 82.0 (first proven support below entry_2=90).
+        inval = self._inval()
+        self.assertEqual(inval["technical_leg"]["level"], 82.0)
+
+    def test_technical_leg_has_exactly_three_keys(self):
+        # condition, level, operator — no extra fields, no missing fields.
+        inval = self._inval()
+        self.assertEqual(set(inval["technical_leg"].keys()),
+                         {"condition", "level", "operator"})
+
+    # -- normalization variants (case/whitespace/synonym tolerance) -----------
+
+    def test_normalization_uppercase(self):
+        self.assertEqual(tp._condition_to_operator("Weekly Close Below"),
+                         "weekly_close_below")
+
+    def test_normalization_extra_whitespace(self):
+        self.assertEqual(tp._condition_to_operator("  weekly  close  below  "),
+                         "weekly_close_below")
+
+    def test_all_known_synonyms_map_to_valid_enum(self):
+        # Every synonym must resolve to a member of TECHNICAL_INVALIDATION_OPERATORS.
+        for human, expected in [
+            ("weekly close below", "weekly_close_below"),
+            ("close below", "close_below"),
+            ("close above", "close_above"),
+            ("weekly close above", "weekly_close_above"),
+            ("intraday below", "intraday_below"),
+            ("intraday above", "intraday_above"),
+        ]:
+            with self.subTest(human=human):
+                op = tp._condition_to_operator(human)
+                self.assertEqual(op, expected)
+                self.assertIn(op, tp.TECHNICAL_INVALIDATION_OPERATORS)
+
+    # -- CLI integration: operator visible in the written module_tradeplan.json --
+
+    def test_cli_operator_present_in_module(self):
+        import shutil
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        _full_bundle(d)
+        cmd = [sys.executable, SCRIPT, "--stock-plan", "--bundle", d]
+        cmd += _base_fund_flags()
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(d, "module_tradeplan.json")) as fh:
+            doc = json.load(fh)
+        tech = doc["stock_plan"]["invalidation"]["technical_leg"]
+        self.assertEqual(tech["operator"], "weekly_close_below")
+        self.assertEqual(tech["condition"], "weekly close below")
+        self.assertIn("level", tech)
+
+
+# --------------------------------------------------------------------------- #
 # Sizing: full Kelly arithmetic via ev_kelly.
 # --------------------------------------------------------------------------- #
 

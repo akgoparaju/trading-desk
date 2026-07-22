@@ -36,6 +36,15 @@ import sys
 if sys.version_info < (3, 10):
     sys.exit("trading-desk requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
 
+# Ensure the repo root is importable when run directly (``python3
+# scripts/valuation_reconcile.py``) so ``from scripts._artifact import ...``
+# resolves; ``-m scripts.valuation_reconcile`` already has it.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from scripts._artifact import emit_json
+
 SKILL = "valuation-reconcile"
 RECONCILE_VERSION = "1.0.0"
 
@@ -348,8 +357,7 @@ def main(argv=None):
     doc = build_reconcile(fundamental, scenario_drivers, last)
 
     out = args.out or os.path.join(args.bundle, "module_valuation_reconcile.json")
-    with open(out, "w") as fh:
-        json.dump(doc, fh, indent=2, sort_keys=True)
+    emit_json(doc, out)
     print(out)
     return 0
 

@@ -60,6 +60,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from scripts import render_report, chain as chain_mod, decision_contract
+from scripts._artifact import emit_json
 
 _WORD_CAP = 2100
 _ORPHAN_CAP = 20
@@ -1271,6 +1272,400 @@ def check_judgment_flag_citations(bundle):
 
 
 # --------------------------------------------------------------------------- #
+# FR-3 decision-contract gates (BLOCKING):
+#   (a) schema_version presence on every module artifact in the bundle;
+#   (b) decision ⊆ bundle numeric check (every non-derived numeric leaf in
+#       module_decision.json traces to a numeric leaf in the source bundle);
+#   (c) module_decision.json validates against docs/decision.schema.json
+#       (hand-rolled stdlib validator — jsonschema is not a dependency).
+# --------------------------------------------------------------------------- #
+
+# Bundle files that MUST carry a top-level ``schema_version`` (FR-3 §5). The
+# snapshot is EXEMPT: it carries its own ``meta.schema_version`` (the snapshot's
+# own shape version, a distinct concern). ``coverage/*.json`` live at the bundle-
+# sibling ``../coverage/`` in the live layout; they are checked when present.
+#
+# REQUIRED set = ONLY the emit_json-stamped, downstream output-contract files that
+# are GUARANTEED present when the decision gates run (right after the full md
+# report render): the 7 scorer modules + module_decision.json. Each of these is
+# written through scripts._artifact.emit_json, so each carries a top-level
+# ``schema_version``.
+#
+# manifest.json is NOT required here: it is the snapshot-fetch manifest authored by
+# the market-snapshot skill/LLM (not a scorer, not routed through emit_json, not
+# part of the downstream output contract) and will never carry ``schema_version`` --
+# it is exempt for the same reason the snapshot itself is exempt.
+#
+# pdf_slots.json is NOT required here: it is a docket-layer artifact, LLM-authored
+# and written AFTER the report gate, and is skipped entirely in md-only mode. It is
+# moved to OPTIONAL (checked only when present); when produced it is stamped via
+# _stamp_slots -> emit_json, so a present pdf_slots.json will carry schema_version.
+_SCHEMA_VERSION_REQUIRED_FILES = (
+    "module_technical.json",
+    "module_fundamental.json",
+    "module_sentiment.json",
+    "module_risk.json",
+    "module_composite.json",
+    "module_tradeplan.json",
+    "module_options.json",
+    "module_decision.json",
+)
+# Optional module artifacts: checked for schema_version only when present.
+# pdf_slots.json is docket-layer (absent in md-only mode; stamped by _stamp_slots
+# via emit_json when produced). module_context.json is stamped by _stamp_context via
+# emit_json when produced. module_valuation_reconcile.json is written via emit_json.
+_SCHEMA_VERSION_OPTIONAL_FILES = (
+    "pdf_slots.json",
+    "module_context.json",
+    "module_valuation_reconcile.json",
+)
+# coverage/*.json (valuation_anchors.json, coverage_manifest.json) are EXEMPT from
+# the schema_version presence gate for the same reason manifest.json is: they are
+# coverage-layer INPUTS, TRANSCRIBED/authored by the coverage skill (the
+# full-trade-analysis skill pins their shape EXACTLY, and that shape carries no
+# ``schema_version`` — "Transcribe, never compute"), never routed through emit_json,
+# and never part of the downstream emit_json output contract. Their shape/coherence
+# is gated STRUCTURALLY by coverage_qc.py (manifest_shape, anchors_coherent), not by
+# this key check. The decision ⊆-bundle check still consumes their numeric leaves as
+# a source. Held empty so a present coverage file is not falsely flagged.
+_SCHEMA_VERSION_COVERAGE_FILES = ()
+# scenarios.json is a top-level JSON ARRAY (score_composite's --scenarios input:
+# a list of {name, prob, price_target}). A JSON array structurally CANNOT carry a
+# top-level ``schema_version`` key, and no pipeline script writes it (the skill/LLM
+# constructs it as an input). It is therefore EXEMPT from the key requirement when
+# it is an array — mirroring the snapshot exemption. If a future scenarios.json is
+# authored as an OBJECT it is held to the requirement like any other module.
+_SCHEMA_VERSION_ARRAY_INPUT_FILES = (
+    "scenarios.json",
+)
+
+
+def _iter_numeric_leaves_with_path(obj, path=""):
+    """Yield ``(json_path, float_value)`` for every NUMERIC (non-bool) leaf.
+
+    Path notation mirrors the §3 allowlist: dot for dict keys, ``[i]`` for list
+    indices (e.g. ``ev_band[0]``, ``catalysts[1].days_out``). Bools and strings
+    are NOT numeric leaves. Reuses the same numeric semantics as
+    _iter_numeric_leaves (bool is excluded before the int/float check).
+    """
+    if isinstance(obj, bool):
+        return
+    if isinstance(obj, (int, float)):
+        yield path, float(obj)
+        return
+    if isinstance(obj, str):
+        return
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            child = f"{path}.{k}" if path else str(k)
+            yield from _iter_numeric_leaves_with_path(v, child)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            yield from _iter_numeric_leaves_with_path(v, f"{path}[{i}]")
+
+
+# §3 derived-field allowlist: numeric leaves that are COMPUTED (not verbatim from
+# a bundle leaf) and are therefore EXEMPT from the ⊆-bundle equality check. Matched
+# by exact top-level key OR by structural path pattern (index-agnostic).
+_DERIVED_ALLOWLIST_EXACT = frozenset({
+    "annual_return_hurdle",
+    "horizon_months",
+    "scenario_horizon_months",
+    "ev_uncertainty_halfwidth",
+    "ev_uncertainty_k",
+    "ev_robust_vs_hurdle",
+    "hurdle_clearing_price",   # alias of ev_breakeven_entry (recomputed)
+    "capital_eligible",
+    "action_owned",
+    "action_unowned",
+    "entry_state",
+    "contract_version",
+    "schema_version",
+})
+# Structural (index-bearing) derived paths. Each entry is matched by normalizing a
+# concrete path's list indices to ``[]`` and comparing.
+_DERIVED_ALLOWLIST_PATTERNS = frozenset({
+    "ev_band[]",              # ev_band[0], ev_band[1] — recomputed uncertainty band
+    "capital_blockers[]",     # strings (never numeric) but listed for completeness
+    "catalysts[].days_out",   # date arithmetic (as_of − date_iso)
+    "thesis.id",              # f"{ticker}-{registered_date}" (string)
+    "thesis.registered_date",  # coverage generated_utc[:10] (string)
+})
+
+
+def _normalize_index_path(path):
+    """Collapse concrete list indices to ``[]`` so ``catalysts[1].days_out`` and
+    ``ev_band[0]`` match the index-agnostic §3 patterns."""
+    return re.sub(r"\[\d+\]", "[]", path)
+
+
+def is_derived_path(path):
+    """True iff ``path`` is a §3 derived (computed) leaf, exempt from the ⊆ check.
+
+    A leaf is derived when its top-level segment is an exact-allowlisted key, or
+    its index-normalized full path matches a structural derived pattern.
+    """
+    top = re.split(r"[.\[]", path, 1)[0]
+    if top in _DERIVED_ALLOWLIST_EXACT:
+        return True
+    return _normalize_index_path(path) in _DERIVED_ALLOWLIST_PATTERNS
+
+
+def check_schema_version_presence(bundle):
+    """BLOCKING: every emit_json output-contract module artifact in the bundle
+    carries top-level ``schema_version`` (FR-3 §5).
+
+    Required output-contract artifacts (the 7 scorer modules + module_decision.json)
+    MUST be present AND stamped; optional emit_json artifacts (pdf_slots.json,
+    module_context.json, module_valuation_reconcile.json) are checked only when
+    present. EXEMPT (never routed through emit_json, so never carrying
+    ``schema_version``): the snapshot (meta.schema_version-stamped), the fetch-layer
+    manifest.json, the array-input scenarios.json, and the transcribed coverage
+    inputs (valuation_anchors.json, coverage_manifest.json — gated structurally by
+    coverage_qc.py). Reports EVERY missing/unstamped file.
+    """
+    check_name = "schema_version_present"
+    missing = []
+
+    def _check_file(path, label, required, array_exempt=False):
+        if not os.path.isfile(path):
+            if required:
+                missing.append(f"{label} (file absent)")
+            return
+        try:
+            with open(path) as fh:
+                doc = json.load(fh)
+        except (OSError, ValueError) as exc:
+            missing.append(f"{label} (unreadable: {exc})")
+            return
+        # A top-level JSON array cannot carry a top-level schema_version key; when
+        # array_exempt is set (scenarios.json), an array shape is accepted as-is.
+        if array_exempt and isinstance(doc, list):
+            return
+        if not (isinstance(doc, dict) and "schema_version" in doc):
+            missing.append(f"{label} (no top-level schema_version)")
+
+    for name in _SCHEMA_VERSION_REQUIRED_FILES:
+        _check_file(os.path.join(bundle, name), name, required=True)
+    for name in _SCHEMA_VERSION_ARRAY_INPUT_FILES:
+        _check_file(os.path.join(bundle, name), name, required=True,
+                    array_exempt=True)
+    for name in _SCHEMA_VERSION_OPTIONAL_FILES:
+        _check_file(os.path.join(bundle, name), name, required=False)
+    # coverage/*.json: live layout is a SIBLING (../coverage/); reuse the
+    # contract's resolver so bundle-local and sibling layouts both work.
+    for name in _SCHEMA_VERSION_COVERAGE_FILES:
+        in_bundle = os.path.join(bundle, "coverage", name)
+        sibling = os.path.join(os.path.dirname(os.path.normpath(bundle)),
+                               "coverage", name)
+        resolved = in_bundle if os.path.isfile(in_bundle) else sibling
+        _check_file(resolved, f"coverage/{name}", required=False)
+
+    if missing:
+        return _result(check_name, False,
+                       "missing top-level schema_version on: " + "; ".join(missing))
+    return _result(check_name, True,
+                   "every module artifact carries a top-level schema_version")
+
+
+def check_decision_subset_of_bundle(bundle):
+    """BLOCKING: every non-derived numeric leaf in module_decision.json equals
+    (abs tol 1e-6) some numeric leaf in the source bundle union (FR-3 §5).
+
+    Bundle union = {module_composite, module_tradeplan, module_options,
+    module_technical, module_sentiment, module_risk, module_fundamental,
+    snapshot, coverage/valuation_anchors, coverage/coverage_manifest} — loaded via
+    decision_contract.load_docs so the sibling ``../coverage/`` layout resolves.
+    §3-derived leaves (ev_band, days_out, uncertainty band, hurdles, …) are exempt.
+    On failure, reports the FIRST offending decision path + value.
+    """
+    check_name = "decision_subset_of_bundle"
+
+    decision_path = os.path.join(bundle, "module_decision.json")
+    if not os.path.isfile(decision_path):
+        return _result(check_name, False, "module_decision.json absent")
+    try:
+        with open(decision_path) as fh:
+            decision = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return _result(check_name, False,
+                       f"cannot parse module_decision.json: {exc}")
+
+    # Bundle union of numeric leaves (rounded to the comparison tolerance).
+    docs = decision_contract.load_docs(bundle)
+    union = set()
+    for key, doc in docs.items():
+        if key == "module_context":
+            # context is a citation registry, not a numeric source module; the
+            # decision never copies numbers from it. Excluding it keeps the union
+            # aligned with §5's stated source set.
+            continue
+        if doc is None:
+            continue
+        for val in _iter_numeric_leaves(doc):
+            union.add(round(val, 6))
+
+    tol = 1e-6
+
+    def _in_union(v):
+        r = round(v, 6)
+        # Exact-rounded hit is the common path; fall back to tolerance scan for
+        # values whose rounding lands one ULP off a bundle leaf.
+        if r in union:
+            return True
+        return any(abs(u - v) <= tol for u in union)
+
+    orphans = []
+    for path, val in _iter_numeric_leaves_with_path(decision):
+        if is_derived_path(path):
+            continue
+        if not _in_union(val):
+            orphans.append((path, val))
+
+    if orphans:
+        path, val = orphans[0]
+        extra = f" (+{len(orphans) - 1} more)" if len(orphans) > 1 else ""
+        return _result(check_name, False,
+                       f"decision numeric leaf {path}={val} not found in bundle"
+                       f"{extra}")
+    return _result(check_name, True,
+                   "every non-derived decision numeric leaf traces to the bundle")
+
+
+# --------------------------------------------------------------------------- #
+# Hand-rolled stdlib structural validator for docs/decision.schema.json.
+# jsonschema is NOT a dependency (checked: absent from the .venv); FR-3 forbids
+# adding one, so we implement the subset of JSON-Schema draft-2020-12 the decision
+# schema uses: required-keys, type (incl. union types + integer), enum, const,
+# minItems/maxItems, and object/array item recursion via properties + items.
+# --------------------------------------------------------------------------- #
+
+_JSON_TYPE_CHECKS = {
+    "object": lambda v: isinstance(v, dict),
+    "array": lambda v: isinstance(v, list),
+    "string": lambda v: isinstance(v, str),
+    "boolean": lambda v: isinstance(v, bool),
+    # JSON "number" admits ints and floats but NOT bools; "integer" admits ints
+    # (and integral floats, per JSON-Schema) but NOT bools.
+    "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    "integer": lambda v: (isinstance(v, int) and not isinstance(v, bool))
+    or (isinstance(v, float) and v.is_integer()),
+    "null": lambda v: v is None,
+}
+
+
+def _type_matches(value, type_spec):
+    """True iff ``value`` satisfies a JSON-Schema ``type`` (string or list)."""
+    if type_spec is None:
+        return True
+    types = type_spec if isinstance(type_spec, list) else [type_spec]
+    return any(_JSON_TYPE_CHECKS.get(t, lambda v: True)(value) for t in types)
+
+
+def _validate_against_schema(value, schema, path, errors):
+    """Recursively validate ``value`` against ``schema``; append messages to
+    ``errors``. Implements the draft-2020-12 subset the decision schema uses."""
+    # type
+    if "type" in schema and not _type_matches(value, schema["type"]):
+        errors.append(f"{path or '<root>'}: expected type {schema['type']}, "
+                      f"got {type(value).__name__}")
+        return  # further keyword checks assume the type held
+    # const
+    if "const" in schema and value != schema["const"]:
+        errors.append(f"{path or '<root>'}: expected const {schema['const']!r}, "
+                      f"got {value!r}")
+    # enum
+    if "enum" in schema and value not in schema["enum"]:
+        errors.append(f"{path or '<root>'}: {value!r} not in enum {schema['enum']}")
+    # object: required + properties
+    if isinstance(value, dict):
+        for req in schema.get("required", []):
+            if req not in value:
+                errors.append(f"{path or '<root>'}: missing required key '{req}'")
+        for prop, subschema in (schema.get("properties") or {}).items():
+            if prop in value:
+                child = f"{path}.{prop}" if path else prop
+                _validate_against_schema(value[prop], subschema, child, errors)
+    # array: minItems/maxItems + items
+    if isinstance(value, list):
+        if "minItems" in schema and len(value) < schema["minItems"]:
+            errors.append(f"{path or '<root>'}: array shorter than minItems "
+                          f"{schema['minItems']}")
+        if "maxItems" in schema and len(value) > schema["maxItems"]:
+            errors.append(f"{path or '<root>'}: array longer than maxItems "
+                          f"{schema['maxItems']}")
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for i, item in enumerate(value):
+                _validate_against_schema(item, item_schema, f"{path}[{i}]", errors)
+
+
+def _decision_schema_path():
+    """Absolute path to docs/decision.schema.json (repo-root relative)."""
+    return os.path.join(_REPO_ROOT, "docs", "decision.schema.json")
+
+
+def check_decision_schema(bundle):
+    """BLOCKING: module_decision.json validates against docs/decision.schema.json.
+
+    Uses jsonschema when available; otherwise the hand-rolled stdlib validator
+    above (jsonschema is not a project dependency — FR-3 forbids adding one).
+    Reports the FIRST few validation errors.
+    """
+    check_name = "decision_schema_valid"
+
+    schema_path = _decision_schema_path()
+    if not os.path.isfile(schema_path):
+        return _result(check_name, False,
+                       f"schema not found: {schema_path}")
+    decision_path = os.path.join(bundle, "module_decision.json")
+    if not os.path.isfile(decision_path):
+        return _result(check_name, False, "module_decision.json absent")
+    try:
+        with open(schema_path) as fh:
+            schema = json.load(fh)
+        with open(decision_path) as fh:
+            decision = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return _result(check_name, False, f"cannot load inputs: {exc}")
+
+    try:
+        import jsonschema  # noqa: F401  (optional; used only if vendored)
+        validator = jsonschema.Draft202012Validator(schema)
+        errs = sorted(validator.iter_errors(decision), key=lambda e: e.path)
+        if errs:
+            first = errs[0]
+            loc = "/".join(str(p) for p in first.path) or "<root>"
+            return _result(check_name, False,
+                           f"schema violation at {loc}: {first.message}"
+                           f" ({len(errs)} total)")
+        return _result(check_name, True,
+                       "module_decision.json validates against decision.schema.json"
+                       " (jsonschema)")
+    except ImportError:
+        pass  # fall through to the stdlib validator
+
+    errors = []
+    _validate_against_schema(decision, schema, "", errors)
+    if errors:
+        extra = f" (+{len(errors) - 1} more)" if len(errors) > 1 else ""
+        return _result(check_name, False,
+                       f"schema violation — {errors[0]}{extra}")
+    return _result(check_name, True,
+                   "module_decision.json validates against decision.schema.json"
+                   " (stdlib validator)")
+
+
+def run_decision_gates(bundle):
+    """Run the three FR-3 decision-contract gates; return a result list."""
+    return [
+        check_schema_version_presence(bundle),
+        check_decision_subset_of_bundle(bundle),
+        check_decision_schema(bundle),
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # Orchestration.
 # --------------------------------------------------------------------------- #
 
@@ -1435,8 +1830,10 @@ def _stamp_slots(slots_path, slots):
     stamped["qc_passed"] = True
     stamped["checked_utc"] = datetime.now(timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
-    with open(slots_path, "w") as fh:
-        json.dump(stamped, fh, indent=2)
+    # Route through emit_json so the written file gains a top-level
+    # ``schema_version`` (the downstream stamp), while preserving this writer's
+    # historical NON-sorted, indent=2 byte formatting via sort_keys=False.
+    emit_json(stamped, slots_path, sort_keys=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -1720,8 +2117,10 @@ def _stamp_context(context_path, module):
         "qc_passed": True,
         "checked_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
-    with open(context_path, "w") as fh:
-        json.dump(stamped, fh, indent=2)
+    # Route through emit_json so the written file gains a top-level
+    # ``schema_version`` alongside the module's existing keys, while preserving this
+    # writer's historical NON-sorted, indent=2 byte formatting via sort_keys=False.
+    emit_json(stamped, context_path, sort_keys=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -1791,6 +2190,12 @@ def main(argv=None):
                              "number_provenance over its prose + structural checks "
                              "over its findings/live_tape/mode; stamps qc.qc_passed="
                              "true INTO the file on pass)")
+    parser.add_argument("--decision-gates", dest="decision_gates",
+                        action="store_true",
+                        help="run the FR-3 decision-contract gates over the bundle: "
+                             "schema_version presence on every module artifact, the "
+                             "decision ⊆ bundle numeric check, and validation of "
+                             "module_decision.json against docs/decision.schema.json")
     parser.add_argument("--delta", action="store_true",
                         help="treat the report as a delta report (checks 1/9/11)")
     parser.add_argument("--previous", default=None,
@@ -1804,12 +2209,23 @@ def main(argv=None):
     if not os.path.isdir(args.bundle):
         print(f"ERROR: bundle directory not found: {args.bundle}", file=sys.stderr)
         return 1
-    if sum(bool(x) for x in (args.report, args.pdf_slots, args.context)) != 1:
-        print("ERROR: pass exactly one of --report, --pdf-slots, or --context",
-              file=sys.stderr)
+    if sum(bool(x) for x in (args.report, args.pdf_slots, args.context,
+                             args.decision_gates)) != 1:
+        print("ERROR: pass exactly one of --report, --pdf-slots, --context, or "
+              "--decision-gates", file=sys.stderr)
         return 1
 
     waiver_reasons = _parse_waivers(args.waive)
+
+    # ------------------------- decision-gates mode ------------------------- #
+    if args.decision_gates:
+        results = run_decision_gates(args.bundle)
+        results, unwaived = _apply_waivers(results, waiver_reasons)
+        print(_render_table(results, set(waiver_reasons)))
+        print()
+        passed = unwaived == 0
+        print("DECISION GATES: " + ("PASS" if passed else "FAIL"))
+        return 0 if passed else 1
 
     # --------------------------- pdf_slots mode --------------------------- #
     if args.pdf_slots:

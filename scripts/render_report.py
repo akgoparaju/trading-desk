@@ -43,6 +43,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from scripts import decision_contract  # noqa: E402  (after sys.path setup)
+from scripts._artifact import emit_json  # noqa: E402  (after sys.path setup)
 
 # Required module files for a FULL report (each missing -> exit 2 naming it).
 _REQUIRED_MODULES = [
@@ -1330,8 +1331,7 @@ def main(argv=None):
     # the bundle dir (not the report's parent), next to module_composite.json.
     contract = decision_contract.build_contract(docs)
     decision_path = os.path.join(args.bundle, "module_decision.json")
-    with open(decision_path, "w") as fh:
-        json.dump(contract, fh, indent=2, sort_keys=True)
+    emit_json(contract, decision_path)
 
     print(out)
     return 0

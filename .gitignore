@@ -8,3 +8,6 @@ snapshot_*.json
 trading_desk_config.json
 trading_desk_config/
 trading_desk_*/
+
+# Claude working docs (not shipped)
+claudedocs/

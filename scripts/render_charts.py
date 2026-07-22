@@ -45,6 +45,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from scripts import tdstyle
+from scripts._artifact import emit_json
 from scripts.build_snapshot import load_daily_raw, parse_daily_rows
 
 # Charts by set (order = render order = manifest order).
@@ -1247,8 +1248,8 @@ def main(argv=None):
     names = _chart_names(args.which)
     manifest = render_set(docs, names, out_dir)
 
-    with open(os.path.join(out_dir, "charts_manifest.json"), "w") as fh:
-        json.dump({"set": args.which, "charts": manifest}, fh, indent=2)
+    emit_json({"set": args.which, "charts": manifest},
+              os.path.join(out_dir, "charts_manifest.json"), sort_keys=False)
 
     ok = sum(1 for m in manifest if m["status"] == "ok")
     skipped = sum(1 for m in manifest if m["status"] == "skipped")

@@ -120,6 +120,7 @@ if _REPO_ROOT not in sys.path:
 from scripts import build_snapshot
 from scripts import confidence
 from scripts import sector_scales
+from scripts._artifact import emit_json
 
 RUBRIC_VERSION = "1.2.0"
 SKILL_NAME = "fundamental"
@@ -1323,8 +1324,7 @@ def main(argv=None):
                        adjusted=adjusted)
 
     out = args.out or os.path.join(args.bundle, "module_fundamental.json")
-    with open(out, "w") as fh:
-        json.dump(doc, fh, indent=2, sort_keys=True)
+    emit_json(doc, out)
     print(out)
     return 0
 

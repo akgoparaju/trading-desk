@@ -1,5 +1,10 @@
 # Canonical raw-file contract
 
+`contract_version: 1.0.0` — see the [CHANGELOG](#changelog) at the foot of this
+document. This version pins the *input* raw-file contract; the pipeline's *output*
+artifacts carry a separate `schema_version` (see `scripts/_artifact.py`,
+`OUTPUT_SCHEMA_VERSION`).
+
 The source-neutral interface between a *data source* and the trading-desk pipeline.
 
 `scripts/build_snapshot.py` and `scripts/chain.py` are the ONLY readers of raw files.
@@ -217,3 +222,22 @@ The QC gate audits the RESULT regardless of how the raw file was produced — a
 correct adapter passes the same reconciliation checks (mktcap, P/E, net-cash, MA
 ordering, ranges, spot-check tolerance, options freshness, staleness) as a native
 Alpha Vantage bundle.
+
+---
+
+## CHANGELOG
+
+Semantic versioning of the *input* raw-file contract. Bump on any change to the
+raw shapes `build_snapshot.py` / `chain.py` accept (a new required field, a changed
+shape, a removed key). PATCH = editorial/clarification; MINOR = backward-compatible
+additive shape; MAJOR = breaking change to an existing shape.
+
+### 1.0.0 — 2026-07-22
+
+First versioned baseline. Captures the raw-file contract as shipped: the MCP + Alpha
+Vantage preview envelope handling, the per-manifest-key raw shapes (OVERVIEW, GLOBAL
+QUOTE, daily/weekly/monthly series, options chain, earnings/dividends, news/sentiment),
+and the adapter guidance. No shape change relative to the prior unversioned document —
+this entry only stamps the existing contract as `1.0.0` so future changes are tracked
+against a named baseline. The pipeline's output artifacts version independently via
+`OUTPUT_SCHEMA_VERSION` in `scripts/_artifact.py` (FR-3).

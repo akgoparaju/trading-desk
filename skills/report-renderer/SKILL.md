@@ -83,6 +83,19 @@ Re-run until exit 0. Then print the QC verdict and the report path to the user.
 
 ---
 
+## Step 4b — Decision-contract gates (BLOCKING)
+
+The consolidated `module_decision.json` (contract **v2.0.0**) that `render_report.py` wrote is the machine-consumable capital instruction a downstream Portfolio-OS binds to, so it is gated separately — every number must trace to the bundle and the shape must be schema-valid:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/report_qc.py \
+  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> --decision-gates
+```
+
+Three blocking checks: **schema_version_present** (every scorer + decision module carries a top-level `schema_version`), **decision_subset_of_bundle** (every non-derived numeric leaf in `module_decision.json` equals a bundle value — nothing fabricated), **decision_schema_valid** (validates against `docs/decision.schema.json`). Exit 0 to proceed. A failure is an upstream module/emitter bug — a missing `schema_version` stamp, or a decision leaf with no bundle source — **fix the module and re-render; never hand-edit `module_decision.json`**.
+
+---
+
 ## Step 5 — Docket (PDF) rendering (AFTER the md QC gate passes)
 
 Once the **md report QC gate is green**, render the institutional **docket** — three deterministic PDFs (`exec` 2pp, `detail` ~10-15pp, and, when a prior bundle exists, a `delta` note). The md report remains the source of truth; the docket is a bank-note-styled render of the SAME QC'd bundle. **Every number on the page is script-minted** (from the module JSONs, the deterministic chart pack, or the What-Changed diff); the only LLM content is the prose in `pdf_slots.json`, and that is provenance-gated before it reaches the renderer.

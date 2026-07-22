@@ -90,6 +90,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from scripts import build_snapshot, chain, confidence, levels
+from scripts._artifact import emit_json
 
 RUBRIC_VERSION = "1.2.0"
 SKILL_NAME = "technical-analysis"
@@ -918,8 +919,7 @@ def main(argv=None):
                        bundle_dir=args.bundle)
 
     out = args.out or os.path.join(args.bundle, "module_technical.json")
-    with open(out, "w") as fh:
-        json.dump(doc, fh, indent=2, sort_keys=True)
+    emit_json(doc, out)
     print(out)
     return 0
 

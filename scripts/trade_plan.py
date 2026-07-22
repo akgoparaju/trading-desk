@@ -57,6 +57,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from scripts import build_snapshot, ev_kelly
+from scripts._artifact import emit_json
 
 RUBRIC_VERSION = "1.1.0"
 SKILL_NAME = "trade-plan"
@@ -110,6 +111,45 @@ _IV_RICH_THRESHOLD = 0.05
 _IV_CHEAP_THRESHOLD = -0.05
 
 _PROFILES = ("trader", "balanced", "long-term")
+
+# FR-6: enumerated technical-invalidation operators.
+# One-line-editable, greppable constant — add/remove values here only.
+TECHNICAL_INVALIDATION_OPERATORS = {
+    "weekly_close_below", "close_below", "close_above",
+    "weekly_close_above", "intraday_below", "intraday_above",
+}
+
+# Synonyms: lowercase+stripped human text → canonical enum value.
+_CONDITION_SYNONYMS = {
+    "weekly close below": "weekly_close_below",
+    "close below": "close_below",
+    "close above": "close_above",
+    "weekly close above": "weekly_close_above",
+    "intraday below": "intraday_below",
+    "intraday above": "intraday_above",
+}
+
+
+def _condition_to_operator(condition):
+    """Map a human condition string to a TECHNICAL_INVALIDATION_OPERATORS enum value.
+
+    Normalizes by lowercasing, stripping, and collapsing runs of whitespace to a
+    single space before synonym lookup, then converts spaces to underscores for a
+    direct enum match.  Returns the matched enum string, or None if unrecognized.
+    """
+    if not isinstance(condition, str):
+        return None
+    normalized = " ".join(condition.lower().strip().split())
+    # Try synonym table first (handles common human phrasings).
+    if normalized in _CONDITION_SYNONYMS:
+        return _CONDITION_SYNONYMS[normalized]
+    # Try direct spaces-to-underscores conversion (covers exact enum names written
+    # with spaces, e.g. "weekly_close_below" or "weekly close below" already handled
+    # above, but this catches any future enum name used verbatim).
+    as_underscore = normalized.replace(" ", "_")
+    if as_underscore in TECHNICAL_INVALIDATION_OPERATORS:
+        return as_underscore
+    return None
 
 
 def _fmt(x):
@@ -383,10 +423,12 @@ def build_invalidation(entries, ladder, fund_metric, fund_threshold,
         if sup is not None:
             tech_level = _clean(sup["level"])
 
+    _condition_str = "weekly close below"
     return {
         "technical_leg": {
             "level": tech_level,
-            "condition": "weekly close below",
+            "condition": _condition_str,
+            "operator": _condition_to_operator(_condition_str),
         },
         "fundamental_leg": {
             "metric": fund_metric,
@@ -982,8 +1024,7 @@ def _run_stock_plan(args):
         dcf_bull=dcf_bull, comps_high=comps_high)
 
     out = args.out or os.path.join(args.bundle, "module_tradeplan.json")
-    with open(out, "w") as fh:
-        json.dump(doc, fh, indent=2, sort_keys=True)
+    emit_json(doc, out)
     print(out)
     return 0
 
@@ -1013,8 +1054,7 @@ def _run_synthesize(args):
         return 2
 
     out = args.out or plan_path
-    with open(out, "w") as fh:
-        json.dump(plan, fh, indent=2, sort_keys=True)
+    emit_json(plan, out)
     print(out)
     return 0
 

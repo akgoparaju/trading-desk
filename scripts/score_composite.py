@@ -56,6 +56,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from scripts import build_snapshot, confidence, ev_kelly, valuation_reconcile
+from scripts._artifact import emit_json
 
 RUBRIC_VERSION = "1.1.0"
 SKILL_NAME = "composite-score"
@@ -1055,8 +1056,7 @@ def main(argv=None):
         entry_levels, custom_profiles=custom_profiles, custom_label=custom_label)
 
     out = args.out or os.path.join(args.bundle, "module_composite.json")
-    with open(out, "w") as fh:
-        json.dump(doc, fh, indent=2, sort_keys=True)
+    emit_json(doc, out)
     print(out)
     return 0
 

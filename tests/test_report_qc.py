@@ -586,5 +586,394 @@ class TestFirstFailureReported(unittest.TestCase):
             self.assertIn("technical", res["detail"])
 
 
+# =========================================================================== #
+# FR-3 decision-contract gates:
+#   check_schema_version_presence, check_decision_subset_of_bundle,
+#   check_decision_schema.
+# =========================================================================== #
+
+from scripts import decision_contract as _dc  # noqa: E402
+from scripts._artifact import emit_json as _emit_json, OUTPUT_SCHEMA_VERSION  # noqa: E402
+
+# Dict-shaped sidecar artifacts written into the fixture (beyond the module_*.json
+# that _mk_bundle writes). manifest.json is the snapshot-FETCH manifest: it is
+# fetch-layer (skill/LLM-authored, never routed through emit_json) and so is
+# deliberately left UNSTAMPED here, mirroring the live pipeline — it is EXEMPT from
+# the schema_version presence gate, not required. pdf_slots.json is optional
+# docket-layer: written AFTER the report gate, absent in md-only mode; when present
+# it is stamped via _stamp_slots -> emit_json. scenarios.json is a top-level ARRAY
+# input, exempt from the schema_version key.
+_UNSTAMPED_FETCH_ARTIFACTS = ("manifest.json",)
+_OPTIONAL_DOCKET_ARTIFACTS = ("pdf_slots.json",)
+
+
+def _mk_decision_bundle(d, *, stamp=True, with_coverage=True,
+                        with_pdf_slots=False):
+    """Build a full, PASSING FR-3 decision-gates fixture in directory ``d``.
+
+    Writes the MU-shaped module bundle (via _mk_bundle), a derived
+    module_decision.json built from the real decision_contract.build_contract
+    (so its numeric leaves genuinely trace to the bundle), the fetch-layer
+    manifest.json (left UNSTAMPED, as the live pipeline leaves it), and optional
+    coverage/*.json. Optionally writes an OPTIONAL docket-layer pdf_slots.json.
+    When ``stamp`` is True every OUTPUT-CONTRACT artifact (the 7 scorer modules +
+    module_decision.json, plus coverage and any present pdf_slots) is (re)written
+    through emit_json so it carries a top-level schema_version; the fetch-layer
+    manifest.json is deliberately NOT stamped. Returns the bundle dir.
+    """
+    _mk_bundle(d)
+
+    # coverage/*.json as a bundle-local subdir (self-contained bundle layout).
+    if with_coverage:
+        cov = os.path.join(d, "coverage")
+        os.makedirs(cov, exist_ok=True)
+        _write_json(os.path.join(cov, "valuation_anchors.json"),
+                    {"dcf_base": 100.0, "as_of": "2026-07-16"})
+        _write_json(os.path.join(cov, "coverage_manifest.json"),
+                    {"depth_mode": "standard", "generated_utc": "2026-07-16T00:00:00Z"})
+
+    # Derived decision object from the real builder -> numeric leaves trace.
+    docs = _dc.load_docs(d)
+    contract = _dc.build_contract(docs)
+    _write_json(os.path.join(d, "module_decision.json"), contract)
+
+    # Fetch-layer manifest: present but NEVER stamped (mirrors the live snapshot-
+    # fetch manifest, which is not routed through emit_json).
+    for name in _UNSTAMPED_FETCH_ARTIFACTS:
+        _write_json(os.path.join(d, name), {"generated": True})
+    # Optional docket-layer pdf_slots.json: only when requested (absent = md-only
+    # mode). When produced, it is stamped through emit_json below.
+    if with_pdf_slots:
+        for name in _OPTIONAL_DOCKET_ARTIFACTS:
+            _write_json(os.path.join(d, name), {"generated": True})
+    # scenarios.json: top-level ARRAY input (matches the live shape). Exempt from
+    # the schema_version key; the presence gate only requires the file to exist.
+    _write_json(os.path.join(d, "scenarios.json"),
+                [{"name": "bear", "prob": 0.3, "price_target": 80.0},
+                 {"name": "bull", "prob": 0.7, "price_target": 130.0}])
+
+    if stamp:
+        _stamp_all_artifacts(d)
+    return d
+
+
+def _write_json(path, doc):
+    with open(path, "w") as fh:
+        json.dump(doc, fh)
+
+
+def _bundle_module_files(d):
+    """Every present OUTPUT-CONTRACT artifact in the bundle that carries a
+    schema_version stamp (paths): every module_*.json and any present optional
+    docket-layer artifact (pdf_slots.json). EXCLUDES the snapshot
+    (meta.schema_version-stamped), the fetch-layer manifest.json, and the
+    coverage/*.json (both are skill-authored inputs never routed through
+    emit_json)."""
+    out = []
+    for name in os.listdir(d):
+        if name.startswith("module_") and name.endswith(".json"):
+            out.append(os.path.join(d, name))
+    for name in _OPTIONAL_DOCKET_ARTIFACTS:
+        p = os.path.join(d, name)
+        if os.path.isfile(p):
+            out.append(p)
+    return out
+
+
+def _stamp_all_artifacts(d):
+    """Re-emit every output-contract artifact through emit_json so it carries
+    schema_version. The snapshot (meta.schema_version), the fetch-layer
+    manifest.json, and the transcribed coverage/*.json inputs are deliberately left
+    unstamped (they are never routed through emit_json in the live pipeline)."""
+    for path in _bundle_module_files(d):
+        with open(path) as fh:
+            doc = json.load(fh)
+        _emit_json(doc, path)
+
+
+class TestSchemaVersionPresence(unittest.TestCase):
+    def test_md_only_bundle_passes(self):
+        """The realistic md-only decision-gate bundle — 7 scorer modules +
+        module_decision.json stamped, an UNSTAMPED fetch-layer manifest.json, and
+        NO pdf_slots.json — must PASS (this is exactly what the live pipeline
+        produces at decision-gate time)."""
+        with tempfile.TemporaryDirectory() as d:
+            _mk_decision_bundle(d, stamp=True, with_pdf_slots=False)
+            self.assertFalse(os.path.isfile(os.path.join(d, "pdf_slots.json")))
+            self.assertTrue(os.path.isfile(os.path.join(d, "manifest.json")))
+            res = rq.check_schema_version_presence(d)
+            self.assertIs(res["passed"], True, res["detail"])
+
+    def test_bundle_with_stamped_pdf_slots_passes(self):
+        """A present, emit_json-stamped optional docket-layer pdf_slots.json (as
+        _stamp_slots now produces) must PASS the presence gate."""
+        with tempfile.TemporaryDirectory() as d:
+            _mk_decision_bundle(d, stamp=True, with_pdf_slots=True)
+            path = os.path.join(d, "pdf_slots.json")
+            self.assertTrue(os.path.isfile(path))
+            with open(path) as fh:
+                self.assertIn("schema_version", json.load(fh))
+            res = rq.check_schema_version_presence(d)
+            self.assertIs(res["passed"], True, res["detail"])
+
+    def test_present_pdf_slots_without_schema_version_fails(self):
+        """When pdf_slots.json IS present it is checked (optional-when-present); an
+        UNSTAMPED present pdf_slots.json must FAIL."""
+        with tempfile.TemporaryDirectory() as d:
+            _mk_decision_bundle(d, stamp=True, with_pdf_slots=True)
+            path = os.path.join(d, "pdf_slots.json")
+            with open(path) as fh:
+                doc = json.load(fh)
+            doc.pop("schema_version", None)
+            _write_json(path, doc)  # write WITHOUT re-stamping
+            res = rq.check_schema_version_presence(d)
+            self.assertIs(res["passed"], False)
+            self.assertIn("pdf_slots.json", res["detail"])
+
+    def test_one_missing_schema_version_fails_and_is_named(self):
+        with tempfile.TemporaryDirectory() as d:
+            _mk_decision_bundle(d, stamp=True)
+            # Strip schema_version from exactly one scorer module.
+            path = os.path.join(d, "module_composite.json")
+            with open(path) as fh:
+                doc = json.load(fh)
+            doc.pop("schema_version", None)
+            _write_json(path, doc)
+            res = rq.check_schema_version_presence(d)
+            self.assertIs(res["passed"], False)
+            self.assertIn("module_composite.json", res["detail"])
+
+    def test_required_scorer_module_absent_fails(self):
+        """A REQUIRED output-contract scorer module missing from the bundle FAILs."""
+        with tempfile.TemporaryDirectory() as d:
+            _mk_decision_bundle(d, stamp=True)
+            os.remove(os.path.join(d, "module_options.json"))
+            res = rq.check_schema_version_presence(d)
+            self.assertIs(res["passed"], False)
+            self.assertIn("module_options.json", res["detail"])
+
+    def test_unstamped_manifest_is_exempt(self):
+        """manifest.json is the fetch-layer snapshot manifest — never routed through
+        emit_json — so an UNSTAMPED (or absent) manifest.json must NOT be flagged."""
+        with tempfile.TemporaryDirectory() as d:
+            _mk_decision_bundle(d, stamp=True)
+            # Present-but-unstamped manifest.json: still passes (it is exempt).
+            with open(os.path.join(d, "manifest.json")) as fh:
+                self.assertNotIn("schema_version", json.load(fh))
+            res = rq.check_schema_version_presence(d)
+            self.assertIs(res["passed"], True, res["detail"])
+            self.assertNotIn("manifest.json", res["detail"])
+            # Absent manifest.json: also passes (not required).
+            os.remove(os.path.join(d, "manifest.json"))
+            res = rq.check_schema_version_presence(d)
+            self.assertIs(res["passed"], True, res["detail"])
+
+    def test_unstamped_coverage_inputs_are_exempt(self):
+        """valuation_anchors.json / coverage_manifest.json are transcribed coverage
+        INPUTS (skill-authored, never routed through emit_json — the skill pins their
+        shape with no schema_version). Present-but-unstamped coverage files must NOT
+        be flagged (they are gated structurally by coverage_qc.py, not here)."""
+        with tempfile.TemporaryDirectory() as d:
+            _mk_decision_bundle(d, stamp=True, with_coverage=True)
+            cov = os.path.join(d, "coverage")
+            for name in ("valuation_anchors.json", "coverage_manifest.json"):
+                with open(os.path.join(cov, name)) as fh:
+                    self.assertNotIn("schema_version", json.load(fh))
+            res = rq.check_schema_version_presence(d)
+            self.assertIs(res["passed"], True, res["detail"])
+            self.assertNotIn("valuation_anchors.json", res["detail"])
+            self.assertNotIn("coverage_manifest.json", res["detail"])
+
+    def test_snapshot_is_exempt(self):
+        """The snapshot has no top-level schema_version (meta.schema_version is its
+        concern) and must NOT be flagged."""
+        with tempfile.TemporaryDirectory() as d:
+            _mk_decision_bundle(d, stamp=True)
+            res = rq.check_schema_version_presence(d)
+            self.assertIs(res["passed"], True)
+            self.assertNotIn("snapshot", res["detail"])
+
+    def test_scenarios_array_is_exempt_from_key(self):
+        """scenarios.json is a top-level ARRAY (score_composite input); it cannot
+        hold a schema_version key and must NOT be flagged when present as an array."""
+        with tempfile.TemporaryDirectory() as d:
+            _mk_decision_bundle(d, stamp=True)
+            # scenarios.json is an array with no schema_version -> still passes.
+            with open(os.path.join(d, "scenarios.json")) as fh:
+                self.assertIsInstance(json.load(fh), list)
+            res = rq.check_schema_version_presence(d)
+            self.assertIs(res["passed"], True, res["detail"])
+
+    def test_scenarios_file_absent_fails(self):
+        """scenarios.json is required to be PRESENT (only its key is array-exempt)."""
+        with tempfile.TemporaryDirectory() as d:
+            _mk_decision_bundle(d, stamp=True)
+            os.remove(os.path.join(d, "scenarios.json"))
+            res = rq.check_schema_version_presence(d)
+            self.assertIs(res["passed"], False)
+            self.assertIn("scenarios.json", res["detail"])
+
+
+class TestStampersEmitSchemaVersion(unittest.TestCase):
+    """The in-place stampers now route through emit_json, so the file they write
+    gains a top-level schema_version (while preserving the qc / qc_passed content
+    and the non-sorted indent=2 formatting)."""
+
+    def test_stamp_slots_adds_schema_version(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "pdf_slots.json")
+            _write_json(path, {"exec_summary": "...", "b_word": "buy"})
+            rq._stamp_slots(path, {"exec_summary": "...", "b_word": "buy"})
+            with open(path) as fh:
+                doc = json.load(fh)
+            self.assertIn("schema_version", doc)
+            self.assertEqual(doc["schema_version"], OUTPUT_SCHEMA_VERSION)
+            # The stamp keys are preserved and the original content survives.
+            self.assertIs(doc["qc_passed"], True)
+            self.assertIn("checked_utc", doc)
+            self.assertEqual(doc["exec_summary"], "...")
+
+    def test_stamp_context_adds_schema_version_and_qc(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "module_context.json")
+            module = {"skill": "company-context", "version": "1.0.0",
+                      "ticker": "MU", "findings": []}
+            _write_json(path, module)
+            rq._stamp_context(path, module)
+            with open(path) as fh:
+                doc = json.load(fh)
+            self.assertIn("schema_version", doc)
+            self.assertEqual(doc["schema_version"], OUTPUT_SCHEMA_VERSION)
+            # qc attestation object set; original module keys preserved.
+            self.assertIs(doc["qc"]["qc_passed"], True)
+            self.assertIn("checked_utc", doc["qc"])
+            self.assertEqual(doc["skill"], "company-context")
+            self.assertEqual(doc["ticker"], "MU")
+
+
+class TestDecisionSubsetOfBundle(unittest.TestCase):
+    def test_traceable_decision_passes(self):
+        with tempfile.TemporaryDirectory() as d:
+            _mk_decision_bundle(d, stamp=True)
+            res = rq.check_decision_subset_of_bundle(d)
+            self.assertIs(res["passed"], True, res["detail"])
+
+    def test_fabricated_numeric_leaf_fails(self):
+        """A non-derived numeric leaf absent from the bundle orphans -> FAIL."""
+        with tempfile.TemporaryDirectory() as d:
+            _mk_decision_bundle(d, stamp=True)
+            path = os.path.join(d, "module_decision.json")
+            with open(path) as fh:
+                dec = json.load(fh)
+            # 'score' is a verbatim bundle leaf; overwrite with a value that appears
+            # nowhere in the bundle. 'score' is NOT in the derived allowlist.
+            dec["score"] = 12345.6789
+            _emit_json(dec, path)
+            res = rq.check_decision_subset_of_bundle(d)
+            self.assertIs(res["passed"], False)
+            self.assertIn("score", res["detail"])
+            self.assertIn("12345.6789", res["detail"])
+
+    def test_tweaked_derived_days_out_still_passes(self):
+        """A derived leaf (catalysts[].days_out) is allowlisted: changing it to a
+        value not in the bundle must NOT fail the ⊆-check."""
+        with tempfile.TemporaryDirectory() as d:
+            _mk_decision_bundle(d, stamp=True)
+            path = os.path.join(d, "module_decision.json")
+            with open(path) as fh:
+                dec = json.load(fh)
+            cats = dec.get("catalysts") or []
+            if not cats:
+                # Inject a synthetic catalyst carrying a derived days_out so the
+                # allowlist path is exercised even if the MU fixture has none.
+                dec["catalysts"] = [{"date_iso": "2026-09-01", "type": "earnings",
+                                     "days_out": -99999}]
+            else:
+                cats[0]["days_out"] = -99999  # value absent from the bundle
+            _emit_json(dec, path)
+            res = rq.check_decision_subset_of_bundle(d)
+            self.assertIs(res["passed"], True, res["detail"])
+
+    def test_tweaked_ev_band_still_passes(self):
+        """ev_band[*] is a §3-derived (recomputed) leaf and is allowlisted."""
+        with tempfile.TemporaryDirectory() as d:
+            _mk_decision_bundle(d, stamp=True)
+            path = os.path.join(d, "module_decision.json")
+            with open(path) as fh:
+                dec = json.load(fh)
+            dec["ev_band"] = [0.111111, 0.999999]  # off-bundle by construction
+            _emit_json(dec, path)
+            res = rq.check_decision_subset_of_bundle(d)
+            self.assertIs(res["passed"], True, res["detail"])
+
+
+class TestDecisionSchema(unittest.TestCase):
+    def test_valid_decision_passes(self):
+        with tempfile.TemporaryDirectory() as d:
+            _mk_decision_bundle(d, stamp=True)
+            res = rq.check_decision_schema(d)
+            self.assertIs(res["passed"], True, res["detail"])
+
+    def test_missing_required_key_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            _mk_decision_bundle(d, stamp=True)
+            path = os.path.join(d, "module_decision.json")
+            with open(path) as fh:
+                dec = json.load(fh)
+            dec.pop("entry_state", None)  # a required 1.1.0 capital field
+            _emit_json(dec, path)
+            res = rq.check_decision_schema(d)
+            self.assertIs(res["passed"], False)
+            self.assertIn("entry_state", res["detail"])
+
+    def test_wrong_contract_version_const_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            _mk_decision_bundle(d, stamp=True)
+            path = os.path.join(d, "module_decision.json")
+            with open(path) as fh:
+                dec = json.load(fh)
+            dec["contract_version"] = "1.0.0"  # schema pins const "2.0.0"
+            _emit_json(dec, path)
+            res = rq.check_decision_schema(d)
+            self.assertIs(res["passed"], False)
+            self.assertIn("contract_version", res["detail"])
+
+    def test_bad_operator_enum_fails(self):
+        """The FR-6 invalidation.technical.operator enum is pinned; an off-enum
+        value must fail the schema check."""
+        with tempfile.TemporaryDirectory() as d:
+            _mk_decision_bundle(d, stamp=True)
+            path = os.path.join(d, "module_decision.json")
+            with open(path) as fh:
+                dec = json.load(fh)
+            inv = dec.setdefault("invalidation", {}).setdefault("technical", {})
+            inv["operator"] = "not_a_real_operator"
+            _emit_json(dec, path)
+            res = rq.check_decision_schema(d)
+            self.assertIs(res["passed"], False)
+            self.assertIn("operator", res["detail"])
+
+
+class TestDecisionGatesCLI(unittest.TestCase):
+    def test_cli_pass_on_stamped_bundle(self):
+        with tempfile.TemporaryDirectory() as d:
+            _mk_decision_bundle(d, stamp=True)
+            proc = subprocess.run(
+                [sys.executable, QC, "--bundle", d, "--decision-gates"],
+                capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("DECISION GATES: PASS", proc.stdout)
+
+    def test_cli_fail_on_unstamped_bundle(self):
+        with tempfile.TemporaryDirectory() as d:
+            _mk_decision_bundle(d, stamp=False)  # no schema_version anywhere
+            proc = subprocess.run(
+                [sys.executable, QC, "--bundle", d, "--decision-gates"],
+                capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("DECISION GATES: FAIL", proc.stdout)
+            self.assertIn("schema_version", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

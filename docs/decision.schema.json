@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trading-desk/docs/decision.schema.json",
+  "title": "decision-contract (module_decision.json) v2.0.0",
+  "description": "Canonical decision contract emitted by scripts/decision_contract.py. The 1.1.0 capital-authorization block is REQUIRED (the consumer binds it); the 2.0.0 additive consolidated sections are declared but mostly OPTIONAL because each degrades (is omitted) when its source module is absent. Native sub-objects use additionalProperties:true so module evolution does not break the pin; only the leaves the consumer binds are constrained. NOTE: schema_version is declared but NOT yet required -- FR-3's shared emitter injects it; make it required once every writer routes through the emitter.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "skill",
+    "contract_version",
+    "ticker",
+    "as_of",
+    "profile",
+    "horizon_months",
+    "total_return_hurdle",
+    "annual_return_hurdle",
+    "ev_at_current",
+    "hurdle_clearing_price",
+    "grade",
+    "score",
+    "ev_band",
+    "ev_robust_vs_hurdle",
+    "capital_blockers",
+    "capital_eligible",
+    "action_unowned",
+    "action_owned",
+    "entry_state"
+  ],
+  "properties": {
+    "skill": {"type": "string", "const": "decision-contract"},
+    "contract_version": {"type": "string", "const": "2.0.0"},
+    "schema_version": {"type": "string"},
+    "ticker": {"type": "string"},
+    "as_of": {"type": "string"},
+    "profile": {"type": ["string", "null"]},
+    "horizon_months": {"type": ["number", "null"]},
+    "scenario_horizon_months": {"type": ["number", "null"]},
+    "total_return_hurdle": {"type": ["number", "null"]},
+    "annual_return_hurdle": {"type": ["number", "null"]},
+    "ev_at_current": {"type": ["number", "null"]},
+    "hurdle_clearing_price": {"type": ["number", "null"]},
+    "grade": {"type": ["string", "null"]},
+    "score": {"type": ["number", "null"]},
+    "ev_band": {
+      "type": ["array", "null"],
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"type": ["number", "null"]}
+    },
+    "ev_uncertainty_halfwidth": {"type": ["number", "null"]},
+    "ev_uncertainty_k": {"type": ["number", "null"]},
+    "ev_uncertainty_confidence_level": {"type": ["string", "null"]},
+    "ev_robust_vs_hurdle": {"type": ["boolean", "null"]},
+    "provisional_note": {"type": "string"},
+    "capital_blockers": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "capital_eligible": {"type": "boolean"},
+    "action_unowned": {"type": "string"},
+    "action_owned": {"type": "string"},
+    "entry_state": {"type": "string"},
+
+    "run_utc": {"type": "string"},
+    "latest_trading_day": {"type": "string"},
+    "data_mode": {"type": "string"},
+    "degraded": {"type": ["boolean", "null"]},
+    "missing": {"type": "array"},
+
+    "composite": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "dimensions": {
+      "type": "array"
+    },
+    "ev": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "flags": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "sizing": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "risk_units": {
+      "type": "object",
+      "additionalProperties": true
+    },
+
+    "invalidation": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "technical": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "condition": {"type": ["string", "null"]},
+            "level": {"type": ["number", "null"]},
+            "operator": {
+              "type": ["string", "null"],
+              "description": "FR-6 enumerated invalidation operator (may be null until the trade_plan author emits it).",
+              "enum": [
+                "weekly_close_below",
+                "close_below",
+                "close_above",
+                "weekly_close_above",
+                "intraday_below",
+                "intraday_above",
+                null
+              ]
+            }
+          }
+        },
+        "fundamental": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+
+    "expression": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "valuation_anchors": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": true
+    },
+
+    "catalysts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["date_iso", "type", "days_out"],
+        "properties": {
+          "label": {"type": "string"},
+          "date_iso": {"type": "string"},
+          "type": {"type": "string"},
+          "days_out": {"type": ["integer", "null"]},
+          "in_thesis": {"type": ["boolean", "null"]},
+          "implied_move_pct": {"type": ["number", "null"]},
+          "consensus_eps": {"type": ["number", "null"]},
+          "per_share": {"type": ["number", "null"]}
+        }
+      }
+    },
+
+    "thesis": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "registered_date"],
+      "properties": {
+        "id": {"type": "string"},
+        "registered_date": {"type": "string"},
+        "variant": {"type": ["string", "null"]},
+        "catalyst_clarity": {"type": ["string", "null"]}
+      }
+    },
+
+    "rubric_versions": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

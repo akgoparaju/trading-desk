@@ -28,6 +28,7 @@ stdlib-only; the build function is pure over parsed inputs.
 """
 
 import argparse
+import datetime
 import glob
 import json
 import os
@@ -36,8 +37,17 @@ import sys
 if sys.version_info < (3, 10):
     sys.exit("trading-desk requires Python >= 3.10 (found %d.%d)" % sys.version_info[:2])
 
+# Ensure the repo root is importable when run directly so ``from
+# scripts._artifact import ...`` resolves; ``-m scripts.decision_contract``
+# already has it.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from scripts._artifact import emit_json
+
 SKILL = "decision-contract"
-CONTRACT_VERSION = "1.1.0"
+CONTRACT_VERSION = "2.0.0"
 
 # --------------------------------------------------------------------------- #
 # O10b PROVISIONAL constants (v1.1.0): the EV-uncertainty band.
@@ -331,19 +341,173 @@ def _derive_entry_state(capital_blockers, capital_eligible):
 
 
 # --------------------------------------------------------------------------- #
+# FR-2: catalyst assembly (the ONE new derivation -- days_out).
+# --------------------------------------------------------------------------- #
+
+def _days_out(date_iso, as_of_date):
+    """Calendar-day gap ``date_iso - as_of_date`` (integer, may be 0 or negative).
+
+    The ONLY new arithmetic in the FR-2 catalysts section (consumer-sanctioned:
+    "days_out computed from as_of"). Uses ``datetime.date.fromisoformat`` on both
+    ISO date strings. If either is absent or unparseable -> None (never guessed).
+    """
+    if not isinstance(date_iso, str) or not isinstance(as_of_date, str):
+        return None
+    try:
+        d1 = datetime.date.fromisoformat(date_iso)
+        d0 = datetime.date.fromisoformat(as_of_date)
+    except ValueError:
+        return None
+    return (d1 - d0).days
+
+
+def build_catalysts(snapshot, tradeplan, as_of_date):
+    """Assemble the FR-2 ``catalysts[]`` array from the snapshot events + tradeplan.
+
+    Pure over parsed docs. ``as_of_date`` is the ISO date the ``days_out`` gaps are
+    measured from (``composite.as_of`` or ``snapshot.meta.as_of_utc[:10]``; chosen
+    by the caller). Emits one element per KNOWN catalyst; an element whose date leaf
+    is absent is omitted (never fabricated). Field map is spec-verbatim except the
+    single derived ``days_out``.
+
+      earnings  <- snapshot.events.next_earnings (+ implied_move, catalyst_in_thesis)
+      dividend  <- snapshot.events.dividends
+      (any pre-existing snapshot.events.catalyst elements are appended verbatim)
+    """
+    events = _dig(snapshot, "events") or {}
+    catalysts = []
+
+    # -- earnings ---------------------------------------------------------------
+    next_earnings = events.get("next_earnings")
+    earnings_date = _dig(events, "next_earnings", "date")
+    if isinstance(next_earnings, dict) and earnings_date:
+        catalyst_in_thesis = _dig(tradeplan, "expression", "catalyst_in_thesis")
+        item = {
+            "label": "earnings",
+            "date_iso": earnings_date,
+            "type": "earnings",
+            "in_thesis": catalyst_in_thesis,
+            "days_out": _days_out(earnings_date, as_of_date),
+        }
+        implied_move = events.get("implied_move")
+        if implied_move is not None:
+            item["implied_move_pct"] = implied_move
+        consensus_eps = next_earnings.get("consensus_eps")
+        if consensus_eps is not None:
+            item["consensus_eps"] = consensus_eps
+        catalysts.append(item)
+
+    # -- dividend ---------------------------------------------------------------
+    dividends = events.get("dividends")
+    ex_date = _dig(events, "dividends", "ex_date")
+    if isinstance(dividends, dict) and ex_date:
+        item = {
+            "label": "dividend ex-date",
+            "date_iso": ex_date,
+            "type": "dividend",
+            "in_thesis": False,
+            "days_out": _days_out(ex_date, as_of_date),
+        }
+        per_share = dividends.get("per_share")
+        if per_share is not None:
+            item["per_share"] = per_share
+        catalysts.append(item)
+
+    # -- any pre-existing verbatim catalysts (the events.catalysts array; [] today)
+    existing = events.get("catalysts")
+    if isinstance(existing, list) and existing:
+        catalysts.extend(existing)
+
+    return catalysts
+
+
+# --------------------------------------------------------------------------- #
+# FR-5: thesis identity (deterministic + refresh-stable).
+# --------------------------------------------------------------------------- #
+
+def build_thesis(ticker, coverage_manifest, composite_flags):
+    """Build the FR-5 ``thesis`` block, or None when its coverage source is absent.
+
+    ``registered_date`` <- coverage_manifest.generated_utc[:10] -- the coverage
+    INITIATION date. It is refresh-STABLE because coverage is built once and carried
+    forward, so ``thesis.id`` = f"{ticker}-{registered_date}" is deterministic across
+    refreshes even as the composite / as_of move. If ``coverage_manifest`` is absent
+    (or carries no ``generated_utc``), the whole block is omitted (never fabricated).
+    ``next_review`` is deferred (no deterministic bundle source in P0).
+    """
+    generated_utc = _dig(coverage_manifest, "generated_utc")
+    if not isinstance(generated_utc, str) or len(generated_utc) < 10:
+        return None
+    registered_date = generated_utc[:10]
+    flags = composite_flags or {}
+    thesis = {
+        "registered_date": registered_date,
+        "variant": flags.get("variant"),
+        "catalyst_clarity": flags.get("catalyst_clarity"),
+    }
+    if ticker:
+        thesis["id"] = f"{ticker}-{registered_date}"
+    return thesis
+
+
+def build_rubric_versions(docs, composite):
+    """Assemble the ``rubric_versions`` block. Each key is a module's
+    ``rubric_version`` leaf; ``confidence`` is ``module_composite.confidence.version``.
+    A key whose module is absent (or whose module carries no ``rubric_version``) is
+    OMITTED, never fabricated.
+    """
+    module_keys = {
+        "technical": "module_technical",
+        "fundamental": "module_fundamental",
+        "sentiment": "module_sentiment",
+        "risk": "module_risk",
+        "composite": "module_composite",
+        "tradeplan": "module_tradeplan",
+        "options": "module_options",
+    }
+    out = {}
+    for label, doc_key in module_keys.items():
+        mod = docs.get(doc_key)
+        version = _dig(mod, "rubric_version")
+        if version is not None:
+            out[label] = version
+    conf_version = _dig(composite, "confidence", "version")
+    if conf_version is not None:
+        out["confidence"] = conf_version
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # The contract builder (pure).
 # --------------------------------------------------------------------------- #
 
 def build_contract(docs):
     """Build the deterministic decision contract dict from parsed bundle docs.
 
-    ``docs`` = the dict ``run_report_qc`` builds (keys ``module_composite`` /
-    ``module_tradeplan`` / ``module_fundamental`` / ``snapshot`` — a missing key
-    or module simply maps to None). Every field below cites its source leaf.
+    ``docs`` = the dict ``load_docs`` / ``run_report_qc`` builds (keys
+    ``module_composite`` / ``module_tradeplan`` / ``module_fundamental`` /
+    ``module_technical`` / ``module_sentiment`` / ``module_risk`` /
+    ``module_options`` / ``module_context`` / ``snapshot`` /
+    ``valuation_anchors`` / ``coverage_manifest`` -- a missing key or module simply
+    maps to None). Every field below cites its source leaf.
+
+    contract_version 2.0.0 is PURELY ADDITIVE over 1.1.0: every 1.1.0 top-level
+    field is kept EXACTLY as-is (the consumer consumes them all) and the consolidated
+    sections (composite / dimensions / ev / flags / sizing / plan / risk_units /
+    invalidation / expression / valuation_anchors / coverage / catalysts / thesis /
+    rubric_versions / run_utc / latest_trading_day + data_mode/degraded/missing) are
+    ADDED. The module's rule holds for every added field too: a section whose source
+    leaf is absent is OMITTED, never fabricated. This function stays PURE -- it reads
+    no files and mints no numbers beyond the documented derivations (``days_out`` and
+    ``thesis.id``/``registered_date`` are the only new ones).
     """
     composite = docs.get("module_composite") or {}
     fundamental = docs.get("module_fundamental") or {}
     snapshot = docs.get("snapshot") or {}
+    tradeplan = docs.get("module_tradeplan") or {}
+    options = docs.get("module_options") or {}
+    valuation_anchors = docs.get("valuation_anchors")
+    coverage_manifest = docs.get("coverage_manifest")
     ev = composite.get("ev") or {}
 
     # profile <- module_composite.profile
@@ -426,7 +590,14 @@ def build_contract(docs):
     #   4. else                              -> NO_ENTRY_AT_CURRENT
     entry_state = _derive_entry_state(capital_blockers, capital_eligible)
 
-    return {
+    # ======================================================================= #
+    # 2.0.0 ADDED consolidated sections (FR-1/FR-2/FR-5/FR-6).
+    # Every added section is OMITTED (not emitted) when its source leaf is absent;
+    # the ``contract`` dict below is assembled first with the always-present 1.1.0
+    # fields, then each added section is attached only when its source exists.
+    # ======================================================================= #
+
+    contract = {
         "skill": SKILL,
         "contract_version": CONTRACT_VERSION,
         "ticker": _dig(snapshot, "meta", "ticker") or composite.get("ticker"),
@@ -455,6 +626,129 @@ def build_contract(docs):
         "entry_state": entry_state,
     }
 
+    # ---- run_utc / latest_trading_day + optional meta flags (spec §2) --------
+    # <- snapshot.meta.{as_of_utc, latest_trading_day, data_mode|primary_source,
+    #    degraded, missing}. Each attached only if its exact leaf exists.
+    meta = _dig(snapshot, "meta") or {}
+    if meta.get("as_of_utc") is not None:
+        contract["run_utc"] = meta["as_of_utc"]
+    if meta.get("latest_trading_day") is not None:
+        contract["latest_trading_day"] = meta["latest_trading_day"]
+    # data_mode (or primary_source alias), degraded, missing: only if present.
+    if meta.get("data_mode") is not None:
+        contract["data_mode"] = meta["data_mode"]
+    elif meta.get("primary_source") is not None:
+        contract["data_mode"] = meta["primary_source"]
+    if meta.get("degraded") is not None:
+        contract["degraded"] = meta["degraded"]
+    if meta.get("missing") is not None:
+        contract["missing"] = meta["missing"]
+
+    # ---- composite (verbatim leaves) -----------------------------------------
+    # <- module_composite.{score,grade,action,sensitivity,confidence}. The block is
+    # attached only when at least one of its leaves exists (empty composite -> omit).
+    composite_block = {}
+    for key in ("score", "grade", "action", "sensitivity", "confidence"):
+        if composite.get(key) is not None:
+            composite_block[key] = composite[key]
+    if composite_block:
+        contract["composite"] = composite_block
+
+    # ---- dimensions / ev / flags (verbatim from module_composite) ------------
+    if composite.get("dimensions") is not None:
+        contract["dimensions"] = composite["dimensions"]
+    if composite.get("ev") is not None:
+        contract["ev"] = composite["ev"]
+    if composite.get("flags") is not None:
+        contract["flags"] = composite["flags"]
+
+    # ---- sizing / plan / risk_units / invalidation (from tradeplan.stock_plan) -
+    stock_plan = _dig(tradeplan, "stock_plan") or {}
+    if stock_plan.get("sizing") is not None:
+        contract["sizing"] = stock_plan["sizing"]
+
+    # plan: entries + exits + dont_chase (each verbatim, attach only if present).
+    plan_block = {}
+    for key in ("entries", "exits", "dont_chase"):
+        if stock_plan.get(key) is not None:
+            plan_block[key] = stock_plan[key]
+    if plan_block:
+        contract["plan"] = plan_block
+
+    if stock_plan.get("risk_units") is not None:
+        contract["risk_units"] = stock_plan["risk_units"]
+
+    # invalidation: technical leg (+ FR-6 operator, read DEFENSIVELY -- may be
+    # absent in the current on-disk bundle since the trade_plan author adds it going
+    # forward; carry None if absent) + fundamental leg. Verbatim otherwise.
+    invalidation_src = _dig(stock_plan, "invalidation") or {}
+    invalidation_block = {}
+    technical_leg = invalidation_src.get("technical_leg")
+    if isinstance(technical_leg, dict):
+        tech = {}
+        if technical_leg.get("condition") is not None:
+            tech["condition"] = technical_leg["condition"]
+        if technical_leg.get("level") is not None:
+            tech["level"] = technical_leg["level"]
+        # FR-6 enum: carried through; None when the trade_plan author has not yet
+        # emitted it (defensive .get -- never fabricate an enum).
+        tech["operator"] = technical_leg.get("operator")
+        invalidation_block["technical"] = tech
+    fundamental_leg = invalidation_src.get("fundamental_leg")
+    if fundamental_leg is not None:
+        invalidation_block["fundamental"] = fundamental_leg
+    if invalidation_block:
+        contract["invalidation"] = invalidation_block
+
+    # ---- expression (verbatim from tradeplan.expression + options leaves) -----
+    expression_src = _dig(tradeplan, "expression") or {}
+    expression_block = {}
+    for key in ("executable", "recommended_for_profile",
+                "recommended_for_profile_options_tilted", "structures_selected",
+                "catalyst_in_thesis", "days_to_catalyst", "mode_per_profile",
+                "rule_version", "selector_fired"):
+        if expression_src.get(key) is not None:
+            expression_block[key] = expression_src[key]
+    if options.get("liquidity_verdict") is not None:
+        expression_block["options_liquidity_verdict"] = options["liquidity_verdict"]
+    if options.get("declined") is not None:
+        expression_block["options_declined"] = options["declined"]
+    if expression_block:
+        contract["expression"] = expression_block
+
+    # ---- valuation_anchors / coverage (verbatim from coverage/*.json) --------
+    if valuation_anchors is not None:
+        contract["valuation_anchors"] = valuation_anchors
+    if coverage_manifest is not None:
+        contract["coverage"] = coverage_manifest
+
+    # ---- catalysts (FR-2, assembled; the ONE derivation is days_out) ---------
+    # as_of_date <- composite.as_of or snapshot.meta.as_of_utc[:10] (ISO date the
+    # days_out gaps are measured from).
+    as_of_date = composite.get("as_of")
+    if not as_of_date:
+        as_of_utc = meta.get("as_of_utc")
+        as_of_date = as_of_utc[:10] if isinstance(as_of_utc, str) else None
+    catalysts = build_catalysts(snapshot, tradeplan, as_of_date)
+    if catalysts:
+        contract["catalysts"] = catalysts
+
+    # ---- thesis (FR-5 id; omitted whole when coverage_manifest absent) -------
+    thesis = build_thesis(
+        ticker=contract.get("ticker"),
+        coverage_manifest=coverage_manifest,
+        composite_flags=composite.get("flags"),
+    )
+    if thesis is not None:
+        contract["thesis"] = thesis
+
+    # ---- rubric_versions (verbatim assembly; omit any absent module) ---------
+    rubric_versions = build_rubric_versions(docs, composite)
+    if rubric_versions:
+        contract["rubric_versions"] = rubric_versions
+
+    return contract
+
 
 # --------------------------------------------------------------------------- #
 # CLI (mirrors the scorers: --bundle / --out).
@@ -475,9 +769,31 @@ def _load_json(path):
         return json.load(fh)
 
 
+def _load_coverage(bundle, name):
+    """Load a ``coverage/<name>`` file, resolving it relative to the bundle then to
+    the bundle's PARENT.
+
+    In the live layout coverage lives at ``<ticker_dir>/coverage/`` -- i.e. a SIBLING
+    of the report bundle ``<ticker_dir>/detail_reports_<date>/``, not inside it. We
+    check ``<bundle>/coverage/<name>`` first (self-contained bundles) and fall back
+    to ``<bundle>/../coverage/<name>`` (the live sibling layout). Missing -> None.
+    """
+    in_bundle = os.path.join(bundle, "coverage", name)
+    if os.path.isfile(in_bundle):
+        return _load_json(in_bundle)
+    sibling = os.path.join(os.path.dirname(os.path.normpath(bundle)), "coverage", name)
+    if os.path.isfile(sibling):
+        return _load_json(sibling)
+    return None
+
+
 def load_docs(bundle):
-    """Load the subset of bundle docs build_contract reads (snapshot + the three
-    modules). Missing files map to None -- build_contract degrades field-by-field.
+    """Load the subset of bundle docs build_contract reads. Missing files map to
+    None -- build_contract degrades field-by-field.
+
+    2.0.0 expands the load set to the full module family plus the two coverage
+    leaves the contract consolidates. ``coverage/*`` are resolved via
+    ``_load_coverage`` (bundle-local, then the sibling ``../coverage/`` live layout).
     """
     snap_path = _find_snapshot(bundle)
     return {
@@ -485,6 +801,13 @@ def load_docs(bundle):
         "module_composite": _load_json(os.path.join(bundle, "module_composite.json")),
         "module_tradeplan": _load_json(os.path.join(bundle, "module_tradeplan.json")),
         "module_fundamental": _load_json(os.path.join(bundle, "module_fundamental.json")),
+        "module_technical": _load_json(os.path.join(bundle, "module_technical.json")),
+        "module_sentiment": _load_json(os.path.join(bundle, "module_sentiment.json")),
+        "module_risk": _load_json(os.path.join(bundle, "module_risk.json")),
+        "module_options": _load_json(os.path.join(bundle, "module_options.json")),
+        "module_context": _load_json(os.path.join(bundle, "module_context.json")),
+        "valuation_anchors": _load_coverage(bundle, "valuation_anchors.json"),
+        "coverage_manifest": _load_coverage(bundle, "coverage_manifest.json"),
     }
 
 
@@ -513,8 +836,7 @@ def main(argv=None):
     contract = build_contract(docs)
 
     out = args.out or os.path.join(args.bundle, "module_decision.json")
-    with open(out, "w") as fh:
-        json.dump(contract, fh, indent=2, sort_keys=True)
+    emit_json(contract, out)
     print(out)
     return 0
 

@@ -460,7 +460,7 @@ class TestGoogBandContract(unittest.TestCase):
 
     def test_goog_band_fields_and_no_not_robust_blocker(self):
         c = dc.build_contract(_goog_docs())
-        self.assertEqual(c["contract_version"], "1.1.0")
+        self.assertEqual(c["contract_version"], "2.0.0")
         self.assertAlmostEqual(c["ev_band"][0], -0.00162, places=5)
         self.assertAlmostEqual(c["ev_band"][1], 0.11962, places=5)
         self.assertAlmostEqual(c["ev_uncertainty_halfwidth"], 0.06062, places=5)
@@ -633,6 +633,686 @@ class TestEntryStateInContract(unittest.TestCase):
         # entry_state must be a key in the contract dict.
         c = dc.build_contract(_goog_docs())
         self.assertIn("entry_state", c)
+
+
+# =========================================================================== #
+# 7. contract_version 2.0.0 -- the ADDED consolidated sections (FR-1/2/5/6).
+#
+# These fixtures mirror the REAL GOOG 2026-07-22 bundle leaves (see the ground-truth
+# bundle in the P0 spec). They are kept SEPARATE from the minimal 1.1.0 fixtures
+# above so the original 57 tests stay untouched. The docs dict here carries the full
+# module family + coverage leaves that load_docs supplies to build_contract.
+# =========================================================================== #
+
+# Real GOOG stock_plan (module_tradeplan.stock_plan) -- verbatim shapes.
+_GOOG_SIZING = {
+    "arithmetic": "f* 65.7% at entry 334.69; capped to 4.0%",
+    "binary_event_within_30d": True,
+    "cap_pct": 0.04,
+    "entry_level": 334.69,
+    "f_star": 0.6571,
+    "half": 0.3285,
+    "headline": "f* 65.7% at entry 334.69; capped to 4.0% (4.0% cap)",
+    "profile": "balanced",
+    "quarter": 0.1643,
+    "rationale": "half the balanced cap (4.0%) due to a binary event within 30d.",
+    "recommended_pct": 0.04,
+}
+
+_GOOG_ENTRIES = [
+    {"basis": "swing_low, confluent with valuation anchor 332.232",
+     "condition": "resting limit at 334.69", "confluence": True,
+     "confluence_anchor": 332.2321, "ev_at_level": 0.1118, "level": 334.69,
+     "type": "swing_low"},
+    {"basis": "swing_low", "condition": "resting limit at 321.743",
+     "confluence": False, "confluence_anchor": None, "ev_at_level": 0.1565,
+     "level": 321.7431, "type": "swing_low"},
+]
+
+_GOOG_EXITS = {
+    "bull_target": {"comps_high": 436, "dcf_bull": 197.41, "level": 436,
+                    "required_multiple": 30.5918, "scenario_raw": 436,
+                    "triangulated": True},
+    "profit_take": {"level": 350, "type": "oi_cluster"},
+}
+
+_GOOG_DONT_CHASE = {"above": 351.4245, "convention": "5% above top entry"}
+
+_GOOG_RISK_UNITS = {
+    "arithmetic": "entry_ref=334.69; binding=event_gap 17.2735/sh",
+    "binding_leg": "event_gap", "binding_loss_per_share": 17.2735,
+    "entry_ref": 334.69, "loss_per_share_event_gap": 17.2735,
+    "loss_per_share_stress": None, "loss_per_share_technical": 12.9469,
+    "risk_budget_usd": 1000, "shares_per_risk_unit": 57.8921,
+}
+
+_GOOG_TECHNICAL_LEG_NO_OPERATOR = {
+    "condition": "weekly close below", "level": 321.7431,
+}
+_GOOG_FUNDAMENTAL_LEG = {
+    "justification": "Thesis rests on the Search annuity's durability funding Cloud.",
+    "metric": "Search revenue growth + Cloud growth/margin",
+    "threshold": "Search revenue turns negative YoY, or Cloud decel <30% w/ margin.",
+}
+
+_GOOG_EXPRESSION = {
+    "catalyst_in_thesis": False,
+    "days_to_catalyst": 0,
+    "executable": False,
+    "mode_per_profile": {"balanced": "mixed: stock core + CSP at entry_1"},
+    "recommended_for_profile": "stock: buy the entry ladder from 334.69, sized 4.0%",
+    "recommended_for_profile_options_tilted": "mixed: stock core + CSP",
+    "rule_version": "expression-v1.0.0",
+    "selector_fired": "profile-default",
+    "structures_selected": [],
+}
+
+
+def _goog_tradeplan(*, technical_leg=None):
+    """A full module_tradeplan stub carrying the stock_plan + expression the added
+    sections read. ``technical_leg`` defaults to the on-disk shape WITHOUT the FR-6
+    operator (the trade_plan author adds it going forward)."""
+    if technical_leg is None:
+        technical_leg = dict(_GOOG_TECHNICAL_LEG_NO_OPERATOR)
+    return {
+        "skill": "trade-plan",
+        "rubric_version": "1.1.0",
+        "expression": dict(_GOOG_EXPRESSION),
+        "stock_plan": {
+            "sizing": dict(_GOOG_SIZING),
+            "entries": [dict(e) for e in _GOOG_ENTRIES],
+            "exits": {k: dict(v) for k, v in _GOOG_EXITS.items()},
+            "dont_chase": dict(_GOOG_DONT_CHASE),
+            "risk_units": dict(_GOOG_RISK_UNITS),
+            "invalidation": {
+                "technical_leg": dict(technical_leg),
+                "fundamental_leg": dict(_GOOG_FUNDAMENTAL_LEG),
+            },
+        },
+    }
+
+
+def _goog_options():
+    return {
+        "skill": "options-strategy",
+        "rubric_version": "1.1.0",
+        "liquidity_verdict": "thin -- declining to force structures",
+        "declined": [
+            {"name": "bull_put_spread", "reason": "liquidity: leg 330 spread 0.9"},
+            {"name": "cash_secured_put", "reason": "liquidity: leg 330 spread 0.9"},
+        ],
+    }
+
+
+def _goog_full_composite():
+    """A composite carrying the verbatim sub-objects the added sections read
+    (score/grade/action/sensitivity/confidence/dimensions/ev/flags), on the real
+    GOOG numbers. as_of matches the earnings date so days_out==0 by construction."""
+    comp = _composite_with_scenarios(
+        ev_at_current=0.0748, hurdle_total=0.12, horizon_years=1.5,
+        ev_breakeven=332.2321, grade="B", confidence_level="MEDIUM",
+        profile="balanced", score=62.25)
+    comp["as_of"] = "2026-07-22"
+    comp["rubric_version"] = "1.1.0"
+    comp["action"] = "Hold/Accumulate-on-weakness"
+    comp["confidence"] = {
+        "level": "MEDIUM", "rule": "min over evidence dimensions",
+        "version": "1.0.0", "why": "MEDIUM -- weekend print"}
+    comp["sensitivity"] = {
+        "balanced": {"grade": "B", "score": 62.25},
+        "long-term": {"grade": "C", "score": 59.1},
+        "trader": {"grade": "B", "score": 66.95},
+        "weight_set": "standard v1"}
+    comp["dimensions"] = [
+        {"name": "technical", "score": 69, "weight": 0.25,
+         "weight_renormalized": 0.25, "contribution": 17.25,
+         "source": "module_technical.json",
+         "confidence": {"level": "MEDIUM", "rule": "min(source, depth, staleness)",
+                        "source": {"level": "HIGH", "why": "AV premium"},
+                        "depth": {"level": "HIGH", "why": "regime-conditional"},
+                        "staleness": {"level": "MEDIUM", "why": "weekend print"},
+                        "version": "1.0.0"}},
+    ]
+    comp["flags"] = {
+        "variant": "some",
+        "variant_justification": "Differentiated on the DCF-vs-comps split.",
+        "catalyst_clarity": "clear",
+        "catalyst_clarity_justification": "Q2 2026 print reports TODAY (0 days out).",
+        "invalidation": "both-legs",
+        "invalidation_justification": "Search negative YoY or Cloud decel; stop MA200.",
+        "base_rate_check": {"flagged": False, "n_history": 7},
+    }
+    return comp
+
+
+def _goog_snapshot_full(*, as_of_utc="2026-07-22T17:02:32Z",
+                        earnings_date="2026-07-22", ex_date="2026-06-08",
+                        days_to_event=0, last=346.19):
+    """A full snapshot carrying meta + events (next_earnings/dividends) the added
+    sections + catalyst assembly read. Mirrors the real GOOG 2026-07-22 leaves."""
+    return {
+        "meta": {
+            "ticker": "GOOG",
+            "as_of_utc": as_of_utc,
+            "latest_trading_day": "2026-07-21",
+            "data_mode": "alpha_vantage",
+            "missing": [],
+        },
+        "price": {"last": last},
+        "events": {
+            "next_earnings": {"date": earnings_date, "time": "post-market",
+                              "consensus_eps": 2.86},
+            "days_to_event": days_to_event,
+            "implied_move": 0.05161038735954245,
+            "dividends": {"per_share": 0.84, "ex_date": ex_date,
+                          "pay_date": "2026-06-15"},
+            "catalysts": [],
+        },
+    }
+
+
+_GOOG_VALUATION_ANCHORS = {
+    "dcf_base": 145.47, "dcf_bear": 78.20, "dcf_bull": 197.41,
+    "comps_low": 294.0, "comps_high": 436.0, "current_pb": 8.82,
+    "assumptions": {"wacc": 0.1066, "terminal_g": 0.030},
+    "citations": {"dcf": "coverage/valuation.md §DCF",
+                  "comps": "coverage/valuation.md §Comps"},
+    "as_of": "2026-07-21",
+}
+
+_GOOG_COVERAGE_MANIFEST = {
+    "depth_mode": "full",
+    "skills_invoked": [
+        {"skill": "equity-research:initiating-coverage", "args_summary": "Tasks 1-3"},
+    ],
+    "data_endpoints": ["SEC EDGAR 10-K", "Alpha Vantage MCP"],
+    "artifacts": ["research.md", "model.md", "valuation.md"],
+    "generated_utc": "2026-07-21T17:42:46Z",
+}
+
+
+def _goog_full_docs(**overrides):
+    """The full 2.0.0 docs dict as load_docs would supply it for the real bundle."""
+    docs = {
+        "module_composite": _goog_full_composite(),
+        "module_fundamental": _fundamental(conflict=True),
+        "module_tradeplan": _goog_tradeplan(),
+        "module_options": _goog_options(),
+        "module_technical": {"skill": "technical-analysis", "rubric_version": "1.2.0"},
+        "module_sentiment": {"skill": "sentiment-positioning", "rubric_version": "1.1.0"},
+        "module_risk": {"skill": "risk-analytics", "rubric_version": "1.1.0"},
+        "module_context": {"skill": "company-context", "version": "0.4.0"},
+        "snapshot": _goog_snapshot_full(),
+        "valuation_anchors": dict(_GOOG_VALUATION_ANCHORS),
+        "coverage_manifest": dict(_GOOG_COVERAGE_MANIFEST),
+    }
+    docs.update(overrides)
+    return docs
+
+
+class TestContractVersion200(unittest.TestCase):
+    """The version bump itself + the 1.1.0 fields still present (additive)."""
+
+    def test_contract_version_is_200(self):
+        self.assertEqual(dc.CONTRACT_VERSION, "2.0.0")
+        c = dc.build_contract(_goog_full_docs())
+        self.assertEqual(c["contract_version"], "2.0.0")
+
+    def test_all_1_1_0_fields_still_present(self):
+        # 2.0.0 is purely additive: every 1.1.0 top-level field the consumer consumes
+        # must still be present and unchanged in shape.
+        c = dc.build_contract(_goog_full_docs())
+        for key in ("skill", "contract_version", "ticker", "as_of", "profile",
+                    "horizon_months", "scenario_horizon_months",
+                    "annual_return_hurdle", "total_return_hurdle", "ev_at_current",
+                    "hurdle_clearing_price", "grade", "score", "ev_band",
+                    "ev_uncertainty_halfwidth", "ev_uncertainty_k",
+                    "ev_uncertainty_confidence_level", "ev_robust_vs_hurdle",
+                    "provisional_note", "capital_blockers", "capital_eligible",
+                    "action_unowned", "action_owned", "entry_state"):
+            self.assertIn(key, c, key)
+
+
+class TestRunUtcAndMeta(unittest.TestCase):
+    """run_utc / latest_trading_day / data_mode / missing from snapshot.meta."""
+
+    def test_run_utc_and_latest_trading_day(self):
+        c = dc.build_contract(_goog_full_docs())
+        self.assertEqual(c["run_utc"], "2026-07-22T17:02:32Z")
+        self.assertEqual(c["latest_trading_day"], "2026-07-21")
+
+    def test_data_mode_and_missing_present(self):
+        c = dc.build_contract(_goog_full_docs())
+        self.assertEqual(c["data_mode"], "alpha_vantage")
+        self.assertEqual(c["missing"], [])
+
+    def test_degraded_omitted_when_absent(self):
+        # The real bundle carries no 'degraded' leaf -> the key is omitted.
+        c = dc.build_contract(_goog_full_docs())
+        self.assertNotIn("degraded", c)
+
+    def test_data_mode_falls_back_to_primary_source(self):
+        docs = _goog_full_docs()
+        docs["snapshot"]["meta"].pop("data_mode")
+        docs["snapshot"]["meta"]["primary_source"] = "cached"
+        c = dc.build_contract(docs)
+        self.assertEqual(c["data_mode"], "cached")
+
+
+class TestVerbatimComposite(unittest.TestCase):
+    """composite / dimensions / ev / flags copied verbatim from module_composite."""
+
+    def test_composite_block_verbatim(self):
+        comp = _goog_full_composite()
+        c = dc.build_contract(_goog_full_docs(module_composite=comp))
+        self.assertEqual(c["composite"]["score"], comp["score"])
+        self.assertEqual(c["composite"]["grade"], comp["grade"])
+        self.assertEqual(c["composite"]["action"], comp["action"])
+        self.assertEqual(c["composite"]["sensitivity"], comp["sensitivity"])
+        self.assertEqual(c["composite"]["confidence"], comp["confidence"])
+
+    def test_dimensions_verbatim(self):
+        comp = _goog_full_composite()
+        c = dc.build_contract(_goog_full_docs(module_composite=comp))
+        self.assertEqual(c["dimensions"], comp["dimensions"])
+        # nested confidence sub-object carried through unchanged.
+        self.assertEqual(c["dimensions"][0]["confidence"]["source"]["why"],
+                         "AV premium")
+
+    def test_ev_verbatim(self):
+        comp = _goog_full_composite()
+        c = dc.build_contract(_goog_full_docs(module_composite=comp))
+        self.assertEqual(c["ev"], comp["ev"])
+        self.assertEqual(c["ev"]["scenarios"], comp["ev"]["scenarios"])
+
+    def test_flags_verbatim(self):
+        comp = _goog_full_composite()
+        c = dc.build_contract(_goog_full_docs(module_composite=comp))
+        self.assertEqual(c["flags"], comp["flags"])
+
+
+class TestVerbatimTradeplan(unittest.TestCase):
+    """sizing / plan / risk_units / invalidation / expression from tradeplan."""
+
+    def test_sizing_verbatim(self):
+        c = dc.build_contract(_goog_full_docs())
+        self.assertEqual(c["sizing"], _GOOG_SIZING)
+
+    def test_plan_verbatim(self):
+        c = dc.build_contract(_goog_full_docs())
+        self.assertEqual(c["plan"]["entries"], _GOOG_ENTRIES)
+        self.assertEqual(c["plan"]["exits"], _GOOG_EXITS)
+        self.assertEqual(c["plan"]["dont_chase"], _GOOG_DONT_CHASE)
+
+    def test_risk_units_verbatim(self):
+        c = dc.build_contract(_goog_full_docs())
+        self.assertEqual(c["risk_units"], _GOOG_RISK_UNITS)
+
+    def test_invalidation_technical_and_fundamental(self):
+        c = dc.build_contract(_goog_full_docs())
+        tech = c["invalidation"]["technical"]
+        self.assertEqual(tech["condition"], "weekly close below")
+        self.assertEqual(tech["level"], 321.7431)
+        # FR-6 operator is CARRIED THROUGH; None on the current on-disk bundle
+        # (the trade_plan author adds it going forward).
+        self.assertIn("operator", tech)
+        self.assertIsNone(tech["operator"])
+        self.assertEqual(c["invalidation"]["fundamental"], _GOOG_FUNDAMENTAL_LEG)
+
+    def test_invalidation_operator_carried_when_present(self):
+        # When the trade_plan author HAS emitted the FR-6 enum, it is carried
+        # verbatim (defensive .get resolves to the real value).
+        tp = _goog_tradeplan(technical_leg={
+            "condition": "weekly close below", "level": 321.7431,
+            "operator": "weekly_close_below"})
+        c = dc.build_contract(_goog_full_docs(module_tradeplan=tp))
+        self.assertEqual(c["invalidation"]["technical"]["operator"],
+                         "weekly_close_below")
+
+    def test_expression_verbatim_plus_options_leaves(self):
+        c = dc.build_contract(_goog_full_docs())
+        expr = c["expression"]
+        self.assertIs(expr["executable"], False)
+        self.assertEqual(expr["days_to_catalyst"], 0)
+        self.assertEqual(expr["rule_version"], "expression-v1.0.0")
+        self.assertEqual(expr["structures_selected"], [])
+        # options leaves grafted from module_options.
+        self.assertEqual(expr["options_liquidity_verdict"],
+                         "thin -- declining to force structures")
+        self.assertEqual(len(expr["options_declined"]), 2)
+
+
+class TestVerbatimCoverage(unittest.TestCase):
+    """valuation_anchors / coverage / rubric_versions from coverage + modules."""
+
+    def test_valuation_anchors_verbatim(self):
+        c = dc.build_contract(_goog_full_docs())
+        self.assertEqual(c["valuation_anchors"], _GOOG_VALUATION_ANCHORS)
+        self.assertEqual(c["valuation_anchors"]["assumptions"]["wacc"], 0.1066)
+
+    def test_coverage_verbatim(self):
+        c = dc.build_contract(_goog_full_docs())
+        self.assertEqual(c["coverage"], _GOOG_COVERAGE_MANIFEST)
+        self.assertEqual(c["coverage"]["depth_mode"], "full")
+
+    def test_rubric_versions_assembly(self):
+        c = dc.build_contract(_goog_full_docs())
+        rv = c["rubric_versions"]
+        self.assertEqual(rv["technical"], "1.2.0")
+        self.assertEqual(rv["sentiment"], "1.1.0")
+        self.assertEqual(rv["risk"], "1.1.0")
+        self.assertEqual(rv["composite"], "1.1.0")
+        self.assertEqual(rv["tradeplan"], "1.1.0")
+        self.assertEqual(rv["options"], "1.1.0")
+        self.assertEqual(rv["confidence"], "1.0.0")
+        # The _fundamental stub carries no rubric_version leaf -> omitted (the
+        # omit-if-source-absent rule holds per key).
+        self.assertNotIn("fundamental", rv)
+
+    def test_rubric_versions_includes_fundamental_when_present(self):
+        docs = _goog_full_docs()
+        docs["module_fundamental"] = dict(docs["module_fundamental"])
+        docs["module_fundamental"]["rubric_version"] = "1.2.0"
+        c = dc.build_contract(docs)
+        self.assertEqual(c["rubric_versions"]["fundamental"], "1.2.0")
+
+    def test_rubric_versions_omits_module_without_rubric_version(self):
+        # module_context carries no rubric_version -> 'context' key omitted.
+        c = dc.build_contract(_goog_full_docs())
+        self.assertNotIn("context", c["rubric_versions"])
+
+
+class TestCatalystsAssembly(unittest.TestCase):
+    """FR-2 catalysts[] -- earnings + dividend assembly incl days_out arithmetic."""
+
+    def test_earnings_catalyst_zero_days_out(self):
+        # as_of 2026-07-22 == earnings date -> days_out 0.
+        c = dc.build_contract(_goog_full_docs())
+        earnings = c["catalysts"][0]
+        self.assertEqual(earnings["type"], "earnings")
+        self.assertEqual(earnings["date_iso"], "2026-07-22")
+        self.assertEqual(earnings["days_out"], 0)
+        self.assertIs(earnings["in_thesis"], False)  # <- expression.catalyst_in_thesis
+        self.assertAlmostEqual(earnings["implied_move_pct"], 0.05161038735954245)
+        self.assertEqual(earnings["consensus_eps"], 2.86)
+
+    def test_earnings_days_out_known_gap(self):
+        # Build a fixture where as_of and earnings differ by a known N=6.
+        comp = _goog_full_composite()
+        comp["as_of"] = "2026-07-16"
+        snap = _goog_snapshot_full(earnings_date="2026-07-22")
+        c = dc.build_contract(_goog_full_docs(module_composite=comp, snapshot=snap))
+        earnings = c["catalysts"][0]
+        self.assertEqual(earnings["days_out"], 6)  # 2026-07-22 - 2026-07-16
+
+    def test_earnings_days_out_negative_when_past(self):
+        comp = _goog_full_composite()
+        comp["as_of"] = "2026-07-25"
+        snap = _goog_snapshot_full(earnings_date="2026-07-22")
+        c = dc.build_contract(_goog_full_docs(module_composite=comp, snapshot=snap))
+        self.assertEqual(c["catalysts"][0]["days_out"], -3)
+
+    def test_days_out_uses_as_of_utc_when_composite_as_of_absent(self):
+        comp = _goog_full_composite()
+        comp.pop("as_of")  # falls back to snapshot.meta.as_of_utc[:10]
+        snap = _goog_snapshot_full(as_of_utc="2026-07-16T12:00:00Z",
+                                   earnings_date="2026-07-22")
+        c = dc.build_contract(_goog_full_docs(module_composite=comp, snapshot=snap))
+        self.assertEqual(c["catalysts"][0]["days_out"], 6)
+
+    def test_dividend_catalyst(self):
+        c = dc.build_contract(_goog_full_docs())
+        dividend = next(x for x in c["catalysts"] if x["type"] == "dividend")
+        self.assertEqual(dividend["date_iso"], "2026-06-08")
+        self.assertEqual(dividend["label"], "dividend ex-date")
+        self.assertIs(dividend["in_thesis"], False)
+        self.assertEqual(dividend["per_share"], 0.84)
+        # days_out: 2026-06-08 - 2026-07-22 = -44 (past ex-date).
+        self.assertEqual(dividend["days_out"], -44)
+
+    def test_earnings_omitted_when_date_absent(self):
+        snap = _goog_snapshot_full()
+        snap["events"]["next_earnings"].pop("date")
+        c = dc.build_contract(_goog_full_docs(snapshot=snap))
+        types = [x["type"] for x in c.get("catalysts", [])]
+        self.assertNotIn("earnings", types)
+
+    def test_existing_catalysts_appended_verbatim(self):
+        snap = _goog_snapshot_full()
+        snap["events"]["catalysts"] = [
+            {"label": "antitrust ruling", "date_iso": "2026-09-01",
+             "type": "legal"}]
+        c = dc.build_contract(_goog_full_docs(snapshot=snap))
+        self.assertIn({"label": "antitrust ruling", "date_iso": "2026-09-01",
+                       "type": "legal"}, c["catalysts"])
+
+    def test_catalysts_omitted_when_no_events(self):
+        docs = _goog_full_docs()
+        docs["snapshot"] = {"meta": {"ticker": "GOOG",
+                                     "as_of_utc": "2026-07-22T00:00:00Z"},
+                            "price": {"last": 346.19}}
+        c = dc.build_contract(docs)
+        self.assertNotIn("catalysts", c)
+
+
+class TestThesisIdentity(unittest.TestCase):
+    """FR-5 thesis.id -- deterministic + refresh-stable + graceful omission."""
+
+    def test_thesis_id_deterministic(self):
+        c = dc.build_contract(_goog_full_docs())
+        self.assertEqual(c["thesis"]["registered_date"], "2026-07-21")
+        self.assertEqual(c["thesis"]["id"], "GOOG-2026-07-21")
+        self.assertEqual(c["thesis"]["variant"], "some")
+        self.assertEqual(c["thesis"]["catalyst_clarity"], "clear")
+
+    def test_thesis_omits_next_review(self):
+        c = dc.build_contract(_goog_full_docs())
+        self.assertNotIn("next_review", c["thesis"])
+
+    def test_thesis_id_stable_across_refresh(self):
+        # Same coverage_manifest -> same id even when composite/as_of change.
+        docs1 = _goog_full_docs()
+        id1 = dc.build_contract(docs1)["thesis"]["id"]
+
+        comp2 = _goog_full_composite()
+        comp2["as_of"] = "2026-08-15"  # refreshed later
+        comp2["score"] = 71.0
+        comp2["grade"] = "A"
+        snap2 = _goog_snapshot_full(as_of_utc="2026-08-15T17:00:00Z")
+        docs2 = _goog_full_docs(module_composite=comp2, snapshot=snap2)
+        # coverage_manifest carried forward unchanged (built once).
+        id2 = dc.build_contract(docs2)["thesis"]["id"]
+
+        self.assertEqual(id1, id2)
+        self.assertEqual(id2, "GOOG-2026-07-21")
+
+    def test_thesis_omitted_when_coverage_manifest_absent(self):
+        docs = _goog_full_docs(coverage_manifest=None)
+        c = dc.build_contract(docs)
+        self.assertNotIn("thesis", c)
+
+
+class TestGracefulOmission(unittest.TestCase):
+    """Each added section omitted (never fabricated) when its source module is None.
+
+    Preserves the module's 'omit-if-source-absent' rule for the 2.0.0 sections.
+    """
+
+    def test_absent_tradeplan_omits_plan_sizing_expression(self):
+        docs = _goog_full_docs(module_tradeplan=None)
+        c = dc.build_contract(docs)
+        for key in ("sizing", "plan", "risk_units", "invalidation"):
+            self.assertNotIn(key, c, key)
+        # expression still carries the options leaves (from module_options) but no
+        # tradeplan leaves -> present with only options keys.
+        self.assertIn("options_liquidity_verdict", c.get("expression", {}))
+        self.assertNotIn("executable", c.get("expression", {}))
+        self.assertEqual(c["rubric_versions"].get("tradeplan"), None)
+
+    def test_absent_options_omits_options_expression_leaves(self):
+        docs = _goog_full_docs(module_options=None)
+        c = dc.build_contract(docs)
+        self.assertNotIn("options_liquidity_verdict", c.get("expression", {}))
+        self.assertNotIn("options_declined", c.get("expression", {}))
+        self.assertNotIn("options", c["rubric_versions"])
+
+    def test_absent_valuation_anchors_omits_block(self):
+        c = dc.build_contract(_goog_full_docs(valuation_anchors=None))
+        self.assertNotIn("valuation_anchors", c)
+
+    def test_absent_coverage_manifest_omits_coverage_and_thesis(self):
+        c = dc.build_contract(_goog_full_docs(coverage_manifest=None))
+        self.assertNotIn("coverage", c)
+        self.assertNotIn("thesis", c)
+
+    def test_absent_snapshot_omits_run_utc_and_catalysts(self):
+        c = dc.build_contract(_goog_full_docs(snapshot=None))
+        self.assertNotIn("run_utc", c)
+        self.assertNotIn("catalysts", c)
+
+
+class TestDerivedFieldAllowlist(unittest.TestCase):
+    """The §3 derived-field allowlist items are present in the contract output."""
+
+    def test_derived_fields_present(self):
+        c = dc.build_contract(_goog_full_docs())
+        # The derived leaves (computed, not verbatim) must all be present.
+        for key in ("annual_return_hurdle", "horizon_months",
+                    "scenario_horizon_months", "ev_band",
+                    "ev_uncertainty_halfwidth", "ev_uncertainty_k",
+                    "ev_robust_vs_hurdle", "hurdle_clearing_price",
+                    "capital_eligible", "capital_blockers", "action_owned",
+                    "action_unowned", "entry_state", "contract_version"):
+            self.assertIn(key, c, key)
+        # nested derived leaves.
+        self.assertEqual(c["catalysts"][0]["days_out"], 0)
+        self.assertEqual(c["thesis"]["id"], "GOOG-2026-07-21")
+        self.assertEqual(c["thesis"]["registered_date"], "2026-07-21")
+
+
+# --------------------------------------------------------------------------- #
+# 8. Structural validation against docs/decision.schema.json (stdlib-only).
+#
+# We do NOT add a jsonschema dependency; a minimal, hand-rolled validator checks the
+# schema's `required` keys + declared leaf `type`s + the pinned enums. This mirrors
+# the stdlib structural check report_qc will use (FR-3).
+# --------------------------------------------------------------------------- #
+
+_SCHEMA_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "docs", "decision.schema.json")
+
+_JSON_TYPE = {
+    "object": dict, "array": list, "string": str, "boolean": bool,
+    "number": (int, float), "integer": int, "null": type(None),
+}
+
+
+def _type_ok(value, type_decl):
+    """True if value matches a JSON-Schema `type` (str or list of str)."""
+    types = type_decl if isinstance(type_decl, list) else [type_decl]
+    for t in types:
+        py = _JSON_TYPE.get(t)
+        if py is None:
+            continue
+        # bool is a subclass of int -> guard number/integer against bool.
+        if t in ("number", "integer") and isinstance(value, bool):
+            continue
+        if isinstance(value, py):
+            return True
+    return False
+
+
+def _validate(instance, schema, path="$"):
+    """Minimal structural validation: required keys, leaf types, enums, array items.
+    Returns a list of error strings (empty == valid)."""
+    errors = []
+    stype = schema.get("type")
+    if stype is not None and not _type_ok(instance, stype):
+        errors.append(f"{path}: type {type(instance).__name__} not in {stype}")
+        return errors  # type mismatch -> stop descending
+
+    if stype == "object" or (stype is None and isinstance(instance, dict)):
+        for req in schema.get("required", []):
+            if req not in instance:
+                errors.append(f"{path}: missing required key '{req}'")
+        for key, subschema in (schema.get("properties") or {}).items():
+            if key in instance:
+                errors.extend(_validate(instance[key], subschema, f"{path}.{key}"))
+
+    if stype == "array" and isinstance(instance, list):
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for i, item in enumerate(instance):
+                errors.extend(_validate(item, item_schema, f"{path}[{i}]"))
+        if "minItems" in schema and len(instance) < schema["minItems"]:
+            errors.append(f"{path}: fewer than minItems {schema['minItems']}")
+        if "maxItems" in schema and len(instance) > schema["maxItems"]:
+            errors.append(f"{path}: more than maxItems {schema['maxItems']}")
+
+    enum = schema.get("enum")
+    if enum is not None and instance not in enum:
+        errors.append(f"{path}: value {instance!r} not in enum {enum}")
+
+    const = schema.get("const")
+    if const is not None and instance != const:
+        errors.append(f"{path}: value {instance!r} != const {const!r}")
+
+    return errors
+
+
+class TestSchemaValidation(unittest.TestCase):
+    """The built contract validates against docs/decision.schema.json (structural)."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(_SCHEMA_PATH) as fh:
+            cls.schema = json.load(fh)
+
+    def test_schema_file_is_valid_json(self):
+        self.assertEqual(
+            self.schema["properties"]["contract_version"]["const"], "2.0.0")
+
+    def test_full_contract_validates(self):
+        c = dc.build_contract(_goog_full_docs())
+        errors = _validate(c, self.schema)
+        self.assertEqual(errors, [], "\n".join(errors))
+
+    def test_required_capital_block_enforced(self):
+        # Dropping a required capital field is caught by the validator.
+        c = dc.build_contract(_goog_full_docs())
+        del c["capital_eligible"]
+        errors = _validate(c, self.schema)
+        self.assertTrue(any("capital_eligible" in e for e in errors), errors)
+
+    def test_catalyst_required_leaves_enforced(self):
+        c = dc.build_contract(_goog_full_docs())
+        del c["catalysts"][0]["days_out"]
+        errors = _validate(c, self.schema)
+        self.assertTrue(any("days_out" in e for e in errors), errors)
+
+    def test_thesis_id_required_enforced(self):
+        c = dc.build_contract(_goog_full_docs())
+        del c["thesis"]["id"]
+        errors = _validate(c, self.schema)
+        self.assertTrue(any("id" in e for e in errors), errors)
+
+    def test_operator_enum_enforced(self):
+        # A bad operator value fails the enum pin.
+        tp = _goog_tradeplan(technical_leg={
+            "condition": "weekly close below", "level": 321.7431,
+            "operator": "NOT_A_VALID_OP"})
+        c = dc.build_contract(_goog_full_docs(module_tradeplan=tp))
+        errors = _validate(c, self.schema)
+        self.assertTrue(any("operator" in e for e in errors), errors)
+
+    def test_valid_operator_passes_enum(self):
+        tp = _goog_tradeplan(technical_leg={
+            "condition": "weekly close below", "level": 321.7431,
+            "operator": "weekly_close_below"})
+        c = dc.build_contract(_goog_full_docs(module_tradeplan=tp))
+        errors = _validate(c, self.schema)
+        self.assertEqual(errors, [], "\n".join(errors))
 
 
 if __name__ == "__main__":

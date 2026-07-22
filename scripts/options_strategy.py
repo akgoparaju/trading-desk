@@ -47,6 +47,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from scripts import chain as chain_mod
+from scripts._artifact import emit_json
 
 RUBRIC_VERSION = "1.1.0"
 SKILL_NAME = "options-strategy"
@@ -1560,8 +1561,7 @@ def _run(args):
         # un-renderable. Everything downstream already handles zero structures.
         doc = build_no_chain_module(snapshot, direction, direction_source, args.mode)
         out = args.out or os.path.join(args.bundle, "module_options.json")
-        with open(out, "w") as fh:
-            json.dump(doc, fh, indent=2, sort_keys=True)
+        emit_json(doc, out)
         print(out)
         return 0
     chain_path = chain_file if os.path.isabs(chain_file) \
@@ -1579,8 +1579,7 @@ def _run(args):
     doc = build_module(snapshot, direction, direction_source, args.mode, tradeplan)
 
     out = args.out or os.path.join(args.bundle, "module_options.json")
-    with open(out, "w") as fh:
-        json.dump(doc, fh, indent=2, sort_keys=True)
+    emit_json(doc, out)
     print(out)
     return 0
 
