@@ -88,9 +88,10 @@ _O17_VARIANT_CAP_TIER = "some"
 # note so a reader knows these thresholds are review's first numbers, subject to the
 # SKILL falsifier — not calibrated defaults.
 _PROVISIONAL_NOTE = (
-    "composite-v1.1.0 PROVISIONAL: base-rate anchoring (+/-5% move bins, 25pp "
-    "deviation flag, N>=4) and the 25-pt auto-tension spread are review's first "
-    "numbers, soft/disclosed and subject to the SKILL falsifier -- not calibrated.")
+    "composite-v1.1.0: base-rate anchoring (+/-5% move bins, 25pp deviation flag, "
+    "N>=4) is soft/disclosed and OUTCOME-forward-tracking (SKILL falsifier). The "
+    "auto-tension spread was RECALIBRATED 2026-07-22 (O1) from 25 to 35pt -- the "
+    "10-name structural set fired 25pt on 6/10 (>half, refuted); 35pt fires 3/10.")
 
 # --- Base-rate anchoring (Goal A, PROVISIONAL) ------------------------------- #
 # A historical earnings move is "material" (a bull/bear reaction) beyond +/-5%;
@@ -103,10 +104,13 @@ _BASE_RATE_MIN_HISTORY = 4
 # (in probability points, i.e. 0.25 == 25pp) trips the SOFT flag. Provisional.
 _BASE_RATE_DEVIATION_THRESHOLD = 0.25
 
-# --- Auto-tension gate (Goal C, PROVISIONAL) --------------------------------- #
+# --- Auto-tension gate (Goal C) ---------------------------------------------- #
 # When the spread (max - min) across the evidence-dimension scores (thesis_conviction
-# EXCLUDED) exceeds this, tension auto-populates with a scripted string. Provisional.
-_TENSION_SPREAD_THRESHOLD = 25
+# EXCLUDED) exceeds this, tension auto-populates with a scripted string (a DISCLOSURE,
+# not a score input). RECALIBRATED 2026-07-22 (O1): the 10-name structural set fired
+# the original 25pt on 6/10 (>half -> refuted by the SKILL falsifier); 35pt fires 3/10
+# on the upper-tercile natural break (spreads clustered <=32.5, then 36.2 / 39.1 / 44.5).
+_TENSION_SPREAD_THRESHOLD = 35
 
 # This module scores NO snapshot field directly (it consumes module scores and reads
 # price.last only as an EV reference). Empty by construction -> single-mapping safe.
