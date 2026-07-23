@@ -320,6 +320,37 @@ class TestExits(unittest.TestCase):
         self.assertFalse(bt["triangulated"])
         self.assertEqual(bt["dcf_bull"], 100.0)
 
+    def test_bull_target_floored_to_dcf_bull_when_comps_below_spot(self):
+        # comps_high 80 < spot 100 -> min(150,80)=80 is a sub-spot "bull"; dcf_bull 140
+        # clears spot -> floor to min(raw 150, dcf_bull 140) = 140, disclosed.
+        exits = tp.build_exits(_LAST, _technical_doc()["ladder"], _SCENARIOS, 5.5,
+                               dcf_bull=140.0, comps_high=80.0)
+        bt = exits["bull_target"]
+        self.assertEqual(bt["level"], 140.0)
+        self.assertEqual(bt["bull_floor"], "dcf_bull")
+        self.assertEqual(bt["scenario_raw"], 150.0)      # raw still preserved
+        self.assertGreaterEqual(bt["level"], _LAST)      # never below spot
+        self.assertIn("floored", bt["note"])
+
+    def test_bull_target_floored_to_spot_when_no_anchor_above_spot(self):
+        # comps_high 80 < spot 100 and dcf_bull 90 <= spot -> floor to spot 100.
+        exits = tp.build_exits(_LAST, _technical_doc()["ladder"], _SCENARIOS, 5.5,
+                               dcf_bull=90.0, comps_high=80.0)
+        bt = exits["bull_target"]
+        self.assertEqual(bt["level"], 100.0)
+        self.assertEqual(bt["bull_floor"], "spot")
+        # dcf_bull absent entirely -> still floored to spot.
+        exits2 = tp.build_exits(_LAST, _technical_doc()["ladder"], _SCENARIOS, 5.5,
+                                dcf_bull=None, comps_high=80.0)
+        self.assertEqual(exits2["bull_target"]["level"], 100.0)
+        self.assertEqual(exits2["bull_target"]["bull_floor"], "spot")
+
+    def test_bull_target_no_floor_when_triangulated_above_spot(self):
+        # comps_high 130 > spot 100 -> level 130, no floor applied.
+        exits = tp.build_exits(_LAST, _technical_doc()["ladder"], _SCENARIOS, 5.5,
+                               dcf_bull=145.0, comps_high=130.0)
+        self.assertIsNone(exits["bull_target"]["bull_floor"])
+
 
 # --------------------------------------------------------------------------- #
 # Valuation-anchor loading (Goal B): sibling coverage dir, optional-existence.

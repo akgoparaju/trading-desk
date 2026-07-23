@@ -494,7 +494,23 @@ class TestPositioning(unittest.TestCase):
             _sent(short_interest_pct=5.0, dtc=12.0, si_trend="rising"),
             rsi14=55.0)
         self.assertEqual(sub["inputs"]["si_points"], 5)
-        self.assertIn("squeeze/crowded-short risk", sub["arithmetic"])
+        self.assertIn("crowded-short", sub["arithmetic"])
+
+    def test_crowded_short_joint_high_si_moderate_dtc_rising(self):
+        # O1 re-basing: dtc 6 (< 10) but si 20 (> 15) AND dtc > 5 AND rising -> -1.
+        # si 20 -> >15 band = 2; notch -> 1.
+        sub = ss.score_positioning(
+            _sent(short_interest_pct=20.0, dtc=6.0, si_trend="rising"),
+            rsi14=55.0)
+        self.assertEqual(sub["inputs"]["si_points"], 1)
+        self.assertIn("crowded-short", sub["arithmetic"])
+
+    def test_crowded_short_high_si_low_dtc_no_notch(self):
+        # si 20 (> 15) but dtc 4 (<= 5) -> NOT crowded (neither dtc>10 nor dtc>5 path).
+        sub = ss.score_positioning(
+            _sent(short_interest_pct=20.0, dtc=4.0, si_trend="rising"),
+            rsi14=55.0)
+        self.assertEqual(sub["inputs"]["si_points"], 2)   # >15 band, no notch
 
     def test_dtc_high_but_not_rising_no_notch(self):
         # dtc 12 > 10 but si_trend flat -> no notch -> stays 6

@@ -425,8 +425,8 @@ class TestO17BuildModuleGovern(unittest.TestCase):
         doc = self._build(_FUND_UNRESOLVED, variant="some")
         self.assertEqual(doc["valuation_state"], _vr.STATE_UNRESOLVED)
         self.assertIn("composite-o17-v1.0.0 PROVISIONAL", doc["note"])
-        # The base composite provisional note still travels too.
-        self.assertIn("composite-v1.1.0 PROVISIONAL", doc["note"])
+        # The base composite note still travels too (auto-tension recalibrated O1).
+        self.assertIn("composite-v1.1.0:", doc["note"])
 
     def test_unresolved_grade_cap_when_score_high(self):
         # Push the composite >= 80 so grade_for would say A, then confirm A->B.
@@ -690,20 +690,21 @@ class TestAutoTension(unittest.TestCase):
             {"name": "thesis_conviction", "score": thesis},
         ]
 
-    def test_fires_above_25_spread_names_dims(self):
-        # sentiment 59 high, fundamental 31 low -> spread 28 > 25 -> fires.
-        dims = self._dims(technical=50, fundamental=31, sentiment=59, risk=45)
+    def test_fires_above_35_spread_names_dims(self):
+        # sentiment 71 high, fundamental 31 low -> spread 40 > 35 -> fires.
+        # (auto-tension threshold RECALIBRATED 25->35 on 2026-07-22, O1)
+        dims = self._dims(technical=50, fundamental=31, sentiment=71, risk=45)
         tension = sc.build_auto_tension(dims)
         self.assertIsNotNone(tension)
         self.assertIn("sentiment", tension)
         self.assertIn("fundamental", tension)
-        self.assertIn("59", tension)
+        self.assertIn("71", tension)
         self.assertIn("31", tension)
-        self.assertIn("28-pt", tension)
+        self.assertIn("40-pt", tension)
 
-    def test_null_at_or_below_25_spread(self):
-        # spread exactly 25 (70-45) -> not > 25 -> null.
-        dims = self._dims(technical=70, fundamental=60, sentiment=55, risk=45)
+    def test_null_at_or_below_35_spread(self):
+        # spread exactly 35 (80-45) -> not > 35 -> null.
+        dims = self._dims(technical=80, fundamental=60, sentiment=55, risk=45)
         self.assertIsNone(sc.build_auto_tension(dims))
 
     def test_thesis_conviction_excluded_from_spread(self):
@@ -713,12 +714,12 @@ class TestAutoTension(unittest.TestCase):
                           thesis=95)
         self.assertIsNone(sc.build_auto_tension(dims))
 
-    def test_fires_just_above_25(self):
-        # spread 26 (71-45) -> fires.
-        dims = self._dims(technical=71, fundamental=60, sentiment=55, risk=45)
+    def test_fires_just_above_35(self):
+        # spread 36 (81-45) -> fires.
+        dims = self._dims(technical=81, fundamental=60, sentiment=55, risk=45)
         tension = sc.build_auto_tension(dims)
         self.assertIsNotNone(tension)
-        self.assertIn("26-pt", tension)
+        self.assertIn("36-pt", tension)
 
 
 # --------------------------------------------------------------------------- #
@@ -886,13 +887,10 @@ class TestCLI(unittest.TestCase):
         self.assertAlmostEqual(doc["score"], 59.9, places=4)
         self.assertEqual(doc["grade"], "C")
         self.assertEqual(doc["action"], "Hold/Trim")
-        # Auto-tension (Goal C): fixture evidence scores 70/60/50/40 -> spread 30
-        # > 25 -> tension auto-populates naming the high/low dims (technical high,
-        # risk low). thesis_conviction is excluded from the spread.
-        self.assertIsNotNone(doc["tension"])
-        self.assertIn("technical", doc["tension"])
-        self.assertIn("risk", doc["tension"])
-        self.assertIn("30-pt", doc["tension"])
+        # Auto-tension (Goal C): fixture evidence scores 70/60/50/40 -> spread 30,
+        # BELOW the recalibrated 35-pt threshold (was 25; O1 2026-07-22) -> tension
+        # stays null. thesis_conviction is excluded from the spread.
+        self.assertIsNone(doc["tension"])
         # base_rate_check (Goal A): fixture snapshot carries no earnings_move_history
         # (n=0 < 4) -> the check is SKIPPED + disclosed, never a hard gate.
         brc = doc["flags"]["base_rate_check"]
@@ -1148,7 +1146,11 @@ class TestBaseRateAndTensionCLI(unittest.TestCase):
         self.assertEqual(brc["n_history"], 3)
 
     def test_auto_tension_fires_on_wide_spread(self):
-        # _MOD_SCORES: technical 70 / risk 40 -> spread 30 > 25 -> tension fires.
+        # rewrite modules WIDE (technical 80 / risk 40 -> spread 40 > 35, the
+        # recalibrated threshold; O1 2026-07-22) -> tension fires.
+        for name, s in {"technical": 80, "fundamental": 60,
+                        "sentiment": 55, "risk": 40}.items():
+            _write_module(self.dir, name, s)
         _write_snapshot(self.dir, earnings_move_history=_MOVE_HISTORY)
         proc = self._run()
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -1158,7 +1160,7 @@ class TestBaseRateAndTensionCLI(unittest.TestCase):
         self.assertIn("risk", doc["tension"])
 
     def test_auto_tension_null_on_tight_spread(self):
-        # rewrite modules tight (spread 20 <= 25) -> tension stays null.
+        # rewrite modules tight (spread 20 < 35) -> tension stays null.
         for name, s in {"technical": 60, "fundamental": 55,
                         "sentiment": 50, "risk": 40}.items():
             _write_module(self.dir, name, s)
@@ -1167,13 +1169,14 @@ class TestBaseRateAndTensionCLI(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIsNone(self._read()["tension"])
 
-    def test_rubric_is_1_1_0_and_note_provisional(self):
+    def test_rubric_is_1_1_0_and_note(self):
         _write_snapshot(self.dir, earnings_move_history=_MOVE_HISTORY)
         proc = self._run()
         self.assertEqual(proc.returncode, 0, proc.stderr)
         doc = self._read()
         self.assertEqual(doc["rubric_version"], "1.1.0")
-        self.assertIn("PROVISIONAL", doc["note"])
+        # base-rate soft/outcome-forward; auto-tension recalibrated (O1 2026-07-22).
+        self.assertIn("OUTCOME-forward-tracking", doc["note"])
 
 
 # --------------------------------------------------------------------------- #

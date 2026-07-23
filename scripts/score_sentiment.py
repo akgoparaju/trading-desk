@@ -533,14 +533,24 @@ def score_positioning(sentiment, rsi14) -> dict:
             else:  # > 15
                 si_pts = 2
                 parts.append(f"short_interest_pct {_fmt(si)} > 15 -> 2/6")
-            # DTC notch (only when the complacency guard did NOT fire).
+            # Crowded-short notch (only when the complacency guard did NOT fire).
+            # -1 when SI is RISING AND (very high days-to-cover, OR a heavy short book
+            # still elevated on DTC). Re-based 2026-07-23 (O1): DTC>10 rarely fires on
+            # liquid US names -- high-SI names are high-volume, so days-to-cover stays
+            # moderate (a 29.6%-short name read dtc ~6-7) -- so a crowded, still-covered
+            # book (si_pct > 15 AND dtc > 5) also trips it. Never SI% alone or DTC>5
+            # alone; the rising-trend condition is required in every path.
             if dtc is not None:
                 si_rising = (si_trend or "").lower() == "rising"
-                if dtc > 10 and si_rising:
+                crowded = si_rising and (
+                    dtc > 10 or (si is not None and si > 15 and dtc > 5))
+                if crowded:
                     si_pts = max(1, si_pts - 1)
+                    reason = ("dtc > 10" if dtc > 10
+                              else f"si {_fmt(si)}>15 & dtc {_fmt(_clean(dtc))}>5")
                     parts.append(
-                        f"dtc {_fmt(_clean(dtc))} > 10 & si_trend rising -> -1 notch "
-                        f"(squeeze/crowded-short risk) -> {si_pts}/6")
+                        f"crowded-short ({reason}, si_trend rising) -> -1 notch "
+                        f"-> {si_pts}/6")
                 elif dtc < 2:
                     si_pts = min(6, si_pts + 1)
                     parts.append(

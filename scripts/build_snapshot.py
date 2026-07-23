@@ -439,6 +439,10 @@ def build_price(quote, overview, rows, web_spot):
 
     shares = num(overview.get("SharesOutstanding")) if isinstance(overview, dict) else None
     shares_m = shares / 1e6 if shares is not None else None
+    # SharesFloat: the standard base a short-interest % is struck against (< shares
+    # outstanding). Preferred over shares_m for the DTC short-share count.
+    float_shares = num(overview.get("SharesFloat")) if isinstance(overview, dict) else None
+    float_m = float_shares / 1e6 if float_shares is not None else None
     mktcap_overview = num(overview.get("MarketCapitalization")) if isinstance(overview, dict) else None
     mktcap_computed = last * shares if (last is not None and shares is not None) else None
 
@@ -449,10 +453,15 @@ def build_price(quote, overview, rows, web_spot):
     wk_high = num(overview.get("52WeekHigh")) if isinstance(overview, dict) else None
     wk_low = num(overview.get("52WeekLow")) if isinstance(overview, dict) else None
 
-    # Average dollar volume over last ~63 trading days (raw close * volume).
+    # Average dollar volume over last ~63 trading days (raw close * volume), AND a
+    # direct average SHARE volume over the same window. The share ADV is the correct
+    # DTC denominator: adv_dollar/last distorts days-to-cover for names whose price
+    # moved over the window (a fallen name reads too many shares -> too-low DTC).
     dollar = [r["close"] * r["volume"] for r in rows
               if r["close"] is not None and r["volume"] is not None]
     adv = _mean(dollar[-_W3M:]) if dollar else None
+    share_vols = [r["volume"] for r in rows if r["volume"] is not None]
+    adv_shares = _mean(share_vols[-_W3M:]) if share_vols else None
 
     spot_block = None
     if isinstance(web_spot, dict) and num(web_spot.get("price")) is not None:
@@ -466,11 +475,13 @@ def build_price(quote, overview, rows, web_spot):
         "wk52_high": wk_high,
         "wk52_low": wk_low,
         "shares_diluted_m": shares_m,
+        "shares_float_m": float_m,
         "mktcap_overview": mktcap_overview,
         "mktcap_computed": mktcap_computed,
         "mktcap": mktcap,
         "mktcap_basis": mktcap_basis,
         "adv_dollar_3m": adv,
+        "adv_shares_3m": adv_shares,
         "web_spot_check": spot_block,
         # QF2: vendor latest-trading-day stamp; moved to meta.latest_trading_day
         # by the caller (build_snapshot) -- kept here so build_price stays a
@@ -683,13 +694,32 @@ def build_technicals(rows, series_source=None, next_earnings_date=None,
         n_gaps = len(abs_gaps)
         # p95 via nearest-rank on the sorted abs series (ceil(0.95*n) - 1, clamped).
         idx = min(n_gaps - 1, max(0, math.ceil(0.95 * n_gaps) - 1))
+        # Trailing ~3y scoring window (recent gap regime). tail_risk SCORES off this
+        # (p95_abs_3y + tail_mean_95_3y = magnitude of the worst-5% recent gaps), NOT
+        # the full-history kurtosis -- a single decade-old crash gap must not brand a
+        # currently-calm name "violent" (O1 2026-07-23). Full-history fields stay as
+        # diagnostic disclosure. Short-history names use all they have as their "3y".
+        gaps_3y = indicators.overnight_gap_series(rows[-(_W12M * 3 + 1):])
+        abs_3y = sorted(abs(g) for g in gaps_3y)
+        n_3y = len(abs_3y)
+        p95_3y = tail_mean_3y = None
+        if n_3y >= 4:
+            i3 = min(n_3y - 1, max(0, math.ceil(0.95 * n_3y) - 1))
+            p95_3y = abs_3y[i3]
+            worst = abs_3y[i3:]
+            tail_mean_3y = sum(worst) / len(worst)
         overnight_gap = {
             "mean_abs": sum(abs_gaps) / n_gaps,
             "p95_abs": abs_gaps[idx],
             "max_abs": abs_gaps[-1],
-            "excess_kurtosis": indicators.excess_kurtosis(gaps),
+            "excess_kurtosis": indicators.excess_kurtosis(gaps),   # full-hist DIAGNOSTIC
             "jump_count_2sigma": indicators.jump_count_2sigma(gaps),
             "n": n_gaps,
+            # trailing-3y scoring window (recent regime) -- what tail_risk scores off
+            "window_years_scored": 3,
+            "p95_abs_3y": p95_3y,
+            "tail_mean_95_3y": tail_mean_3y,
+            "n_3y": n_3y,
         }
 
     # -- Wave 4A: MA stack + slopes (needed both for the block and the stage) --
@@ -1331,20 +1361,24 @@ def build_sentiment(overview, price, pc_realtime, short_interest, news,
     si = short_interest if isinstance(short_interest, dict) else {}
     si_pct = num(si.get("short_interest_pct")) if si else None
 
-    # Days-to-cover (DTC): trailing-90d short interest as a share count divided
-    # by average daily SHARE volume (ADV$ / last). CAVEAT: shares_diluted_m is a
-    # DILUTED share count, not the shares-outstanding float SI% is typically
-    # struck against, so this DTC is a deterministic approximation, not the
-    # exchange-published days-to-cover. Null when any input is null/zero.
+    # Days-to-cover (DTC) = short-interest share count / average daily SHARE volume.
+    # Data basis (corrected 2026-07-23, O1): (1) the denominator is a DIRECT 3m share
+    # ADV (adv_shares_3m), NOT adv_dollar_3m/last -- the latter distorts DTC for names
+    # whose price moved over the window (a fallen name read too-many shares -> too-low
+    # DTC). (2) the short-share count uses the best-available base a short-% is struck
+    # against: SharesFloat -> SharesOutstanding (shares_diluted_m is populated FROM
+    # SharesOutstanding, see build_price) -> null. `dtc_basis` discloses which. Null
+    # when inputs missing/zero.
     dtc = None
-    adv = price.get("adv_dollar_3m")
-    shares_m = price.get("shares_diluted_m")
-    if (si_pct and adv and last and shares_m
-            and si_pct > 0 and adv > 0 and last > 0 and shares_m > 0):
-        si_shares = (si_pct / 100.0) * shares_m * 1e6
-        avg_daily_shares = adv / last
-        if avg_daily_shares > 0:
-            dtc = si_shares / avg_daily_shares
+    adv_shares = price.get("adv_shares_3m")
+    float_m = price.get("shares_float_m")
+    so_m = price.get("shares_diluted_m")   # == SharesOutstanding (see build_price)
+    base_m = float_m if (float_m and float_m > 0) else so_m
+    dtc_basis = "float" if (float_m and float_m > 0) else ("shares_outstanding" if so_m else None)
+    if (si_pct and adv_shares and base_m
+            and si_pct > 0 and adv_shares > 0 and base_m > 0):
+        si_shares = (si_pct / 100.0) * base_m * 1e6
+        dtc = si_shares / adv_shares
 
     # Promote the already-computed 25d/30d skew into the sentiment block for
     # scorer locality (no recomputation -- read straight off the options block).
@@ -1362,6 +1396,7 @@ def build_sentiment(overview, price, pc_realtime, short_interest, news,
         "si_trend": si.get("si_trend") if si else None,
         "si_as_of": si.get("as_of") if si else None,
         "dtc": dtc,
+        "dtc_basis": dtc_basis,
         "put_call_ratio_full_chain": pc_full,
         "put_call_ratio_full_chain_volume": pc_full_volume,
         "put_call_ratio_realtime": pc_rt,
