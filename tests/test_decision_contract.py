@@ -1077,14 +1077,54 @@ class TestCatalystsAssembly(unittest.TestCase):
         types = [x["type"] for x in c.get("catalysts", [])]
         self.assertNotIn("earnings", types)
 
-    def test_existing_catalysts_appended_verbatim(self):
+    def test_prewellformed_catalyst_normalized(self):
+        # A pre-shaped catalyst keeps its label/date_iso/type and gains days_out.
         snap = _goog_snapshot_full()
         snap["events"]["catalysts"] = [
-            {"label": "antitrust ruling", "date_iso": "2026-09-01",
-             "type": "legal"}]
+            {"label": "antitrust ruling", "date_iso": "2026-09-01", "type": "legal"}]
         c = dc.build_contract(_goog_full_docs(snapshot=snap))
-        self.assertIn({"label": "antitrust ruling", "date_iso": "2026-09-01",
-                       "type": "legal"}, c["catalysts"])
+        legal = next(x for x in c["catalysts"] if x.get("type") == "legal")
+        self.assertEqual(legal["label"], "antitrust ruling")
+        self.assertEqual(legal["date_iso"], "2026-09-01")
+        self.assertIn("days_out", legal)          # normalized -> days_out always present
+        self.assertIs(legal["in_thesis"], False)
+
+    def test_narrative_catalysts_normalized_to_schema_shape(self):
+        # The bug: snapshot narrative catalysts are {date, event, impact} and were
+        # extended VERBATIM, so they lacked the schema-required date_iso/type/days_out
+        # (surfaced by NVDA -- the first ticker with a populated events.catalysts).
+        snap = _goog_snapshot_full()  # structured earnings 2026-07-22, dividend 2026-06-08
+        snap["events"]["catalysts"] = [
+            {"date": "2026-08-01", "event": "Analyst day", "impact": "guidance refresh"},
+            {"date": "2026-08-01", "event": "Product launch", "impact": "TPU v7"}]
+        c = dc.build_contract(_goog_full_docs(snapshot=snap))
+        # EVERY catalyst carries the three schema-required keys (the regression guard).
+        for cat in c["catalysts"]:
+            for req in ("date_iso", "type", "days_out"):
+                self.assertIn(req, cat, "catalyst missing %r: %r" % (req, cat))
+        narr = [x for x in c["catalysts"] if x.get("date_iso") == "2026-08-01"]
+        self.assertEqual(len(narr), 2)            # two distinct same-date narratives both kept
+        self.assertEqual(narr[0]["label"], "Analyst day")
+        self.assertEqual(narr[0]["type"], "event")           # default type for a narrative
+        self.assertEqual(narr[0]["impact"], "guidance refresh")
+        self.assertIsInstance(narr[0]["days_out"], int)
+
+    def test_narrative_catalyst_on_structured_date_deduped(self):
+        # A narrative catalyst on the structured earnings date is that event twice -> drop.
+        snap = _goog_snapshot_full()  # structured earnings 2026-07-22
+        snap["events"]["catalysts"] = [
+            {"date": "2026-07-22", "event": "earnings-day writeup", "impact": "x"}]
+        c = dc.build_contract(_goog_full_docs(snapshot=snap))
+        on_earn = [x for x in c["catalysts"] if x["date_iso"] == "2026-07-22"]
+        self.assertEqual(len(on_earn), 1)         # only the structured earnings, not the narrative
+        self.assertEqual(on_earn[0]["type"], "earnings")
+
+    def test_malformed_narrative_catalyst_skipped(self):
+        snap = _goog_snapshot_full()
+        snap["events"]["catalysts"] = ["not-a-dict", {"event": "no date"}]
+        c = dc.build_contract(_goog_full_docs(snapshot=snap))
+        for cat in c["catalysts"]:            # unusable entries skipped, no half-shaped emit
+            self.assertIsInstance(cat.get("date_iso"), str)
 
     def test_catalysts_omitted_when_no_events(self):
         docs = _goog_full_docs()

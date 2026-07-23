@@ -413,10 +413,34 @@ def build_catalysts(snapshot, tradeplan, as_of_date):
             item["per_share"] = per_share
         catalysts.append(item)
 
-    # -- any pre-existing verbatim catalysts (the events.catalysts array; [] today)
+    # -- any pre-existing catalysts (snapshot.events.catalysts). The snapshot authors
+    # these as narrative {date, event, impact} entries (market-snapshot SKILL), which
+    # lack the contract schema's required date_iso/type/days_out -- so NORMALIZE each
+    # into the contract shape (do NOT extend verbatim). A narrative catalyst whose date
+    # coincides with an already-listed structured earnings/dividend is that same event
+    # surfaced twice -> skip it; an entry with no usable date can't satisfy the schema
+    # -> skip it. (Two distinct narratives on the same date are both kept.)
+    structured_dates = {c.get("date_iso") for c in catalysts if c.get("date_iso")}
     existing = events.get("catalysts")
-    if isinstance(existing, list) and existing:
-        catalysts.extend(existing)
+    if isinstance(existing, list):
+        for c in existing:
+            if not isinstance(c, dict):
+                continue
+            date_iso = c.get("date_iso") or c.get("date")
+            if (not isinstance(date_iso, str) or not date_iso
+                    or date_iso in structured_dates):
+                continue
+            item = {
+                "label": c.get("label") or c.get("event"),
+                "date_iso": date_iso,
+                "type": c.get("type") or "event",
+                "in_thesis": bool(c.get("in_thesis", False)),
+                "days_out": _days_out(date_iso, as_of_date),
+            }
+            impact = c.get("impact")
+            if impact is not None:
+                item["impact"] = impact
+            catalysts.append(item)
 
     return catalysts
 

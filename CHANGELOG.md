@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.19.1 — 2026-07-22 · fix: decision-contract catalysts normalization
+
+- **fix(decision-contract): normalize `snapshot.events.catalysts` into the contract schema shape (was extended verbatim).** `decision_contract.build_catalysts` appended the snapshot's narrative `events.catalysts` entries — authored as `{date, event, impact}` (market-snapshot SKILL) — **verbatim** into the contract `catalysts[]`, which the schema requires to carry `{date_iso, type, days_out}`. The emitter's comment ("[] today") shows it assumed that array is always empty; the first ticker whose snapshot populated it (NVDA, in the O1 calibration set) tripped `report_qc --decision-gates` → `decision_schema_valid` (9 violations). Now each narrative entry is **normalized** (`date`→`date_iso`, `days_out` computed via `_days_out`, `type` defaults to `"event"`, `event`→`label`, `impact` preserved); a narrative catalyst whose date coincides with an already-listed **structured** earnings/dividend is that same event surfaced twice → **skipped**; two distinct narratives on the same date are both kept; an entry with no usable date is skipped (never emitted half-shaped). Corrects the shipped **2.0.0** contract (shape unchanged — this makes it actually schema-valid when `events.catalysts` is populated); no version bump. Verified: NVDA decision-gates now PASS; suite **1960 pass / 35 skip**; 4 new `TestCatalystsAssembly` tests (the prior `_appended_verbatim` test, which pinned the bug, replaced). Surfaced by the calibration harness (O1).
+
 ## 0.19.0 — 2026-07-22 · Headless re-score CLI + governed-source adapter guide (FR-4/FR-7)
 
 Completes the downstream-integration request set. A locked-down orchestrator can now run cheap, scheduled
