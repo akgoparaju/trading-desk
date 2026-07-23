@@ -342,9 +342,14 @@ def build_exits(last, ladder, scenarios, eps_ntm, dcf_bull=None, comps_high=None
         in ``bull_target.scenario_raw``).
       When ``comps_high`` is present, the bull target is CLIPPED conservatively to
         ``min(raw, comps_high)`` -- the desk's own coverage comps range caps a raw
-        scenario bull that exceeds it. ``dcf_bull`` is carried as a DISPLAYED
-        reference (never the clip driver). No anchors -> unchanged (``raw``),
-        disclosed via the (null) anchor fields.
+        scenario bull that exceeds it. ``dcf_bull`` is a DISPLAYED reference EXCEPT
+        in the sub-spot floor below. No anchors -> unchanged (``raw``), disclosed via
+        the (null) anchor fields.
+      Sub-spot floor (calibration 2026-07-22): if the triangulated bull lands BELOW
+        ``last`` (comps_high < spot -> the comps ceiling is under the price), a bull
+        target beneath spot is degenerate, so the bull is FLOORED to the nearest anchor
+        above spot -- ``min(raw, dcf_bull)`` when ``dcf_bull`` > spot, else ``last`` --
+        and ``bull_target.bull_floor`` discloses which ("dcf_bull" | "spot" | null).
     ``required_multiple`` is computed off the (triangulated) ``level``.
     """
     res = _nearest_resistance_above(last, ladder)
@@ -358,17 +363,40 @@ def build_exits(last, ladder, scenarios, eps_ntm, dcf_bull=None, comps_high=None
     # conservative, the provisional formula). dcf_bull is a displayed reference.
     level = scenario_raw
     triangulated = False
+    bull_floor = None  # disclosure: set when a sub-spot triangulated bull was floored
     if scenario_raw is not None and comps_high is not None:
         level = min(scenario_raw, comps_high)
         triangulated = True
+        # A triangulated bull BELOW spot is degenerate: comps_high < last means the
+        # comps ceiling already sits under the current price (the name trades above the
+        # comps-implied value), so min() emits a "bull" beneath spot. Floor at the
+        # nearest defensible anchor ABOVE spot -- dcf_bull if it clears spot, else spot
+        # itself -- rather than ship a sub-spot bull target.
+        if last is not None and level < last:
+            if dcf_bull is not None and dcf_bull > last:
+                level = min(scenario_raw, dcf_bull)
+                bull_floor = "dcf_bull"
+            else:
+                level = last
+                bull_floor = "spot"
 
     required_multiple = None
     if level is not None and eps_ntm not in (None, 0):
         required_multiple = _clean(level / eps_ntm)
 
     if triangulated:
-        base = (f"triangulated to min(scenario_raw {_fmt(_clean(scenario_raw))}, "
-                f"comps_high {_fmt(_clean(comps_high))}) = {_fmt(_clean(level))}")
+        if bull_floor == "dcf_bull":
+            base = (f"triangulated: comps_high {_fmt(_clean(comps_high))} < spot "
+                    f"{_fmt(_clean(last))} (comps ceiling below price) -> floored to "
+                    f"min(scenario_raw {_fmt(_clean(scenario_raw))}, dcf_bull "
+                    f"{_fmt(_clean(dcf_bull))}) = {_fmt(_clean(level))}")
+        elif bull_floor == "spot":
+            base = (f"triangulated: comps_high {_fmt(_clean(comps_high))} < spot "
+                    f"{_fmt(_clean(last))}, no bull anchor above spot -> floored to "
+                    f"spot {_fmt(_clean(level))}")
+        else:
+            base = (f"triangulated to min(scenario_raw {_fmt(_clean(scenario_raw))}, "
+                    f"comps_high {_fmt(_clean(comps_high))}) = {_fmt(_clean(level))}")
         if required_multiple is not None:
             note = base + f"; implies {required_multiple:.1f}x fwd EPS"
         else:
@@ -383,6 +411,7 @@ def build_exits(last, ladder, scenarios, eps_ntm, dcf_bull=None, comps_high=None
         "dcf_bull": _clean(dcf_bull),
         "comps_high": _clean(comps_high),
         "triangulated": triangulated,
+        "bull_floor": bull_floor,
         "required_multiple": required_multiple,
         "note": note,
     }

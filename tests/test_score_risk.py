@@ -1245,15 +1245,15 @@ class TestCLI(unittest.TestCase):
         self.assertIn("PROVISIONAL", doc["note"])
         self.assertIn("B9", doc["note"])
         self.assertIsNone(doc["signal"])
-        # confidence-v1.0.0: well-formed block; depth stays MEDIUM at rubric
-        # 1.1.0 (PROVISIONAL -- event-aware but unratified, does NOT auto-promote).
+        # confidence-v1.0.0: well-formed block; depth is HIGH at rubric 1.1.0
+        # (RATIFIED 2026-07-22 -- event-aware, structural falsifier survived).
         conf = doc["confidence"]
         self.assertEqual(set(conf),
                          {"level", "source", "depth", "staleness", "rule",
                           "version"})
         self.assertIn(conf["level"], ("LOW", "MEDIUM", "HIGH"))
         self.assertEqual(conf["version"], "1.0.0")
-        self.assertEqual(conf["depth"]["level"], "MEDIUM")
+        self.assertEqual(conf["depth"]["level"], "HIGH")
         for s in doc["subscores"]:
             self.assertIn("arithmetic", s)
             self.assertIn("inputs", s)

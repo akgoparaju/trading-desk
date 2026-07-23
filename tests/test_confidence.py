@@ -196,21 +196,19 @@ class TestDepthAxis(unittest.TestCase):
         d = C.compute_module(_risk_doc("1.0.0"), _snap())["depth"]
         self.assertEqual(d["level"], "MEDIUM")
 
-    def test_risk_rubric_110_still_medium_provisional(self):
-        # risk-v1.1.0 is event-aware BUT PROVISIONAL (unratified pending B9
-        # calibration). It must STAY depth MEDIUM -- it does NOT auto-promote to
-        # HIGH via the generic "rubric past 1.0.0" fallthrough; the explicit 1.1.0
-        # row overrides it. Promotion to HIGH is gated on B9 ratification only.
+    def test_risk_rubric_110_ratified_high(self):
+        # risk-v1.1.0 is event-aware and RATIFIED (depth) 2026-07-22: the structural
+        # falsifier survived the calibration set (event_risk monotone in days-to-event,
+        # tail_risk separates by kurtosis) -> depth promoted MEDIUM->HIGH.
         d = C.compute_module(_risk_doc("1.1.0"), _snap())["depth"]
-        self.assertEqual(d["level"], "MEDIUM")
+        self.assertEqual(d["level"], "HIGH")
 
-    def test_risk_rubric_110_module_level_medium(self):
-        # The OVERALL confidence level for a risk 1.1.0 module on a clean premium
-        # fresh-print snapshot: source HIGH, depth MEDIUM (provisional), staleness
-        # HIGH -> min = MEDIUM. The provisional depth pins it; it must not read HIGH.
+    def test_risk_rubric_110_module_level_high(self):
+        # On a clean premium fresh-print snapshot: source HIGH, depth HIGH (ratified),
+        # staleness HIGH -> min = HIGH. Post-ratification a risk 1.1.0 module reads HIGH.
         block = C.compute_module(_risk_doc("1.1.0"), _snap())
-        self.assertEqual(block["depth"]["level"], "MEDIUM")
-        self.assertEqual(block["level"], "MEDIUM")
+        self.assertEqual(block["depth"]["level"], "HIGH")
+        self.assertEqual(block["level"], "HIGH")
 
     def test_depth_never_low(self):
         # a scored module is at least MEDIUM depth.
@@ -267,15 +265,16 @@ class TestDepthAxis(unittest.TestCase):
         self.assertEqual(C.DEPTH_TABLE["technical"]["1.1.0"][1],
                          "regime-conditional depth")
         # technical-v1.2.0 (Track O4): tier UNCHANGED (still HIGH); the why-tag
-        # discloses the new PROVISIONAL sector-RS factor.
+        # discloses the sector-RS factor (depth-tag ratified 2026-07-22).
         self.assertEqual(C.DEPTH_TABLE["technical"]["1.2.0"][0], "HIGH")
         self.assertIn("sector", C.DEPTH_TABLE["technical"]["1.2.0"][1].lower())
         self.assertEqual(C.DEPTH_TABLE["sentiment"]["1.0.0"][0], "MEDIUM")
-        # sentiment-v1.1.0 is PROVISIONAL -> stays MEDIUM (explicit row).
+        # sentiment-v1.1.0: depth-tag ratified but the OVERALL badge stays MEDIUM
+        # (source cap on short_interest), so the DEPTH row remains MEDIUM.
         self.assertEqual(C.DEPTH_TABLE["sentiment"]["1.1.0"][0], "MEDIUM")
         self.assertEqual(C.DEPTH_TABLE["risk"]["1.0.0"][0], "MEDIUM")
-        # risk-v1.1.0 is PROVISIONAL -> stays MEDIUM (explicit row, no auto-promote).
-        self.assertEqual(C.DEPTH_TABLE["risk"]["1.1.0"][0], "MEDIUM")
+        # risk-v1.1.0 RATIFIED (depth) 2026-07-22 -> HIGH (structural falsifier survived).
+        self.assertEqual(C.DEPTH_TABLE["risk"]["1.1.0"][0], "HIGH")
 
 
 # --------------------------------------------------------------------------- #

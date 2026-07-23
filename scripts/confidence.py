@@ -146,38 +146,38 @@ DEPTH_TABLE = {
         # depth badge, and promoting anything is a SEPARATE gated task). This
         # explicit row exists only to DISCLOSE the new provisional factor in the
         # why-tag (it overrides the generic "rubric past 1.0.0 -> HIGH" fallthrough
-        # so the disclosure travels). The sector-RS bands are unratified pending B9;
-        # that provisional status travels in the module_note + SKILL falsifier, not
-        # by suppressing this depth badge (same reasoning as the 1.1.0 row).
-        "1.2.0": (HIGH, "regime-conditional depth; sector-RS provisional"),
+        # so the disclosure travels). The sector-RS bands SURVIVED the 2026-07-22
+        # structural set (6/7 names carried RS and spread across the bands), so the
+        # "provisional" why-tag is dropped (the OUTCOME -- do RS bands predict forward
+        # winners -- remains forward-tracking via the SKILL falsifier).
+        "1.2.0": (HIGH, "regime-conditional depth; sector-RS"),
     },
     "sentiment": {
         # keyed on rubric_version.
         # v1.0.0: pre-positioning-dynamics mechanical band scorer -> MEDIUM.
-        # v1.1.0: positioning-aware (news_heat/skew/DTC/volume-P/C + insider CMP)
-        #   BUT PROVISIONAL (unratified pending B9 calibration; falsifier pre-
-        #   registered). sentiment 1.1.0 stays MEDIUM while provisional -- it does
-        #   NOT auto-promote to HIGH via the generic "rubric past 1.0.0 -> HIGH"
-        #   fallthrough (this explicit row overrides it). But note this is moot for
-        #   the OVERALL badge: sentiment SOURCE is STRUCTURALLY CAPPED AT MEDIUM
-        #   (it scores short_interest, a web-transcribed input BY DESIGN -- see
-        #   _source_axis / _SOURCE_BY_DESIGN_WEB), so min(source, depth, staleness)
-        #   is MEDIUM at best REGARDLESS of depth. Do NOT promote sentiment to HIGH.
+        # v1.1.0: positioning-aware (news_heat/skew/DTC/volume-P/C + insider CMP).
+        #   Depth RATIFIED (tag) 2026-07-22: the TESTED bands (balanced/moderate skew,
+        #   bull/neutral news-heat, dtc<2 notch) survived structurally, so the
+        #   "provisional" tag is dropped. The OVERALL badge STAYS MEDIUM regardless:
+        #   sentiment SOURCE is STRUCTURALLY CAPPED AT MEDIUM (it scores short_interest,
+        #   a web-transcribed input BY DESIGN -- see _source_axis / _SOURCE_BY_DESIGN_WEB),
+        #   so min(source, depth, staleness) is MEDIUM at best. Do NOT promote to HIGH.
+        #   (Untested by the 2026-07-22 set: extreme-skew, crowded-short dtc>10, and
+        #   bearish-news bands -- carried in the SKILL note.)
         "1.0.0": (MEDIUM, "pre-positioning-dynamics"),
-        "1.1.0": (MEDIUM, "provisional positioning-aware"),
+        "1.1.0": (MEDIUM, "positioning-aware"),
     },
     "risk": {
         # keyed on rubric_version.
         # v1.0.0: pre-event-aware mechanical scorer -> MEDIUM.
-        # v1.1.0: event-aware BUT PROVISIONAL (unratified pending B9 calibration;
-        #   falsifier pre-registered). risk 1.1.0 stays MEDIUM while provisional;
-        #   promote to HIGH only on B9 ratification. An event-aware score that
-        #   reads HIGH before its calibration set has confirmed the weights/bands
-        #   would be exactly the dishonesty the confidence layer exists to prevent.
-        #   (The generic "rubric past 1.0.0 -> HIGH" fallthrough is DELIBERATELY
-        #   overridden by this explicit row so 1.1.0 does not auto-promote.)
+        # v1.1.0: event-aware. RATIFIED (depth) 2026-07-22: the structural falsifier
+        #   survived the calibration set -- event_risk points are monotone in
+        #   days-to-event (0d->4 ... 84d->12) and tail_risk separates by kurtosis --
+        #   so the depth badge is promoted MEDIUM->HIGH. (The OUTCOME half -- does the
+        #   event weight PREDICT realized gap behavior -- remains forward-tracking in
+        #   the decision ledger; the SKILL note/falsifier still carry it.)
         "1.0.0": (MEDIUM, "pre-event-aware"),
-        "1.1.0": (MEDIUM, "provisional event-aware"),
+        "1.1.0": (HIGH, "event-aware"),
     },
 }
 
