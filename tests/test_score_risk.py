@@ -509,41 +509,57 @@ class TestEventRisk(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 class TestTailRisk(unittest.TestCase):
-    """risk-v1.1.0 tail_risk factor: calm/moderate/violent bands + the
-    not-evaluable (renormalize, never zero) path when kurtosis is null."""
+    """risk-v1.1.0 tail_risk factor (O1 2026-07-23 re-basing): calm/moderate/violent
+    bands scored off the trailing-3y MAGNITUDE (p95_abs_3y + tail_mean_95_3y, both must
+    clear the cut). Full-history excess_kurtosis is DIAGNOSTIC only, never a gate.
+    Not-evaluable (renormalize, never zero) when the 3y window is missing."""
 
     def test_calm_is_8(self):
-        # kurtosis < 8 AND p95_abs < 0.04 -> 8.
-        sub = sr.score_tail_risk({"excess_kurtosis": 1.5, "p95_abs": 0.03})
+        # 3y p95 < 0.015 AND worst-5% mean < 0.03 -> 8 (kurtosis high but diagnostic).
+        sub = sr.score_tail_risk({"p95_abs_3y": 0.009, "tail_mean_95_3y": 0.018,
+                                  "excess_kurtosis": 30.0})
         self.assertEqual(sub["points"], 8)
         self.assertEqual(sub["max"], 8)
         self.assertTrue(sub["evaluable"])
 
     def test_moderate_is_5(self):
-        # kurtosis < 20 AND p95_abs < 0.06 (but not calm) -> 5.
-        sub = sr.score_tail_risk({"excess_kurtosis": 12.0, "p95_abs": 0.05})
+        # p95 < 0.045 AND tail_mean < 0.07 (but not calm) -> 5.
+        sub = sr.score_tail_risk({"p95_abs_3y": 0.03, "tail_mean_95_3y": 0.05,
+                                  "excess_kurtosis": 12.0})
         self.assertEqual(sub["points"], 5)
         self.assertTrue(sub["evaluable"])
 
     def test_violent_is_2(self):
-        # neither calm nor moderate -> 2.
-        sub = sr.score_tail_risk({"excess_kurtosis": 30.0, "p95_abs": 0.10})
+        sub = sr.score_tail_risk({"p95_abs_3y": 0.06, "tail_mean_95_3y": 0.10,
+                                  "excess_kurtosis": 5.0})
         self.assertEqual(sub["points"], 2)
         self.assertTrue(sub["evaluable"])
 
-    def test_high_kurt_low_p95_is_violent(self):
-        # kurtosis 25 >= 20 fails the moderate band even with a small p95 -> 2.
-        sub = sr.score_tail_risk({"excess_kurtosis": 25.0, "p95_abs": 0.03})
+    def test_high_kurtosis_is_diagnostic_not_scored(self):
+        # The KO case: calm recent regime (low p95/tail_mean) but a high full-history
+        # kurtosis (one old crash gap) -> CALM 8, NOT violent. Kurtosis is diagnostic.
+        sub = sr.score_tail_risk({"p95_abs_3y": 0.009, "tail_mean_95_3y": 0.018,
+                                  "excess_kurtosis": 40.0})
+        self.assertEqual(sub["points"], 8)
+        self.assertIn("diagnostic", sub["arithmetic"])
+
+    def test_high_p95_is_violent_regardless_of_kurt(self):
+        # p95 0.05 (>= 0.045) -> violent even with low kurtosis.
+        sub = sr.score_tail_risk({"p95_abs_3y": 0.05, "tail_mean_95_3y": 0.05,
+                                  "excess_kurtosis": 1.0})
         self.assertEqual(sub["points"], 2)
 
-    def test_low_kurt_high_p95_is_moderate(self):
-        # kurtosis 5 (< 8) but p95 0.05 (>= 0.04) fails calm; passes moderate -> 5.
-        sub = sr.score_tail_risk({"excess_kurtosis": 5.0, "p95_abs": 0.05})
-        self.assertEqual(sub["points"], 5)
+    def test_high_tail_mean_is_violent(self):
+        # The ORCL case: moderate p95 (0.038 < 0.045) but tail_mean 0.075 (>= 0.07)
+        # fails the AND -> violent. Both magnitude measures must clear the cut.
+        sub = sr.score_tail_risk({"p95_abs_3y": 0.038, "tail_mean_95_3y": 0.075,
+                                  "excess_kurtosis": 50.0})
+        self.assertEqual(sub["points"], 2)
 
-    def test_null_kurtosis_not_evaluable_renormalize(self):
-        # excess_kurtosis null (n<4) -> NOT evaluable (renormalize; not zeroed).
-        sub = sr.score_tail_risk({"excess_kurtosis": None, "p95_abs": None})
+    def test_null_3y_window_not_evaluable_renormalize(self):
+        # 3y fields null (n<4 window, or a pre-O1 snapshot) -> NOT evaluable.
+        sub = sr.score_tail_risk({"p95_abs_3y": None, "tail_mean_95_3y": None,
+                                  "excess_kurtosis": 30.0})
         self.assertFalse(sub["evaluable"])
         self.assertIn("n/a", sub["arithmetic"])
         # max stays 8 on the sub itself; score() zeroes it when excluded.
@@ -555,15 +571,23 @@ class TestTailRisk(unittest.TestCase):
         self.assertFalse(sub["evaluable"])
         self.assertIn("no overnight_gap block", sub["arithmetic"])
 
-    def test_boundary_kurt_8_not_calm(self):
-        # kurtosis == 8 fails "< 8" -> not calm; with p95 0.03 (< 0.06) -> moderate.
-        sub = sr.score_tail_risk({"excess_kurtosis": 8.0, "p95_abs": 0.03})
+    def test_boundary_p95_0015_not_calm(self):
+        # p95 == 0.015 fails "< 0.015" -> not calm; < 0.045 & tail_mean < 0.07 -> moderate.
+        sub = sr.score_tail_risk({"p95_abs_3y": 0.015, "tail_mean_95_3y": 0.02,
+                                  "excess_kurtosis": 1.0})
         self.assertEqual(sub["points"], 5)
 
-    def test_boundary_p95_004_not_calm(self):
-        # p95 == 0.04 fails "< 0.04" -> not calm; kurt 1 < 20 & p95 < 0.06 -> moderate.
-        sub = sr.score_tail_risk({"excess_kurtosis": 1.0, "p95_abs": 0.04})
+    def test_boundary_tail_mean_003_not_calm(self):
+        # tail_mean == 0.03 fails "< 0.03" -> not calm; p95 0.01 & tail_mean < 0.07 -> moderate.
+        sub = sr.score_tail_risk({"p95_abs_3y": 0.01, "tail_mean_95_3y": 0.03,
+                                  "excess_kurtosis": 1.0})
         self.assertEqual(sub["points"], 5)
+
+    def test_boundary_p95_0045_is_violent(self):
+        # p95 == 0.045 fails "< 0.045" -> violent (not moderate).
+        sub = sr.score_tail_risk({"p95_abs_3y": 0.045, "tail_mean_95_3y": 0.05,
+                                  "excess_kurtosis": 1.0})
+        self.assertEqual(sub["points"], 2)
 
 
 # --------------------------------------------------------------------------- #
@@ -833,7 +857,8 @@ class TestRenormalization(unittest.TestCase):
     def test_no_renormalization_when_all_six_dimensions_have_inputs(self):
         tech = _tech()
         ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
-        og = {"excess_kurtosis": 1.5, "p95_abs": 0.03, "n": 300}
+        og = {"excess_kurtosis": 1.5, "p95_abs": 0.03,
+              "p95_abs_3y": 0.009, "tail_mean_95_3y": 0.018, "n": 300}
         result = sr.score(tech=tech, beta=1.0, ladder=ladder, last=100.0,
                           adv=600e6, net=10.0, mktcap=100.0,
                           events={"days_to_event": None}, overnight_gap=og)
@@ -848,7 +873,8 @@ class TestRenormalization(unittest.TestCase):
         # declared ceilings (all evaluable), sum to exactly 100.
         tech = _tech()
         ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
-        og = {"excess_kurtosis": 1.5, "p95_abs": 0.03, "n": 300}
+        og = {"excess_kurtosis": 1.5, "p95_abs": 0.03,
+              "p95_abs_3y": 0.009, "tail_mean_95_3y": 0.018, "n": 300}
         result = sr.score(tech=tech, beta=1.0, ladder=ladder, last=100.0,
                           adv=600e6, net=10.0, mktcap=100.0,
                           events={"days_to_event": 40}, overnight_gap=og)
@@ -1093,7 +1119,9 @@ class TestFullModuleV110(unittest.TestCase):
             "dist_from_ath_pct": -0.20, "ohlcv_rows": 800,
             "overnight_gap": ({"mean_abs": 0.01, "p95_abs": 0.03,
                                "max_abs": 0.07, "excess_kurtosis": 1.5,
-                               "jump_count_2sigma": 3, "n": 250}
+                               "jump_count_2sigma": 3, "n": 250,
+                               "window_years_scored": 3, "p95_abs_3y": 0.009,
+                               "tail_mean_95_3y": 0.018, "n_3y": 250}
                               if og is _UNSET else og),
         }
         if tech_over is not None:
@@ -1132,7 +1160,9 @@ class TestFullModuleV110(unittest.TestCase):
             ev_over={"days_to_event": 9,
                      "implied_move_vs_own_history_pctile": 100},
             og={"mean_abs": 0.05, "p95_abs": 0.12, "max_abs": 0.3,
-                "excess_kurtosis": 30.0, "jump_count_2sigma": 20, "n": 250})
+                "excess_kurtosis": 30.0, "jump_count_2sigma": 20, "n": 250,
+                "window_years_scored": 3, "p95_abs_3y": 0.12,
+                "tail_mean_95_3y": 0.15, "n_3y": 250})
         ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
         doc = sr.build_module(snap, ladder, stress_pct=None, top_risk=None)
         by_name = {s["name"]: s for s in doc["subscores"]}

@@ -607,45 +607,50 @@ def score_tail_risk(overnight_gap) -> dict:
     null kurtosis.
     """
     og = overnight_gap if isinstance(overnight_gap, dict) else {}
-    k = og.get("excess_kurtosis")
-    p95 = og.get("p95_abs")
+    k = og.get("excess_kurtosis")          # full-history -- DIAGNOSTIC only (not scored)
+    p95 = og.get("p95_abs_3y")             # trailing-3y scoring inputs (O1 2026-07-23):
+    tmean = og.get("tail_mean_95_3y")      # recent-regime MAGNITUDE, not shape
 
-    # NOT evaluable when the tail cannot be measured: no overnight_gap block, or
-    # excess_kurtosis null (n < 4). Renormalize -- never zero.
-    if not isinstance(overnight_gap, dict) or k is None:
+    # NOT evaluable when the trailing-3y tail cannot be measured: no overnight_gap
+    # block, or the 3y window had < 4 gaps (p95_abs_3y/tail_mean_95_3y null).
+    # Renormalize -- never zero. (A pre-O1 snapshot without the 3y fields also lands
+    # here and renormalizes, until it is rebuilt.)
+    if not isinstance(overnight_gap, dict) or p95 is None or tmean is None:
         why = ("no overnight_gap block" if not isinstance(overnight_gap, dict)
-               else "excess_kurtosis n/a (n<4)")
+               else "3y tail window n/a (n<4 or pre-O1 snapshot)")
         return {
             "name": "tail_risk",
             "points": 0,
             "max": 8,
             "arithmetic": f"tail_risk: n/a ({why}) -> renormalized (not zeroed)",
-            "inputs": {"excess_kurtosis": k, "p95_abs": p95, "tail_points": 0},
+            "inputs": {"p95_abs_3y": p95, "tail_mean_95_3y": tmean,
+                       "excess_kurtosis_fullhist": k, "tail_points": 0},
             "evaluable": False,
         }
 
-    # p95_abs is expected present whenever the block exists; treat a null p95 as
-    # failing the "< threshold" tests (falls through to the violent-tails band).
-    p95_ok_calm = p95 is not None and p95 < 0.04
-    p95_ok_moderate = p95 is not None and p95 < 0.06
-
-    if k < 8 and p95_ok_calm:
+    # Bands score the RECENT (3y) gap regime by MAGNITUDE -- both p95 and the worst-5%
+    # mean must clear the cut (AND). Calibrated on the 2026-07-23 10-name set so the
+    # calm tier is reachable: KO (calmest staple) reads calm, and a lone decades-old
+    # crash gap no longer forces "violent" via full-history kurtosis.
+    if p95 < 0.015 and tmean < 0.03:
         pts = 8
-        band = "calm tails (kurtosis < 8 & p95_abs < 0.04)"
-    elif k < 20 and p95_ok_moderate:
+        band = "calm (3y p95 < 1.5% & worst-5% mean < 3%)"
+    elif p95 < 0.045 and tmean < 0.07:
         pts = 5
-        band = "moderate tails (kurtosis < 20 & p95_abs < 0.06)"
+        band = "moderate (3y p95 < 4.5% & worst-5% mean < 7%)"
     else:
         pts = 2
-        band = "violent tails"
+        band = "violent"
 
     return {
         "name": "tail_risk",
         "points": _clean(pts),
         "max": 8,
-        "arithmetic": (f"excess_kurtosis {_fmt(_clean(k))}, p95_abs "
-                       f"{_fmt(_clean(p95))} -> {band} -> {pts}/8"),
-        "inputs": {"excess_kurtosis": k, "p95_abs": p95, "tail_points": pts},
+        "arithmetic": (f"3y p95_abs {_fmt(_clean(p95))}, worst-5% mean "
+                       f"{_fmt(_clean(tmean))} -> {band} -> {pts}/8 "
+                       f"(full-hist kurtosis {_fmt(_clean(k))} diagnostic)"),
+        "inputs": {"p95_abs_3y": p95, "tail_mean_95_3y": tmean,
+                   "excess_kurtosis_fullhist": k, "tail_points": pts},
         "evaluable": True,
     }
 

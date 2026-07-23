@@ -1323,20 +1323,31 @@ class TestA1EventAwareFields(unittest.TestCase):
         self.assertIsNotNone(og)
         self.assertEqual(set(og),
                          {"mean_abs", "p95_abs", "max_abs", "excess_kurtosis",
-                          "jump_count_2sigma", "n"})
+                          "jump_count_2sigma", "n", "window_years_scored",
+                          "p95_abs_3y", "tail_mean_95_3y", "n_3y"})
         # n gaps == len(rows) - 1 (fixture has open + adj_close on every row).
         self.assertEqual(og["n"], len(b.stock_rows) - 1)
         # Cross-check against the indicator library over the same series.
+        import math
         from scripts import indicators
         rows = [{"open": r["open"], "adjusted_close": r["adj"]} for r in b.stock_rows]
         gaps = indicators.overnight_gap_series(rows)
-        abs_gaps = [abs(g) for g in gaps]
+        abs_gaps = sorted(abs(g) for g in gaps)
         self.assertAlmostEqual(og["mean_abs"], sum(abs_gaps) / len(abs_gaps), places=9)
         self.assertAlmostEqual(og["max_abs"], max(abs_gaps), places=9)
         self.assertAlmostEqual(og["excess_kurtosis"],
                                indicators.excess_kurtosis(gaps), places=9)
         self.assertEqual(og["jump_count_2sigma"],
                          indicators.jump_count_2sigma(gaps))
+        # Trailing-3y scoring window (O1): the fixture has < 3y of rows, so it equals
+        # the full series -> p95_abs_3y == p95_abs, and tail_mean_95_3y = mean of the
+        # worst-5% |gaps| (nearest-rank p95 index).
+        self.assertEqual(og["window_years_scored"], 3)
+        self.assertEqual(og["n_3y"], og["n"])
+        self.assertAlmostEqual(og["p95_abs_3y"], og["p95_abs"], places=9)
+        idx = min(len(abs_gaps) - 1, max(0, math.ceil(0.95 * len(abs_gaps)) - 1))
+        worst = abs_gaps[idx:]
+        self.assertAlmostEqual(og["tail_mean_95_3y"], sum(worst) / len(worst), places=9)
 
     def test_schema_version_is_0_4_0(self):
         b = BundleBuilder(self.dir).build_full()
@@ -1443,10 +1454,13 @@ class TestWave3ADtcAndSkew(unittest.TestCase):
         snap = self._build(b)
         s = snap["sentiment"]
         p = snap["price"]
-        # dtc = (si%/100 * shares_diluted_m*1e6) / (adv$ / last).
-        si_shares = (s["short_interest_pct"] / 100.0) * p["shares_diluted_m"] * 1e6
-        expected = si_shares / (p["adv_dollar_3m"] / p["last"])
+        # dtc (O1 basis) = (si%/100 * base_shares_m*1e6) / adv_shares_3m, where the base
+        # is SharesFloat if present else SharesOutstanding (== shares_diluted_m), and the
+        # denominator is the DIRECT 3m share ADV (not adv_dollar_3m/last).
+        base_m = p.get("shares_float_m") or p["shares_diluted_m"]
+        expected = (s["short_interest_pct"] / 100.0) * base_m * 1e6 / p["adv_shares_3m"]
         self.assertAlmostEqual(s["dtc"], expected, places=6)
+        self.assertIn(s["dtc_basis"], ("float", "shares_outstanding"))
 
     def test_dtc_null_when_short_interest_absent(self):
         # No short_interest file -> si% null -> dtc null.
