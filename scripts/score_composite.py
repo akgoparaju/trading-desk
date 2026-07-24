@@ -155,6 +155,44 @@ STANDARD_WEIGHT_SET = "standard v1"
 # Default config path (relative to the invoker's CWD). Loaded only when it exists;
 # an absent default is not an error (the standard table is used).
 _DEFAULT_CONFIG_PATH = "./trading_desk_config.json"
+_CONFIG_BASENAME = "trading_desk_config.json"
+
+
+def _resolve_default_config(bundle):
+    """Locate the default ``trading_desk_config.json`` for a bundle's workspace.
+
+    When ``--weights-config`` is omitted, the config is auto-loaded from the
+    WORKSPACE ROOT rather than the process CWD, so a redirected run
+    (``full-trade-analysis ... --output-dir <WORKROOT>``, whose bundle is
+    ``<WORKROOT>/trading_desk_<T>/detail_reports_<date>``) honors the config that
+    was staged under its own root. We walk UP from the bundle dir looking for the
+    config at each ancestor (new layout: 2 levels up; legacy ``td_bundle_<T>_<date>``:
+    1 level up), then fall back to the historical CWD-relative default.
+
+    Returns an existing path, or None. For an un-redirected run the walk-up reaches
+    the CWD (the bundle sits under it) and finds the same file the pre-1.1.0
+    ``./trading_desk_config.json`` default resolved -- byte-identical behavior.
+    """
+    try:
+        d = os.path.abspath(bundle) if bundle else None
+    except (TypeError, ValueError):
+        d = None
+    seen = set()
+    # detail_reports_<date> -> trading_desk_<T> -> WORKROOT  (3 checks covers both layouts)
+    for _ in range(3):
+        if not d or d in seen:
+            break
+        seen.add(d)
+        cand = os.path.join(d, _CONFIG_BASENAME)
+        if os.path.isfile(cand):
+            return cand
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    # Historical fallback: CWD-relative default (covers an absolute bundle whose
+    # workspace is not an ancestor of the CWD, and preserves pre-1.1.0 behavior).
+    return _DEFAULT_CONFIG_PATH if os.path.isfile(_DEFAULT_CONFIG_PATH) else None
 
 
 class WeightsConfigError(Exception):
@@ -941,8 +979,10 @@ def main(argv=None):
     custom_profiles = None
     custom_label = None
     weights_config_path = args.weights_config
-    if weights_config_path is None and os.path.isfile(_DEFAULT_CONFIG_PATH):
-        weights_config_path = _DEFAULT_CONFIG_PATH
+    if weights_config_path is None:
+        # Auto-load resolves from the bundle's WORKSPACE ROOT (honors --output-dir),
+        # falling back to the CWD-relative default -- see _resolve_default_config.
+        weights_config_path = _resolve_default_config(args.bundle)
     if weights_config_path is not None:
         if args.weights_config is not None and not os.path.isfile(weights_config_path):
             print(f"ERROR: weights config not found: {weights_config_path}",

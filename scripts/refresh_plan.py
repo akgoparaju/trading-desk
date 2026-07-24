@@ -284,15 +284,17 @@ def _group_decision(group, present, age, window, forced_by_event):
 # --------------------------------------------------------------------------- #
 
 def _scales_dirs(ticker_dir):
-    """Directories to scan for active scale JSONs, in precedence order.
+    """Directories to scan for active scale JSONs.
 
-    Primary: ``<cwd>/trading_desk_config/scales`` (the workspace-root convention).
-    Legacy: the ticker-dir PARENT's ``trading_desk_config/scales`` (a ticker
-    workspace nested one level down). Only existing directories are returned;
-    duplicates (same normalized path) are de-duplicated preserving order.
+    The workspace root is the ticker-dir PARENT (``<WORKROOT>/trading_desk_<T>`` ->
+    ``<WORKROOT>``), so scales live at ``<WORKROOT>/trading_desk_config/scales``.
+    Deriving it from ``ticker_dir`` (rather than ``os.getcwd()``) means a redirected
+    run (``--output-dir <WORKROOT>`` with an absolute ``--ticker-dir``) roots scale
+    discovery at the workspace, never the process CWD. For an un-redirected run
+    ``ticker_dir`` is CWD-relative, so its parent resolves to the CWD -- byte-identical
+    to the pre-1.1.0 ``os.getcwd()`` primary. Only existing directories are returned.
     """
     candidates = [
-        os.path.join(os.getcwd(), _SCALES_SUBDIR),
         os.path.join(os.path.dirname(os.path.normpath(ticker_dir)),
                      _SCALES_SUBDIR),
     ]
@@ -396,13 +398,14 @@ def _scan_scales(ticker_dir, snapshot):
 def _pending_proposals(ticker_dir):
     """Filenames of drafted-but-unratified scale proposals (sorted).
 
-    Scans ``trading_desk_config/scales/proposals/`` in the same primary+legacy
-    locations as the active scales; a refresh surfaces these so an unratified
+    Scans ``<WORKROOT>/trading_desk_config/scales/proposals/`` at the ticker-dir
+    parent (the workspace root -- same derivation as ``_scales_dirs``, so a
+    redirected run honors ``--output-dir`` and an un-redirected run resolves to the
+    CWD, byte-identical to pre-1.1.0). A refresh surfaces these so an unratified
     proposal is never silently pending.
     """
     names = set()
     candidates = [
-        os.path.join(os.getcwd(), _PROPOSALS_SUBDIR),
         os.path.join(os.path.dirname(os.path.normpath(ticker_dir)),
                      _PROPOSALS_SUBDIR),
     ]

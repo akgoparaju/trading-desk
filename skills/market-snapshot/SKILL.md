@@ -10,9 +10,20 @@ Build one verified `snapshot.json` for a ticker: detect the data mode you can ac
 **Non-negotiables:**
 - **Never do arithmetic in text.** Every price, ratio, return, drawdown, and multiple comes from `scripts/build_snapshot.py`. Your only edits to the snapshot are qualitative TEXT slots. In web-fallback mode you TRANSCRIBE cited figures verbatim (units checked) into the raw files — you still never *compute* a number in text; the QC gate's arithmetic cross-checks (P/E, mktcap, net-cash) are the transcription audit.
 - **Never read the options chain into context.** The full chain is ~2M tokens. `scripts/chain.py` is the only reader; you record its file path and move on.
-- **All outputs stay under the invoker's current working directory (CWD).** `${CLAUDE_PLUGIN_ROOT}` is the plugin install dir (where `scripts/` lives); it is NOT where outputs go.
+- **All outputs stay under the resolved workspace root (`WORKROOT`, see below).** `${CLAUDE_PLUGIN_ROOT}` is the plugin install dir (where `scripts/` lives); it is NOT where outputs go.
 
 Trigger phrases: "snapshot AAPL", "market snapshot for MU", "build data snapshot", or any downstream skill requesting market data for a ticker `<TICKER>`.
+
+---
+
+## Workspace root (`--output-dir`)
+
+This skill accepts an optional **`--output-dir <ABS_DIR>`** argument at invocation. Resolve it FIRST, before any file operation, and call the result **`WORKROOT`**:
+
+- **`--output-dir <ABS_DIR>` given** → `WORKROOT = <ABS_DIR>` (MUST be absolute; `mkdir -p "<ABS_DIR>"` if missing). All workspace I/O is rooted here, decoupled from the process CWD.
+- **`--output-dir` absent** → `WORKROOT = .` (the invoker's CWD — today's behavior, byte-for-byte unchanged).
+
+Everywhere below that this skill reads or writes `./trading_desk_<TICKER>/…`, `./trading_desk_config.json`, or `./trading_desk_config/…`, use **`<WORKROOT>/…`** instead. In particular the bundle is `BUNDLE = <WORKROOT>/trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>` — **every `raw/…` path, `manifest.json`, and relative bundle path below lives under `<BUNDLE>/`**, and every `python3 scripts/…` command is given path arguments built from `<WORKROOT>`/`<BUNDLE>` (absolute when `--output-dir` was passed) so the scripts never fall back to the CWD. When `--output-dir` is absent these are the same CWD-relative `./trading_desk_…` paths as today. One root governs BOTH reads and writes.
 
 ---
 
@@ -22,7 +33,7 @@ Fetching is the client agent's job; the pipeline is source-neutral (see `${CLAUD
 
 ### Step 0a — Source preflight (ask once, persist)
 
-1. **Read `./trading_desk_config.json` if present.** Shape:
+1. **Read `<WORKROOT>/trading_desk_config.json` if present.** Shape:
    ```json
    {"primary_source": "alphavantage", "fallbacks": ["stooq+web"], "asked": true}
    ```
@@ -31,7 +42,7 @@ Fetching is the client agent's job; the pipeline is source-neutral (see `${CLAUD
    - **Sweep connected MCP servers** for market-data-shaped tools: run a `ToolSearch` keyword sweep over `quote`, `ohlcv`, `daily`, `stock`, `options`, `fundamentals`. Any server whose tool names match is a candidate (`alphavantage` counts if its tools are present).
    - **Built-ins** are always in the candidate list: **alphavantage** (if its MCP is connected) and **stooq+web** (always available — the cited-web path, no MCP needed).
    - **Present the candidates and ASK** which to use as `primary_source` (+ any `fallbacks`). **Unattended default:** `alphavantage` if its MCP is connected, else `stooq+web`.
-   - **WRITE `./trading_desk_config.json`** with `{"primary_source", "fallbacks", "asked": true}`.
+   - **WRITE `<WORKROOT>/trading_desk_config.json`** with `{"primary_source", "fallbacks", "asked": true}`.
 3. **Record `data_source`** (the chosen `primary_source`, e.g. `"alphavantage"`, `"mcp:polygon"`, `"stooq+web"`) as a **top-level** manifest key in Step 0.5 — the builder copies it to `meta.data_source` (default `"alphavantage"`).
 
 ### Step 0b — Tier preflight (Alpha Vantage only)
@@ -83,10 +94,10 @@ Groups the primary source can't supply fall through **per-group** to the configu
 ## Step 0.5 — Bundle setup
 
 1. Derive the as-of UTC timestamp (`date -u +%Y-%m-%dT%H:%M:%SZ`). Call the date part `<YYYY-MM-DD>`.
-2. In the invoker's CWD, create the parent + dated bundle:
-   - Parent dir (NO date): `./trading_desk_<TICKER>/`
-   - Bundle dir (dated): `./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>/` with `raw/` inside it.
-3. Start `./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>/manifest.json` with this skeleton (note the `data_source` key from Step 0a and the `data_mode` key from Step 0b):
+2. Under `<WORKROOT>`, create the parent + dated bundle:
+   - Parent dir (NO date): `<WORKROOT>/trading_desk_<TICKER>/`
+   - Bundle dir (dated): `<WORKROOT>/trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>/` (= `<BUNDLE>`) with `raw/` inside it.
+3. Start `<BUNDLE>/manifest.json` with this skeleton (note the `data_source` key from Step 0a and the `data_mode` key from Step 0b):
    ```json
    {"ticker": "<TICKER>", "as_of_utc": "<as_of_utc>", "data_source": "<primary_source>", "data_mode": "<alpha_vantage|av_free_degraded|web_fallback>", "api_tier_notes": [], "files": {}}
    ```
@@ -181,8 +192,8 @@ Used when `primary_source` is a foreign MCP (e.g. `mcp:polygon`). Fetch each fie
 
 1. **Scalar groups** (`global_quote`, `overview`, statements/earnings/estimates, `pc_ratio_realtime`, `earnings_calendar`, `treasury_yield`, `short_interest`, `web_spot_check`, `web_fundamentals`): **TRANSCRIBE** the source's values verbatim (units checked) into the canonical shape for that key, recording the source URL / tool name in the manifest entry (per-field via `sources` for `web_fundamentals`). This is the cited-transcription pattern from Step 2-ALT — you never compute a number; the QC gate's arithmetic cross-checks audit it.
 2. **Bulk groups** (`daily_adjusted`, `spy_daily_adjusted`, `options_chain`): these are too large to transcribe by hand, so use a **structural adapter**:
-   - Check `./trading_desk_config/adapters/<source>_<group>.py` for an existing transform. **If present, re-run it VERBATIM** — never regenerate it (a regenerated mapping could drift, and a refresh delta would misread parsing drift as market movement).
-   - **If absent, write one** per `docs/CANONICAL_CONTRACT.md` — **STRUCTURAL only** (field mapping/renaming to an accepted shape; NEVER arithmetic, no unit conversion, no derived columns). Save it to `./trading_desk_config/adapters/<source>_<group>.py`, then run it to emit `raw/<key>.json`. Adapters are **user-workspace artifacts** — never plugin code.
+   - Check `<WORKROOT>/trading_desk_config/adapters/<source>_<group>.py` for an existing transform. **If present, re-run it VERBATIM** — never regenerate it (a regenerated mapping could drift, and a refresh delta would misread parsing drift as market movement).
+   - **If absent, write one** per `docs/CANONICAL_CONTRACT.md` — **STRUCTURAL only** (field mapping/renaming to an accepted shape; NEVER arithmetic, no unit conversion, no derived columns). Save it to `<WORKROOT>/trading_desk_config/adapters/<source>_<group>.py`, then run it to emit `<BUNDLE>/raw/<key>.json`. Adapters are **user-workspace artifacts** — never plugin code.
 3. **Groups the source can't supply** → fall through **per-group** to the configured fallbacks (stooq for OHLCV, the Step 3 web paths for `short_interest` / `earnings_calendar` / `web_spot_check`), and NOTE the fallback in `manifest.api_tier_notes` (e.g. `"daily_adjusted via stooq fallback — mcp:polygon has no adjusted daily"`).
 
 If the foreign source has no options chain, leave `options_chain`/`pc_ratio_realtime` absent (options stand aside, disclosed) and skip Step 4. Proceed to Step 3 for any web gap-fill, then Step 5.
@@ -192,6 +203,8 @@ If the foreign source has no options chain, leave `options_chain`/`pc_ratio_real
 ## Step 2-MCP — worked example (governed-source adapter)
 
 This section shows how to implement the Step 2-MCP adapter pass for a governed MCP source that returns **Alpha Vantage-shaped JSON** (a wrapped AV source).  The examples use the generic name `mcp:governed_av`; substitute your actual source identifier.
+
+> **Paths in this worked example are shown CWD-relative for readability.** Per the **Workspace root** rule above, every `trading_desk_config/adapters/…` and `trading_desk_<TICKER>/detail_reports_<DATE>/…` path here lives under `<WORKROOT>/` — when `--output-dir` was passed, build them absolute from `<WORKROOT>`/`<BUNDLE>`.
 
 **Key facts about this source type:**
 - Bulk groups (`daily_adjusted`, `spy_daily_adjusted`, `options_chain`) use a **file-offload contract**: the tool result is `{"cache_path": "<path>", "bytes": <n>, "summary": "..."}` — the actual JSON body is on disk at `cache_path`.  The adapter reads the FILE, not the tool result.  This mirrors the plugin's own `HISTORICAL_OPTIONS` offload pattern.
@@ -500,7 +513,7 @@ Add a note to `manifest.api_tier_notes` recording the fallback.
 
 ## Step 4 — IV history cache (input for `iv_pctile_1yr`)
 
-Cache file `iv_history_<TICKER>.json` lives in the bundle's **PARENT** dir — now the ticker parent `./trading_desk_<TICKER>/iv_history_<TICKER>.json`, a sibling of every dated `detail_reports_<date>/` bundle so it persists across dates. (`av_free_degraded` and `web_fallback` skip this step — no options chain to sample.) Shape:
+Cache file `iv_history_<TICKER>.json` lives in the bundle's **PARENT** dir — now the ticker parent `<WORKROOT>/trading_desk_<TICKER>/iv_history_<TICKER>.json`, a sibling of every dated `detail_reports_<date>/` bundle so it persists across dates. (`av_free_degraded` and `web_fallback` skip this step — no options chain to sample.) Shape:
 ```json
 {"ticker": "<TICKER>", "samples": [{"date": "YYYY-MM-DD", "atm_iv": <number>}]}
 ```
@@ -511,9 +524,9 @@ If the cache is absent OR its newest sample is more than 14 days old, refresh it
 
 ```bash
 # once, before the sweep:
-echo '[]' > raw/iv_samples.json
+echo '[]' > <BUNDLE>/raw/iv_samples.json
 # after each fetch offloads to <offloaded_path> (append one entry; keep it valid JSON):
-python3 -c 'import json,sys; p="raw/iv_samples.json"; a=json.load(open(p)); a.append({"date":sys.argv[1],"chain_file":sys.argv[2]}); json.dump(a,open(p,"w"))' "<sample_date>" "<offloaded_path>"
+python3 -c 'import json,sys; p=sys.argv[1]; a=json.load(open(p)); a.append({"date":sys.argv[2],"chain_file":sys.argv[3]}); json.dump(a,open(p,"w"))' "<BUNDLE>/raw/iv_samples.json" "<sample_date>" "<offloaded_path>"
 ```
 
 **Holiday step-back retry (unchanged):** if a sampled date returns an empty/error response (holiday), step back one day at a time (up to 3) and **re-fetch the stepped-back date**, recording THAT date + its offloaded path in the manifest; if all retries fail, just omit the sample (the script also records a skip reason for any empty chain it later finds). Never hand-compute an IV.
@@ -522,9 +535,9 @@ python3 -c 'import json,sys; p="raw/iv_samples.json"; a=json.load(open(p)); a.ap
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_iv_history.py \
-  --samples raw/iv_samples.json \
-  --daily   raw/daily_adjusted.json \
-  --out     ../iv_history_<TICKER>.json
+  --samples <BUNDLE>/raw/iv_samples.json \
+  --daily   <BUNDLE>/raw/daily_adjusted.json \
+  --out     <WORKROOT>/trading_desk_<TICKER>/iv_history_<TICKER>.json
 ```
 
 The script skips (with a recorded reason, printed to stderr) any sample whose chain is empty/holiday, whose sample date has no `"4. close"` in the daily file, or whose chain is too sparse for an ATM IV; it errors (exit 2) only on an unreadable manifest/daily or a daily file with no `"4. close"` column (IV history runs only in premium `alpha_vantage` mode, where the daily is AV JSON — it never silently uses the adjusted close). The cache keeps the same shape as above (`{"ticker", "samples": [{"date", "atm_iv"}]}`).
@@ -540,7 +553,7 @@ The script skips (with a recorded reason, printed to stderr) any sample whose ch
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_snapshot.py \
-  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> --ticker <TICKER>
+  --bundle <BUNDLE> --ticker <TICKER>
 ```
 The builder prints the snapshot path to stdout (default `<bundle>/snapshot_<TICKER>_<YYYY-MM-DD>.json`). Exit 2 = a REQUIRED file (`global_quote`, `overview`, `daily_adjusted`, `spy_daily_adjusted`) is missing or unparseable — fix the raw file / manifest and re-run. The builder copies the manifest's `data_source` into `meta.data_source` (default `alphavantage`) and its `data_mode` into `meta.data_mode`; in a web-fallback / gap-filled run it also discloses filled fields in `fundamentals.web_transcribed_fields` and stooq provenance in `technicals.series_source`.
 
@@ -574,7 +587,7 @@ Print the attestation paragraph to the user.
 Report to the user (and to any calling skill):
 - **Data source** — the `primary_source` from Step 0a (e.g. `alphavantage | mcp:polygon | stooq+web`), noting any per-group fallbacks used
 - **Data mode** — `alpha_vantage | av_free_degraded | web_fallback` (AV tier from Step 0b), with the one-line disclosure
-- **Bundle dir** — `./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>/` (under the ticker parent `./trading_desk_<TICKER>/`)
+- **Bundle dir** — `<WORKROOT>/trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>/` (under the ticker parent `<WORKROOT>/trading_desk_<TICKER>/`)
 - **Snapshot path** — QC-stamped `snapshot_<TICKER>_<YYYY-MM-DD>.json`
 - **Chain file path** — the on-disk options chain (referenced, never read into context)
 - **Manifest** — `manifest.json`
@@ -602,8 +615,8 @@ Downstream skills read ONLY `snapshot.json` (plus the chain file via `scripts/ch
 - **Single-snapshot rule.** Downstream modules never fetch market data. A figure missing from the snapshot is a *snapshot extension request*, not a downstream fetch.
 - **2M-token chain rule.** The options chain is never loaded into context, never Read, never pasted. Only `scripts/chain.py` reads it.
 - **`TIME_SERIES_DAILY_ADJUSTED`-only rule.** Never raw `TIME_SERIES_DAILY`; split/dividend-adjusted closes are mandatory for multi-year returns, drawdowns, and vol.
-- **Source preflight is ask-once (Step 0a).** `./trading_desk_config.json` (`{"primary_source", "fallbacks", "asked": true}`) persists the chosen source so it is never re-asked; "change data source" / `--reconfigure` re-opens it. `data_source` is recorded in the manifest and passed through to `meta.data_source`.
-- **Bring-your-own-MCP (Step 2-MCP).** A foreign source is adapted per `${CLAUDE_PLUGIN_ROOT}/docs/CANONICAL_CONTRACT.md`: scalar groups transcribe with citations; the three bulk groups (ticker/SPY daily, options chain) use a **structural** adapter (field mapping only, never arithmetic) persisted at `./trading_desk_config/adapters/<source>_<group>.py` and re-run verbatim on later fetches. Adapters are user-workspace artifacts, never plugin code.
+- **Source preflight is ask-once (Step 0a).** `<WORKROOT>/trading_desk_config.json` (`{"primary_source", "fallbacks", "asked": true}`) persists the chosen source so it is never re-asked; "change data source" / `--reconfigure` re-opens it. `data_source` is recorded in the manifest and passed through to `meta.data_source`.
+- **Bring-your-own-MCP (Step 2-MCP).** A foreign source is adapted per `${CLAUDE_PLUGIN_ROOT}/docs/CANONICAL_CONTRACT.md`: scalar groups transcribe with citations; the three bulk groups (ticker/SPY daily, options chain) use a **structural** adapter (field mapping only, never arithmetic) persisted at `<WORKROOT>/trading_desk_config/adapters/<source>_<group>.py` and re-run verbatim on later fetches. Adapters are user-workspace artifacts, never plugin code.
 - **Data-mode preflight is mandatory for the alphavantage source (Step 0b).** A connected AV MCP does NOT imply a usable key — the empty-key anonymous quota answers too. Detect the tier, announce the mode, and (interactive) ask before proceeding on `av_free_degraded` / `web_fallback`.
 - **Anonymous / free-tier budget (`av_free_degraded`).** The empty-key anonymous quota is **~25 calls/day** (a free-tier key is similar for this pipeline's purposes). A full AV fetch pass here is only **~13–15 calls** because the premium-only groups drop out (no adjusted multi-year history, no chain, no IV history). **Never** attempt Step 4 IV-history sampling on this tier (~26 calls would blow the budget). At most **one run/day**. If a fetch dies mid-run from quota exhaustion, either resume the next day or switch the remaining groups to the Step 2-ALT `web_fallback` path.
 - **Free-tier IV degradation.** In any degraded/fallback mode Step 4 is skipped; `iv_pctile_1yr` comes back `null` and is disclosed in `meta.api_tier_notes` (never silently omitted).
@@ -611,5 +624,5 @@ Downstream skills read ONLY `snapshot.json` (plus the chain file via `scripts/ch
 - **`REALTIME_OPTIONS` tier limitation.** Requires a 600+/min tier. At 75/min the EOD `HISTORICAL_OPTIONS` chain is used and disclosed in `meta.api_tier_notes`.
 - **Missing-field policy.** A missing figure becomes `null`, is listed in `meta.missing`, and downstream renormalizes around it — never silently dropped.
 - **Web-fallback transcription rule.** In `web_fallback` / gap-filled runs, every raw figure is copied **verbatim** with units checked — never computed. The builder's arithmetic and the QC gate's cross-checks (P/E, mktcap, net-cash) are the audit. Cite every figure's source URL (per-field for `web_fundamentals` via its `sources` map). Options are unavailable in this mode and stand aside (disclosed).
-- **New bundle layout.** Parent `./trading_desk_<TICKER>/` (no date) holds the persistent `iv_history_<TICKER>.json` and each dated `detail_reports_<YYYY-MM-DD>/` bundle. Legacy `./td_bundle_<TICKER>_<date>/` bundles still work downstream (discovery globs both), but new snapshots use the new layout.
-- **Outputs always under the invoker CWD.** `${CLAUDE_PLUGIN_ROOT}` locates the scripts; it is never a write target.
+- **New bundle layout.** Parent `<WORKROOT>/trading_desk_<TICKER>/` (no date) holds the persistent `iv_history_<TICKER>.json` and each dated `detail_reports_<YYYY-MM-DD>/` bundle. Legacy `<WORKROOT>/td_bundle_<TICKER>_<date>/` bundles still work downstream (discovery globs both), but new snapshots use the new layout.
+- **Outputs always under `WORKROOT`.** `WORKROOT = <--output-dir>` when passed (absolute), else the invoker's CWD (unchanged). `${CLAUDE_PLUGIN_ROOT}` locates the scripts; it is never a write target.

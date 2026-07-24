@@ -2007,22 +2007,51 @@ def assemble_methodology(bundle_modules, scale_json):
     return blocks
 
 
+def _scale_workspace_root(bundle):
+    """Walk UP from the bundle to the WORKSPACE ROOT holding
+    ``trading_desk_config/scales`` (new layout: 2 levels up; legacy: 1), so a
+    redirected run (``--output-dir <WORKROOT>``) locates the scale under its own
+    root rather than the process CWD. Returns the dir or None; ``_locate_scale_json``
+    keeps ``os.getcwd()`` as the final fallback, so an un-redirected run (whose
+    bundle sits under the CWD) is byte-identical to the pre-1.1.0 behavior.
+    """
+    try:
+        d = os.path.abspath(bundle) if bundle else None
+    except (TypeError, ValueError):
+        d = None
+    seen = set()
+    for _ in range(3):
+        if not d or d in seen:
+            break
+        seen.add(d)
+        if os.path.isdir(os.path.join(d, "trading_desk_config", "scales")):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return None
+
+
 def _locate_scale_json(bundle, docs):
     """Locate + read the active sector scale JSON for the methodology page, or None.
 
     The fundamental module stamps ``sector_scale`` as "<name>@<version>" when an
     anchored valuation used a scale. We resolve the scale NAME from that stamp and
-    look for ``trading_desk_config/scales/<name>.json`` under the bundle dir and the
-    CWD (the two conventional locations, per sector_scales.find_scale_for). Returns
-    the parsed+validated scale dict, or None when there is no stamp or the file is
-    absent/invalid (the page then renders the "no sector scale active" branch).
+    look for ``trading_desk_config/scales/<name>.json`` under the bundle dir, the
+    derived WORKSPACE ROOT (honors ``--output-dir``), and the CWD (per
+    sector_scales.find_scale_for). Returns the parsed+validated scale dict, or None
+    when there is no stamp or the file is absent/invalid (the page then renders the
+    "no sector scale active" branch).
     """
     fund = docs.get("module_fundamental") or {}
     stamp = fund.get("sector_scale")
     if not isinstance(stamp, str) or "@" not in stamp:
         return None
     name = stamp.split("@", 1)[0]
-    for base in (bundle, os.getcwd()):
+    for base in (bundle, _scale_workspace_root(bundle), os.getcwd()):
+        if not base:
+            continue
         path = sector_scales.find_scale_for(base, name)
         if path:
             try:

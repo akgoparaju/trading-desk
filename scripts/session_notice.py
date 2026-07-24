@@ -38,6 +38,13 @@ def main():
         home, ".claude", "trading-desk-data")
     marker = os.path.join(data_dir, "fsi_notice_shown")
 
+    # NB: this is a SessionStart HOOK -- it runs before/independent of any skill
+    # invocation, so the `--output-dir` (WORKROOT) argument cannot reach it. The
+    # os.getcwd() config probe is read-only (offer_recorded only READS a config to
+    # decide whether to stay silent) and never writes to the CWD, so it does not
+    # affect the workspace-redirect contract; at worst a redirected run whose CWD
+    # lacks a recorded fsi_offer shows the one-time notice again. Intentionally
+    # out of --output-dir scope.
     if fsi_installed(home) or offer_recorded(os.getcwd()) or os.path.exists(marker):
         return 0  # silent
 

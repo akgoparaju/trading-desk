@@ -13,9 +13,25 @@ Coordinate the eight trading-desk skills into one phase-gated pipeline for a tic
 - **Module JSONs are the inter-skill contract.** Skills talk to each other through `module_*.json` files in the bundle, not through the conversation. The chain file is never read by anyone but `scripts/chain.py`.
 - **Two blocking gates stop the line.** The snapshot QC gate (`qc_gate.py` exit 0) and the report QC gate (`report_qc.py` exit 0). A FAILED snapshot gate is the ONLY full stop; everything else degrades and discloses.
 
-`${CLAUDE_PLUGIN_ROOT}` is the plugin install dir (where `scripts/` lives). All bundle outputs stay under the invoker's CWD.
+`${CLAUDE_PLUGIN_ROOT}` is the plugin install dir (where `scripts/` lives). All bundle outputs stay under the resolved workspace root (`WORKROOT`, see below).
 
 Trigger phrases: "full trade analysis MU", "trade decision report AAPL", "score NVDA end to end".
+
+---
+
+## Workspace root (`--output-dir`)
+
+This orchestrator accepts an optional **`--output-dir <ABS_DIR>`** argument at invocation (e.g. `full-trade-analysis GOOG --output-dir /abs/workspace`). Resolve it FIRST and call the result **`WORKROOT`**:
+
+- **`--output-dir <ABS_DIR>` given** → `WORKROOT = <ABS_DIR>` (MUST be absolute; `mkdir -p` if missing). All workspace I/O is rooted here, decoupled from the process CWD.
+- **`--output-dir` absent** → `WORKROOT = .` (the invoker's CWD — today's behavior, byte-for-byte unchanged).
+
+The single channel a programmatic caller controls is this argument list; **you fan it out**. Concretely:
+- Everywhere below that reads/writes `./trading_desk_<TICKER>/…`, `./trading_desk_config.json`, or `./trading_desk_config/…`, use `<WORKROOT>/…` instead (absolute when `--output-dir` was given). The bundle is `BUNDLE = <WORKROOT>/trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>`.
+- When you invoke a **sub-skill** (`market-snapshot`, `company-context`), pass **`--output-dir <WORKROOT>`** along.
+- When you dispatch **evidence subagents** or emit a `python3 scripts/…` call, give every path argument (`--bundle`, `--anchors`, `--adjusted`, `--scale`, `--weights-config`, `--coverage`) as an **absolute path built from `<WORKROOT>`** — the downstream scorers then never fall back to the CWD.
+
+One root governs BOTH reads and writes — bundle, config, coverage, adapters, scales, and rendered report/PDF output.
 
 ---
 
@@ -30,7 +46,7 @@ State the run parameters back to the user in **one line** before starting. Ask i
 
 **FSI runtime offer (MANDATORY ask-once, RECORDED — never auto-install).** This is not optional prose; it is a gate with a required artifact:
 1. If the `equity-research:*` skills are available → skip the offer, reuse per the Depth bullet.
-2. Else read `./trading_desk_config.json` → if it has `"fsi_offer": {"asked": true, ...}` → honor the recorded choice silently.
+2. Else read `<WORKROOT>/trading_desk_config.json` → if it has `"fsi_offer": {"asked": true, ...}` → honor the recorded choice silently.
 3. Else you MUST ask the user now (do not self-classify the run as unattended when a user prompt started it):
 > "Deep fundamental mode uses the claude-for-financial-services plugins. Install now, or proceed with the built-in compressed fundamental pass?"
 
@@ -41,10 +57,10 @@ If the user chooses install, hand them these EXACT commands (verified marketplac
 /plugin install financial-analysis
 ```
 Then tell them: the new plugins load in the NEXT session — this run continues with the compressed pass, and the next analysis will use deep FSI mode automatically.
-4. WRITE the answer to `./trading_desk_config.json`: `"fsi_offer": {"asked": true, "choice": "install"|"compressed", "date": "<YYYY-MM-DD>"}` — the recorded artifact is what makes this ask-once instead of ask-never or ask-always. Re-open only when the user says "set up FSI" / "change fundamental mode".
+4. WRITE the answer to `<WORKROOT>/trading_desk_config.json`: `"fsi_offer": {"asked": true, "choice": "install"|"compressed", "date": "<YYYY-MM-DD>"}` — the recorded artifact is what makes this ask-once instead of ask-never or ask-always. Re-open only when the user says "set up FSI" / "change fundamental mode".
 Genuinely unattended (scheduled/cron re-runs) → compressed pass + disclose + record `"choice": "compressed", "unattended": true`. Never auto-install.
 
-The source + data-mode preflight (Phase 1) runs inside market-snapshot — it reads `./trading_desk_config.json` (ask-once source selection) and detects the AV tier; fold both outcomes into the scope echo once known.
+The source + data-mode preflight (Phase 1) runs inside market-snapshot — it reads `<WORKROOT>/trading_desk_config.json` (ask-once source selection) and detects the AV tier; fold both outcomes into the scope echo once known.
 
 One-line echo, e.g.: `Running full-trade-analysis MU · profile=balanced (assumed) · horizon: swing into next print · no position context · fundamental: coverage (deep, current) · data_source: alphavantage · data_mode: alpha_vantage.`
 
@@ -56,7 +72,7 @@ One-line echo, e.g.: `Running full-trade-analysis MU · profile=balanced (assume
 
 **Depth is not the implementer's to soften.** The user has demanded FULL FSI initiation depth. Depth is therefore the DEFAULT, it is CHECKABLE (`coverage_qc.py --mode full` exit 0), and it is RECORDED (`coverage_manifest.json`). **You never choose a shallower pass to save time or tokens** — the only shallow path is an explicit per-run user request (see "Shallow mode" below), and even then it is recorded and disclosed everywhere.
 
-Look for `./trading_desk_<TICKER>/coverage/` (the FSI initiation artifacts — research / model / valuation) and branch:
+Look for `<WORKROOT>/trading_desk_<TICKER>/coverage/` (the FSI initiation artifacts — research / model / valuation; a programmatic caller may have symlinked it here) and branch:
 
 **(a) Coverage EXISTS.** Run a **freshness check**: compare the latest reported quarter in `snapshot.events` / `snapshot.fundamentals` against the quarter the coverage model was built on (the model artifact's own as-of / last-modeled quarter). If a reported quarter **postdates** the model artifacts, the model is stale — **run FSI `equity-research:model-update` on the `coverage/` artifacts** (mandatory: stale coverage that scores as if current is a lie) before scoring, updating them in place and appending a `model-update` entry to `coverage_manifest.json`. Announce plainly: `coverage current` (no newer quarter) or `coverage updated — model-update run for <quarter>` (refreshed). Coverage now feeds Phase 2 in `coverage_distilled` mode. **Re-run `coverage_qc.py` in the mode the manifest records** (see the gate step below) before scoring on it.
 
@@ -88,7 +104,7 @@ Announce the coverage outcome in one line, e.g.: `Coverage: initiated this sessi
 
 `depth_mode` is `"full"` on every implementer-run initiation. `skills_invoked` records the equity-research initiation skill AND the ≥2 financial-analysis sub-skills you actually ran (the gate requires both). A `model-update` re-run appends its own `{"skill": "equity-research:model-update", ...}` entry (branch (a)).
 
-**Transcribe valuation anchors (coverage_distilled only).** Once the FSI Tasks 1-3 artifacts have landed in `trading_desk_<TICKER>/coverage/` (whether initiated this session or already present + current after any `model-update`), distill the valuation into **`coverage/valuation_anchors.json`** — the machine-readable anchor set the fundamental and risk scorers consume. Transcribe, never compute: every number is copied from the coverage artifact (the DCF base/bear/bull scenarios and the comps low/high range from `coverage/valuation.md`; `current_pb` if the model carries it) with a `citations` map naming the exact artifact section each figure came from, and `as_of` set to the coverage date. The shape is pinned EXACTLY:
+**Transcribe valuation anchors (coverage_distilled only).** Once the FSI Tasks 1-3 artifacts have landed in `<WORKROOT>/trading_desk_<TICKER>/coverage/` (whether initiated this session or already present + current after any `model-update`), distill the valuation into **`coverage/valuation_anchors.json`** — the machine-readable anchor set the fundamental and risk scorers consume. Transcribe, never compute: every number is copied from the coverage artifact (the DCF base/bear/bull scenarios and the comps low/high range from `coverage/valuation.md`; `current_pb` if the model carries it) with a `citations` map naming the exact artifact section each figure came from, and `as_of` set to the coverage date. The shape is pinned EXACTLY:
 
 ```json
 {"dcf_base": 120.0, "dcf_bear": 95.0, "dcf_bull": 150.0,
@@ -110,7 +126,7 @@ Both are OPTIONAL: `coverage_qc.py` **SKIPs** them when absent (never a failure)
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/coverage_qc.py \
-  --coverage ./trading_desk_<TICKER>/coverage --mode full
+  --coverage <WORKROOT>/trading_desk_<TICKER>/coverage --mode full
 ```
 
 It verifies the eight depth/provenance checks (artifacts present; manifest shape + `depth_mode` agrees with `--mode`; the equity-research `initiating-coverage` skill was invoked; ≥2 `financial-analysis:*` sub-skills; the nine FSI Task-1 research sections at depth; the 3-statement model with ≥3 forward years; the DCF/comps/scenario valuation; anchors valid and transcribed into `valuation.md`). **A FAIL means the coverage is not done** — go back and complete what the gate names (write the missing research section, extend the projection, deepen the comps table, fix the transcription) and re-run until exit 0. **Never `--waive` your own depth failure to move on** — a waiver here is for a genuinely-justified, disclosed exception surfaced to the user, not a shortcut past incomplete work. If the coverage genuinely cannot be completed to depth this run, surface that to the user rather than scoring on a hollow coverage. (`web_compressed` floor: there is no `coverage/` and no manifest, so this gate does not run — the compressed disclosure in Phase 6 stands in its place.)
@@ -124,7 +140,7 @@ It verifies the eight depth/provenance checks (artifacts present; manifest shape
 
 ## Phase 1 — Snapshot
 
-Invoke the **market-snapshot** skill for `<TICKER>`. It runs the **source + data-mode preflight** (Step 0 — settles the `data_source` via `./trading_desk_config.json` ask-once, then announces the AV tier `alpha_vantage | av_free_degraded | web_fallback` and, if interactive, asks before proceeding on a degraded mode), builds `./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>/` under the ticker parent, fetches raw data from the chosen source (Alpha Vantage, a foreign MCP via `docs/CANONICAL_CONTRACT.md` adapters, or cited web sources), lets in-repo Python compute every number, fills qualitative text slots, and runs its own blocking gate. **Carry the reported `data_source` and `data_mode` forward** — they feed the Phase 6 completeness statement.
+Invoke the **market-snapshot** skill for `<TICKER>`, **passing `--output-dir <WORKROOT>`**. It runs the **source + data-mode preflight** (Step 0 — settles the `data_source` via `<WORKROOT>/trading_desk_config.json` ask-once, then announces the AV tier `alpha_vantage | av_free_degraded | web_fallback` and, if interactive, asks before proceeding on a degraded mode), builds `<WORKROOT>/trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>/` under the ticker parent, fetches raw data from the chosen source (Alpha Vantage, a foreign MCP via `docs/CANONICAL_CONTRACT.md` adapters, or cited web sources), lets in-repo Python compute every number, fills qualitative text slots, and runs its own blocking gate. **Carry the reported `data_source` and `data_mode` forward** — they feed the Phase 6 completeness statement.
 
 **GATE — snapshot QC (`qc_gate.py` exit 0).** The snapshot skill runs the gate itself. A check may be waived ONLY with a real, written justification (`--waive "check:reason"`). Print the attestation paragraph.
 
@@ -139,12 +155,12 @@ Dispatch evidence scoring to **subagents via the Agent tool**, one per module, s
 **Dependency: technical-analysis must COMPLETE before risk-analytics starts** — risk-analytics reads the S/R ladder that technical-analysis mints (`module_technical.json`). So:
 
 - **Wave 1 (parallel):** `{ technical-analysis, sentiment-positioning, company-context }` — sentiment and context have no cross-module dependency; technical mints the ladder.
-- **Wave 2 (after wave 1 completes):** `{ risk-analytics }` — reads the ladder. **Pass the risk subagent `--anchors ./trading_desk_<TICKER>/coverage/valuation_anchors.json` when that file exists** (the `coverage_distilled` path where Phase 0.5 transcribed it): it switches risk's downside valuation floor from pe-median to the coverage `dcf_bear` (labeled `dcf_bear (coverage anchors)`). Absent (the `web_compressed` floor), omit it — pe-median floor. Malformed → the risk step exits 2 (same Phase-0.5 validation backstop as fundamental). (The **fundamental** compressed pass is NOT dispatched here — the **composite-score** skill runs `score_fundamental.py` itself in Phase 3 if `module_fundamental.json` is absent, with its own `--anchors`. Note this so you don't double-run it.)
+- **Wave 2 (after wave 1 completes):** `{ risk-analytics }` — reads the ladder. **Pass the risk subagent `--anchors <WORKROOT>/trading_desk_<TICKER>/coverage/valuation_anchors.json` when that file exists** (the `coverage_distilled` path where Phase 0.5 transcribed it): it switches risk's downside valuation floor from pe-median to the coverage `dcf_bear` (labeled `dcf_bear (coverage anchors)`). Absent (the `web_compressed` floor), omit it — pe-median floor. Malformed → the risk step exits 2 (same Phase-0.5 validation backstop as fundamental). (The **fundamental** compressed pass is NOT dispatched here — the **composite-score** skill runs `score_fundamental.py` itself in Phase 3 if `module_fundamental.json` is absent, with its own `--anchors`. Note this so you don't double-run it.)
 
-**The company-context module (Phase-0.5-scoped).** Invoke the **company-context** skill for `<TICKER>` (`${CLAUDE_PLUGIN_ROOT}/skills/company-context/SKILL.md`) in the **mode Phase 0.5 settled**: `coverage_distilled` when coverage exists/was initiated, `web_compressed` on the compressed floor. It runs parallel with technical/sentiment (no market fetch, no cross-module read — it consumes the snapshot + coverage/web), but it **MUST COMPLETE before Phase 3** — its `module_context.json` `findings[]` registry is the citation source the composite step's fundamental moat flag and conviction reasoning ground in. It is **UNSCORED** — it adds no dimension to the composite; it grounds the ones that are scored. The context skill runs its own blocking gate (`report_qc.py --context`); confirm `module_context.json` exists (with `qc.qc_passed: true`) before the composite.
+**The company-context module (Phase-0.5-scoped).** Invoke the **company-context** skill for `<TICKER>` (`${CLAUDE_PLUGIN_ROOT}/skills/company-context/SKILL.md`), **passing `--output-dir <WORKROOT>`**, in the **mode Phase 0.5 settled**: `coverage_distilled` when coverage exists/was initiated, `web_compressed` on the compressed floor. It runs parallel with technical/sentiment (no market fetch, no cross-module read — it consumes the snapshot + coverage/web), but it **MUST COMPLETE before Phase 3** — its `module_context.json` `findings[]` registry is the citation source the composite step's fundamental moat flag and conviction reasoning ground in. It is **UNSCORED** — it adds no dimension to the composite; it grounds the ones that are scored. The context skill runs its own blocking gate (`report_qc.py --context`); confirm `module_context.json` exists (with `qc.qc_passed: true`) before the composite.
 
 **Every subagent prompt MUST contain, verbatim in spirit:**
-1. **The bundle path** — `./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>` (absolute is safest; legacy `./td_bundle_<TICKER>_<date>` bundles also resolve via the discovery glob).
+1. **The bundle path** — `<WORKROOT>/trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>` **as an absolute path** (mandatory when `--output-dir` was given so the subagent writes into the workspace, not its own CWD; legacy `<WORKROOT>/td_bundle_<TICKER>_<date>` bundles also resolve via the discovery glob).
 2. **READ AND FOLLOW its SKILL.md**, naming the exact path:
    - technical → `${CLAUDE_PLUGIN_ROOT}/skills/technical-analysis/SKILL.md`
    - sentiment → `${CLAUDE_PLUGIN_ROOT}/skills/sentiment-positioning/SKILL.md`
@@ -169,10 +185,10 @@ Invoke the **composite-score** skill for `<TICKER>` at the chosen `--profile`. I
 
 **Anchored valuation + sector scale + custom weights (conditional, coverage-first).** Tell the composite step to add these flags when — and only when — their inputs exist:
 
-- **Fundamental `--anchors ./trading_desk_<TICKER>/coverage/valuation_anchors.json`** — pass it **when the file exists** (the `coverage_distilled` path where Phase 0.5 transcribed it). This switches the fundamental valuation dimension to anchored mode (DCF/comps/own-history/fcf/justified-band, PEG display-only). Absent (the `web_compressed` floor), omit it — snapshot-mode valuation. Malformed → exit 2 (Phase-0.5 validation backstop). (The **risk** module reads the SAME anchors file — wired in Phase 2's risk-analytics dispatch — for its `dcf_bear` downside floor; one coverage-derived anchor set feeds both consumers.)
-- **Fundamental `--adjusted ./trading_desk_<TICKER>/coverage/adjusted_financials.json`** (O14) — ALSO pass it **when that file exists** (Phase 0.5 transcribed a material one-time item). It normalizes the scored ROE + forward-P/E onto the FSI's clean figures and discloses GAAP-vs-core. Absent → GAAP behavior (no change). It is OPTIONAL and independent of `--anchors`.
-- **Fundamental `--scale trading_desk_config/scales/<name>.json`** — pass it **only when a scale governs THIS ticker**, and a scale governs ONLY via a **cited context finding that names it** (single-mapping discipline: one scale per ticker, and the mapping is the finding, not a guess). If no `module_context` finding names a governing sector scale, pass no `--scale` — the justified-band component scores n/a, which is correct. Never attach a scale to a ticker on sector resemblance alone.
-- **Composite `--weights-config ./trading_desk_config.json`** — pass it **when `./trading_desk_config.json` carries a `"weights"` key**. Custom weights stamp the module JSON's `weight_set` as `CUSTOM <set>@<ver>` (vs `standard v1`); absent the key, the standard fixed per-profile table governs. (The composite script also auto-loads the default config path when present, but state the conditional explicitly so the intent is legible.)
+- **Fundamental `--anchors <WORKROOT>/trading_desk_<TICKER>/coverage/valuation_anchors.json`** — pass it **when the file exists** (the `coverage_distilled` path where Phase 0.5 transcribed it). This switches the fundamental valuation dimension to anchored mode (DCF/comps/own-history/fcf/justified-band, PEG display-only). Absent (the `web_compressed` floor), omit it — snapshot-mode valuation. Malformed → exit 2 (Phase-0.5 validation backstop). (The **risk** module reads the SAME anchors file — wired in Phase 2's risk-analytics dispatch — for its `dcf_bear` downside floor; one coverage-derived anchor set feeds both consumers.)
+- **Fundamental `--adjusted <WORKROOT>/trading_desk_<TICKER>/coverage/adjusted_financials.json`** (O14) — ALSO pass it **when that file exists** (Phase 0.5 transcribed a material one-time item). It normalizes the scored ROE + forward-P/E onto the FSI's clean figures and discloses GAAP-vs-core. Absent → GAAP behavior (no change). It is OPTIONAL and independent of `--anchors`.
+- **Fundamental `--scale <WORKROOT>/trading_desk_config/scales/<name>.json`** — pass it **only when a scale governs THIS ticker**, and a scale governs ONLY via a **cited context finding that names it** (single-mapping discipline: one scale per ticker, and the mapping is the finding, not a guess). If no `module_context` finding names a governing sector scale, pass no `--scale` — the justified-band component scores n/a, which is correct. Never attach a scale to a ticker on sector resemblance alone.
+- **Composite `--weights-config <WORKROOT>/trading_desk_config.json`** — pass it **when `<WORKROOT>/trading_desk_config.json` carries a `"weights"` key**. Custom weights stamp the module JSON's `weight_set` as `CUSTOM <set>@<ver>` (vs `standard v1`); absent the key, the standard fixed per-profile table governs. (The composite script also auto-loads a default config — resolved relative to `--bundle`'s workspace root, so it honors `<WORKROOT>` — but state the conditional explicitly so the intent is legible.)
 
 **Refresh governs when a prior bundle exists.** If a previous bundle for `<TICKER>` already exists, this is a **refresh**, not a fresh run — the **refresh-analysis** skill owns the anchor/scale/weight carry-forward and the scale-falsifier disclosure, so route through it rather than re-deciding these flags here.
 
@@ -201,7 +217,7 @@ Invoke the **report-renderer** skill for the bundle: `render_report.py` writes t
 
 **GATE — decision-contract QC (`report_qc.py --decision-gates` exit 0, BLOCKING).** After the §12 gate is green, run the decision-contract gate over the consolidated `module_decision.json` (contract v2.0.0, the downstream Portfolio-OS handoff): **schema_version presence** on every scorer + decision module, **decision ⊆ bundle** (every non-derived numeric leaf traces to a bundle value), and **schema validity** against `docs/decision.schema.json`. A failure is an upstream module/emitter bug — fix the module and re-render; never hand-edit `module_decision.json` (report-renderer Step 4b).
 
-**Deliver:** the **report path** — `render_report.py` writes it to the **ticker parent** `./trading_desk_<TICKER>/<TICKER>_Trade_Report_<date>.md` (a sibling of the `detail_reports_<date>/` data folder; legacy bundles keep it inside), printed to stdout — plus the **composite line** (`grade — action, score/100, profile`) + the **expression line** (recommended structure/size for the profile) + the **coverage line** (`coverage_distilled` vs `web_compressed`, and "initiation run this session" if Phase 0.5 (b) fired) + the **QC attestation** (gate verdict).
+**Deliver:** the **report path** — `render_report.py` derives it from `--bundle` and writes it to the **ticker parent** `<WORKROOT>/trading_desk_<TICKER>/<TICKER>_Trade_Report_<date>.md` (a sibling of the `detail_reports_<date>/` data folder; legacy bundles keep it inside), printed to stdout — plus the **composite line** (`grade — action, score/100, profile`) + the **expression line** (recommended structure/size for the profile) + the **coverage line** (`coverage_distilled` vs `web_compressed`, and "initiation run this session" if Phase 0.5 (b) fired) + the **QC attestation** (gate verdict).
 
 **Then the docket (report-renderer Step 5).** After the md gate is green, report-renderer renders the **docket** — the `exec` (2pp) and `detail` (~10-15pp) PDFs — into the ticker parent (`<TICKER>_Trade_Report_<date>.pdf` / `<TICKER>_Detail_<date>.pdf`), gated by the `pdf_slots.json` provenance stamp. This requires the matplotlib+reportlab render venv: if `render_env.py --check` exits 3 the report ships **md-only** and the docket is skipped (disclosed, with the one-line bootstrap) — it never blocks the run. **Deliver the two PDF paths (or the md-only note).**
 
