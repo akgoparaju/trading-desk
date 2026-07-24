@@ -977,3 +977,76 @@ class TestDecisionGatesCLI(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------------------------------------------- #
+# word_cap: ONE-SHOT trim instruction (Phase 2-3, token-efficiency work).
+#
+# WHY THESE EXIST: word_cap was the single biggest driver of the report-authoring
+# loop. Measured on two real ORCL refreshes, the author trimmed a few words and
+# re-ran the WHOLE QC per shave -- 12 of 16 QC runs on the kurama refresh
+# (2961 -> 2783 -> ... -> 2103), 7 of 11 on the plugin-only run. Each cycle is an
+# API call re-reading the agent's accumulated context.
+#
+# The failure detail must therefore be ACTIONABLE IN ONE EDIT: total, per-page
+# breakdown, the exact cut with margin, and which section is largest. The cap
+# itself and the authoring process are deliberately unchanged.
+# --------------------------------------------------------------------------- #
+
+def _pages(p1, p2, p3):
+    """A minimal report with the three page headers and N filler words each."""
+    return ("# T\n\n"
+            "## Page 1 — Decision\n" + ("w " * p1) + "\n"
+            "## Page 2 — Evidence\n" + ("w " * p2) + "\n"
+            "## Page 3 — Context & Protocol\n" + ("w " * p3) + "\n")
+
+
+def test_word_cap_pass_reports_the_per_page_breakdown():
+    r = rq.check_word_cap(_pages(600, 700, 500))
+    assert r["passed"] is True
+    # +3 per page: _page_sections splits on "## Page ", so "1 — Decision" is in the body
+    assert "p1 603" in r["detail"] and "p2 703" in r["detail"] and "p3 505" in r["detail"]
+
+
+def test_word_cap_fail_states_the_exact_cut_with_margin():
+    r = rq.check_word_cap(_pages(900, 1400, 661))
+    assert r["passed"] is False
+    total = 903 + 1403 + 666
+    target = rq._WORD_CAP - rq._WORD_TRIM_MARGIN
+    # the instruction must be a single actionable number, not just the total
+    assert f"CUT >= {total - target} words" in r["detail"]
+    assert f"~{target}" in r["detail"]
+
+
+def test_word_cap_fail_names_the_largest_section():
+    r = rq.check_word_cap(_pages(300, 1900, 300))
+    assert "p2 is the largest section" in r["detail"]
+    r = rq.check_word_cap(_pages(1900, 300, 300))
+    assert "p1 is the largest section" in r["detail"]
+
+
+def test_word_cap_trim_target_is_below_the_cap_not_equal_to_it():
+    """The measured tail was 2103 -> 2101 -> 2100: three cycles for three words.
+    The instruction must aim under the cap so one edit ends it."""
+    r = rq.check_word_cap(_pages(800, 800, 800))
+    total = 801 * 3
+    cut = int(r["detail"].split("CUT >= ")[1].split(" words")[0])
+    assert total - cut < rq._WORD_CAP
+    assert rq._WORD_TRIM_MARGIN > 0
+
+
+def test_word_cap_enforced_threshold_is_unchanged_by_the_margin():
+    """The margin changes only the trim ADVICE. A report between target and cap
+    must still PASS -- otherwise this silently tightened the cap."""
+    cap = rq._WORD_CAP
+    # land between (cap - margin) and cap
+    n = cap - rq._WORD_TRIM_MARGIN + 10
+    per = n // 3
+    r = rq.check_word_cap(_pages(per, per, n - 2 * per - 3))
+    assert r["passed"] is True
+
+
+def test_word_cap_skips_when_no_page_sections():
+    r = rq.check_word_cap("no page headers at all")
+    assert r["passed"] is None
+    assert "SKIP" in r["detail"]

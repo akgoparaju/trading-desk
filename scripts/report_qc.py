@@ -63,6 +63,10 @@ from scripts import render_report, chain as chain_mod, decision_contract
 from scripts._artifact import emit_json
 
 _WORD_CAP = 2100
+# Overshoot the trim by this much rather than converging onto the cap exactly. The
+# measured tail on a real run was 2103 -> 2101 -> 2100, three QC cycles to recover
+# three words. This changes only the TRIM INSTRUCTION, never the cap that is enforced.
+_WORD_TRIM_MARGIN = 40
 _ORPHAN_CAP = 20
 
 # A numeric token: optional leading $, digits with optional thousands separators
@@ -814,14 +818,45 @@ def check_footer_integrity(report_text, docs):
 
 
 def check_word_cap(report_text):
+    """Total prose across pages 1-3 vs the cap, with a ONE-SHOT trim instruction.
+
+    WHY THE DETAIL: measured on two real ORCL refreshes, this check was the single
+    biggest driver of the report-authoring loop. The author writes over the cap,
+    then trims a little and re-runs the WHOLE QC to see whether it landed -- once
+    per shave. On the kurama refresh, 12 of 16 QC runs failed here, walking
+    2961 -> 2783 -> 2569 -> ... -> 2103 before passing; on the plugin-only refresh,
+    7 of 11, walking 2188 -> ... -> 2100. Each cycle is an API call that re-reads
+    the agent's whole accumulated context, so the convergence tail is expensive.
+
+    The old message reported only the total -- no indication of WHERE the excess sat
+    or HOW MUCH to remove -- so shaving minimally and re-checking was the rational
+    response. This one names the largest section and the exact cut needed to land
+    below the cap WITH margin: a single edit.
+
+    Deliberately NOT changed: the cap itself, and how the prose is authored. The
+    author still writes freely and then cuts its own weakest material; only the
+    number of round-trips needed to do it changes. (Ratified with Anil 2026-07-24:
+    quality-affecting variants -- per-slot write-to-budget, and moving the cap --
+    were declined in favour of this quality-neutral half.)
+    """
     sections = _page_sections(report_text)
     if not sections:
         return _result("word_cap", None, "SKIP: no Page sections found")
-    words = sum(len(s.split()) for s in sections)
+    counts = [len(s.split()) for s in sections]
+    words = sum(counts)
+    per_page = ", ".join(f"p{i + 1} {c}" for i, c in enumerate(counts))
     if words > _WORD_CAP:
-        return _result("word_cap", False,
-                       f"{words} words across pages 1-3 > cap {_WORD_CAP}")
-    return _result("word_cap", True, f"{words} words <= cap {_WORD_CAP}")
+        target = _WORD_CAP - _WORD_TRIM_MARGIN
+        cut = words - target
+        fattest = max(range(len(counts)), key=lambda i: counts[i]) + 1
+        return _result(
+            "word_cap", False,
+            f"{words} words across pages 1-3 > cap {_WORD_CAP} ({per_page}). "
+            f"CUT >= {cut} words IN ONE EDIT to land at ~{target} "
+            f"(cap minus {_WORD_TRIM_MARGIN} margin); p{fattest} is the largest "
+            f"section. Trimming to exactly {_WORD_CAP} costs a full QC cycle per "
+            f"re-check -- overshoot the cut instead of converging on it.")
+    return _result("word_cap", True, f"{words} words <= cap {_WORD_CAP} ({per_page})")
 
 
 def check_no_empty_slots(report_text):
