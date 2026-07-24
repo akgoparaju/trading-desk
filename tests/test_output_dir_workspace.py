@@ -181,3 +181,73 @@ def test_scale_workspace_root_none_when_absent(tmp_path):
     bundle.mkdir(parents=True)
 
     assert render_pdf._scale_workspace_root(str(bundle)) is None
+
+
+# --------------------------------------------------------------------------- #
+# v1.2.0 — FLAT layout under --output-dir: the ticker-dir IS the workspace root,
+# so scale/proposal discovery must find trading_desk_config/scales directly under
+# it (0 up), not at its parent. The walk-up handles both without a --flat flag.
+# --------------------------------------------------------------------------- #
+
+def test_scales_dirs_flat_layout(tmp_path):
+    """Flat: --ticker-dir = <WORKROOT>; scales sit directly under it."""
+    ws = tmp_path / "ws"            # the flat --output-dir root == the ticker dir
+    scales = ws / "trading_desk_config" / "scales"
+    scales.mkdir(parents=True)
+
+    assert refresh_plan._scales_dirs(str(ws)) == [os.path.realpath(str(scales))]
+
+
+def test_pending_proposals_flat_layout(tmp_path):
+    ws = tmp_path / "ws"
+    props = ws / "trading_desk_config" / "scales" / "proposals"
+    props.mkdir(parents=True)
+    _write_json(str(props / "semis_rerate_2.json"), {"status": "pending_ratification"})
+
+    assert refresh_plan._pending_proposals(str(ws)) == ["semis_rerate_2.json"]
+
+
+def test_scales_dirs_flat_and_nested_agree_on_workspace(tmp_path):
+    """Same physical scales dir is found whether the ticker-dir is the flat root
+    or the nested trading_desk_<T> child — the walk-up is layout-agnostic."""
+    ws = tmp_path / "ws"
+    scales = ws / "trading_desk_config" / "scales"
+    scales.mkdir(parents=True)
+    nested_ticker = ws / "trading_desk_MU"
+    nested_ticker.mkdir()
+
+    flat = refresh_plan._scales_dirs(str(ws))
+    nested = refresh_plan._scales_dirs(str(nested_ticker))
+    assert flat == nested == [os.path.realpath(str(scales))]
+
+
+# --------------------------------------------------------------------------- #
+# v1.2.0 — --prev-dir: find_previous_bundle rooted at an explicit prior workspace.
+# --------------------------------------------------------------------------- #
+
+def test_find_previous_bundle_flat_layout(tmp_path):
+    """A flat prior workspace: detail_reports_* are immediate children."""
+    prev = tmp_path / "prev"
+    (prev / "detail_reports_2026-07-22").mkdir(parents=True)
+    (prev / "detail_reports_2026-07-23").mkdir()
+
+    got = refresh_plan.find_previous_bundle(str(prev))
+    assert os.path.basename(got) == "detail_reports_2026-07-23"  # newest by name
+
+
+def test_find_previous_bundle_prev_dir_vs_fresh_output_dir(tmp_path):
+    """The --prev-dir case: prior lives in PREV_DIR; the fresh --output-dir is empty.
+    find_previous_bundle(PREV) resolves the prior; find_previous_bundle(NEW) refuses."""
+    prev = tmp_path / "prev"
+    (prev / "detail_reports_2026-07-23").mkdir(parents=True)
+    new = tmp_path / "new"
+    new.mkdir()  # fresh, empty --output-dir
+
+    got = refresh_plan.find_previous_bundle(str(prev))
+    assert os.path.basename(got) == "detail_reports_2026-07-23"
+
+    try:
+        refresh_plan.find_previous_bundle(str(new))
+        assert False, "expected PlanError on an empty fresh workspace"
+    except refresh_plan.PlanError:
+        pass

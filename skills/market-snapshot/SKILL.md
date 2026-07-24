@@ -23,7 +23,11 @@ This skill accepts an optional **`--output-dir <ABS_DIR>`** argument at invocati
 - **`--output-dir <ABS_DIR>` given** → `WORKROOT = <ABS_DIR>` (MUST be absolute; `mkdir -p "<ABS_DIR>"` if missing). All workspace I/O is rooted here, decoupled from the process CWD.
 - **`--output-dir` absent** → `WORKROOT = .` (the invoker's CWD — today's behavior, byte-for-byte unchanged).
 
-Everywhere below that this skill reads or writes `./trading_desk_<TICKER>/…`, `./trading_desk_config.json`, or `./trading_desk_config/…`, use **`<WORKROOT>/…`** instead. In particular the bundle is `BUNDLE = <WORKROOT>/trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>` — **every `raw/…` path, `manifest.json`, and relative bundle path below lives under `<BUNDLE>/`**, and every `python3 scripts/…` command is given path arguments built from `<WORKROOT>`/`<BUNDLE>` (absolute when `--output-dir` was passed) so the scripts never fall back to the CWD. When `--output-dir` is absent these are the same CWD-relative `./trading_desk_…` paths as today. One root governs BOTH reads and writes.
+**Ticker workspace — FLAT under `--output-dir` (v1.2.0):**
+- **`--output-dir` given** → `<WORKROOT>` **IS the ticker workspace directly**: `TICKER_WS = <WORKROOT>` (drop the `trading_desk_<TICKER>/` segment — a programmatic caller passes a per-ticker `--output-dir`, so that collision boundary is redundant noise).
+- **`--output-dir` absent** → keep the nested per-ticker segment: `TICKER_WS = ./trading_desk_<TICKER>` (the multi-ticker-in-one-CWD human layout — byte-for-byte unchanged).
+
+Everywhere below that reads/writes `./trading_desk_<TICKER>/…`, use **`<TICKER_WS>/…`**. In particular the bundle is `BUNDLE = <TICKER_WS>/detail_reports_<YYYY-MM-DD>` — **every `raw/…` path, `manifest.json`, and relative bundle path below lives under `<BUNDLE>/`** — and the ticker-scoped siblings (`iv_history_<TICKER>.json`, and downstream `coverage/` + the rendered report/PDFs) live directly under `<TICKER_WS>/`. The **config + adapters/scales stay at the workspace root regardless of layout**: `<WORKROOT>/trading_desk_config.json` and `<WORKROOT>/trading_desk_config/…`. Every `python3 scripts/…` command is given path arguments built from these (absolute when `--output-dir` was passed) so the scripts never fall back to the CWD. One root governs BOTH reads and writes.
 
 ---
 
@@ -95,8 +99,8 @@ Groups the primary source can't supply fall through **per-group** to the configu
 
 1. Derive the as-of UTC timestamp (`date -u +%Y-%m-%dT%H:%M:%SZ`). Call the date part `<YYYY-MM-DD>`.
 2. Under `<WORKROOT>`, create the parent + dated bundle:
-   - Parent dir (NO date): `<WORKROOT>/trading_desk_<TICKER>/`
-   - Bundle dir (dated): `<WORKROOT>/trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>/` (= `<BUNDLE>`) with `raw/` inside it.
+   - Parent dir (NO date): `<TICKER_WS>/`
+   - Bundle dir (dated): `<TICKER_WS>/detail_reports_<YYYY-MM-DD>/` (= `<BUNDLE>`) with `raw/` inside it.
 3. Start `<BUNDLE>/manifest.json` with this skeleton (note the `data_source` key from Step 0a and the `data_mode` key from Step 0b):
    ```json
    {"ticker": "<TICKER>", "as_of_utc": "<as_of_utc>", "data_source": "<primary_source>", "data_mode": "<alpha_vantage|av_free_degraded|web_fallback>", "api_tier_notes": [], "files": {}}
@@ -513,7 +517,7 @@ Add a note to `manifest.api_tier_notes` recording the fallback.
 
 ## Step 4 — IV history cache (input for `iv_pctile_1yr`)
 
-Cache file `iv_history_<TICKER>.json` lives in the bundle's **PARENT** dir — now the ticker parent `<WORKROOT>/trading_desk_<TICKER>/iv_history_<TICKER>.json`, a sibling of every dated `detail_reports_<date>/` bundle so it persists across dates. (`av_free_degraded` and `web_fallback` skip this step — no options chain to sample.) Shape:
+Cache file `iv_history_<TICKER>.json` lives in the bundle's **PARENT** dir — now the ticker parent `<TICKER_WS>/iv_history_<TICKER>.json`, a sibling of every dated `detail_reports_<date>/` bundle so it persists across dates. (`av_free_degraded` and `web_fallback` skip this step — no options chain to sample.) Shape:
 ```json
 {"ticker": "<TICKER>", "samples": [{"date": "YYYY-MM-DD", "atm_iv": <number>}]}
 ```
@@ -537,7 +541,7 @@ python3 -c 'import json,sys; p=sys.argv[1]; a=json.load(open(p)); a.append({"dat
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_iv_history.py \
   --samples <BUNDLE>/raw/iv_samples.json \
   --daily   <BUNDLE>/raw/daily_adjusted.json \
-  --out     <WORKROOT>/trading_desk_<TICKER>/iv_history_<TICKER>.json
+  --out     <TICKER_WS>/iv_history_<TICKER>.json
 ```
 
 The script skips (with a recorded reason, printed to stderr) any sample whose chain is empty/holiday, whose sample date has no `"4. close"` in the daily file, or whose chain is too sparse for an ATM IV; it errors (exit 2) only on an unreadable manifest/daily or a daily file with no `"4. close"` column (IV history runs only in premium `alpha_vantage` mode, where the daily is AV JSON — it never silently uses the adjusted close). The cache keeps the same shape as above (`{"ticker", "samples": [{"date", "atm_iv"}]}`).
@@ -587,7 +591,7 @@ Print the attestation paragraph to the user.
 Report to the user (and to any calling skill):
 - **Data source** — the `primary_source` from Step 0a (e.g. `alphavantage | mcp:polygon | stooq+web`), noting any per-group fallbacks used
 - **Data mode** — `alpha_vantage | av_free_degraded | web_fallback` (AV tier from Step 0b), with the one-line disclosure
-- **Bundle dir** — `<WORKROOT>/trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>/` (under the ticker parent `<WORKROOT>/trading_desk_<TICKER>/`)
+- **Bundle dir** — `<TICKER_WS>/detail_reports_<YYYY-MM-DD>/` (under the ticker parent `<TICKER_WS>/`)
 - **Snapshot path** — QC-stamped `snapshot_<TICKER>_<YYYY-MM-DD>.json`
 - **Chain file path** — the on-disk options chain (referenced, never read into context)
 - **Manifest** — `manifest.json`
@@ -624,5 +628,5 @@ Downstream skills read ONLY `snapshot.json` (plus the chain file via `scripts/ch
 - **`REALTIME_OPTIONS` tier limitation.** Requires a 600+/min tier. At 75/min the EOD `HISTORICAL_OPTIONS` chain is used and disclosed in `meta.api_tier_notes`.
 - **Missing-field policy.** A missing figure becomes `null`, is listed in `meta.missing`, and downstream renormalizes around it — never silently dropped.
 - **Web-fallback transcription rule.** In `web_fallback` / gap-filled runs, every raw figure is copied **verbatim** with units checked — never computed. The builder's arithmetic and the QC gate's cross-checks (P/E, mktcap, net-cash) are the audit. Cite every figure's source URL (per-field for `web_fundamentals` via its `sources` map). Options are unavailable in this mode and stand aside (disclosed).
-- **New bundle layout.** Parent `<WORKROOT>/trading_desk_<TICKER>/` (no date) holds the persistent `iv_history_<TICKER>.json` and each dated `detail_reports_<YYYY-MM-DD>/` bundle. Legacy `<WORKROOT>/td_bundle_<TICKER>_<date>/` bundles still work downstream (discovery globs both), but new snapshots use the new layout.
+- **New bundle layout.** Parent `<TICKER_WS>/` (no date) holds the persistent `iv_history_<TICKER>.json` and each dated `detail_reports_<YYYY-MM-DD>/` bundle. Legacy `<WORKROOT>/td_bundle_<TICKER>_<date>/` bundles still work downstream (discovery globs both), but new snapshots use the new layout.
 - **Outputs always under `WORKROOT`.** `WORKROOT = <--output-dir>` when passed (absolute), else the invoker's CWD (unchanged). `${CLAUDE_PLUGIN_ROOT}` locates the scripts; it is never a write target.

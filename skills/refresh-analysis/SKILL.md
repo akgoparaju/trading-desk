@@ -19,20 +19,24 @@ Trigger phrases: "refresh MU", "update the analysis for AAPL", "re-score NVDA", 
 
 ---
 
-## Workspace root (`--output-dir`)
+## Workspace root (`--output-dir`) + prior workspace (`--prev-dir`)
 
-This orchestrator accepts an optional **`--output-dir <ABS_DIR>`** argument at invocation (e.g. `refresh-analysis GOOG --output-dir /abs/workspace`). Resolve it FIRST and call the result **`WORKROOT`**:
+This orchestrator accepts an optional **`--output-dir <ABS_DIR>`** and, for a redirected refresh, an optional **`--prev-dir <ABS_DIR>`** (e.g. `refresh-analysis GOOG --output-dir /abs/new --prev-dir /abs/prior`). Resolve them FIRST:
 
-- **`--output-dir <ABS_DIR>` given** → `WORKROOT = <ABS_DIR>` (MUST be absolute; `mkdir -p` if missing). The prior workspace, the new bundle, config, coverage, and rendered output all live here — decoupled from the process CWD.
-- **`--output-dir` absent** → `WORKROOT = .` (the invoker's CWD — today's behavior, byte-for-byte unchanged).
+- **`--output-dir <ABS_DIR>` given** → `WORKROOT = <ABS_DIR>` (MUST be absolute; `mkdir -p` if missing) — all NEW output lands here, decoupled from the process CWD. **Absent** → `WORKROOT = .` (the invoker's CWD — byte-for-byte unchanged).
+- **Ticker workspace — FLAT under `--output-dir` (v1.2.0):** given → `TICKER_WS = <WORKROOT>` (the ticker workspace IS `<WORKROOT>`; drop the `trading_desk_<TICKER>/` segment — the caller passes a per-ticker dir). Absent → nested `TICKER_WS = ./trading_desk_<TICKER>` (human layout, unchanged). **Config + scales/adapters stay at `<WORKROOT>/trading_desk_config[.json]`** regardless of layout.
 
-Fan it out: everywhere below that reads/writes `./trading_desk_<TICKER>/…`, `./trading_desk_config.json`, or `./trading_desk_config/…`, use `<WORKROOT>/…` instead (absolute when `--output-dir` was given); the prior bundle and `<previous_bundle>` resolve under `<WORKROOT>` (a per-TICKER workspace keeps prior `detail_reports_*` as siblings); when you re-run the module chain (evidence subagents + company-context, exactly as `full-trade-analysis` Phases 2-4), pass **`--output-dir <WORKROOT>`** into each sub-skill and give every `python3 scripts/…` path argument absolute from `<WORKROOT>`. One root governs BOTH reads and writes.
+**The prior bundle — `<previous_bundle>`:**
+- **`--prev-dir <PREV_DIR>` given** (a fresh, empty `--output-dir` refresh — the new run gets its own dated dir): the prior lives in a SEPARATE workspace. `PREV_WS = <PREV_DIR>` = the directory whose immediate children are `detail_reports_*` (+ `coverage/`, `iv_history_<TICKER>.json` when present). `<previous_bundle>` = the newest `detail_reports_*` under `<PREV_DIR>`. **`--prev-dir` is READ-ONLY** — the append-only rule holds; NEVER write into `<PREV_DIR>`.
+- **`--prev-dir` absent** (v1.1.0 behavior): `PREV_WS = TICKER_WS` — `<previous_bundle>` = the newest `detail_reports_*` under `<TICKER_WS>` (a persistent per-ticker workspace keeps prior bundles as siblings of the new one).
+
+Fan it out: everywhere below that reads/writes `./trading_desk_<TICKER>/…` (the NEW bundle, `coverage/`, the report) → use `<TICKER_WS>/…`. Pass **`--output-dir <WORKROOT>`** into each sub-skill (`market-snapshot`, `company-context`) when you re-run the module chain (exactly as `full-trade-analysis` Phases 2-4); pass **`--prev-dir <PREV_DIR>`** to `refresh_plan.py`; resolve `<previous_bundle>` under `<PREV_WS>` for the reuse-`cp`, carry-forward judgments, the delta report, and every `--previous <previous_bundle>` QC call; give every `python3 scripts/…` path argument absolute from `<TICKER_WS>`/`<WORKROOT>`. One root governs the NEW workspace; `--prev-dir` is the only read of the prior.
 
 ---
 
 ## Step 1 — Locate the workspace + data mode
 
-Find the ticker workspace under `<WORKROOT>`: `<WORKROOT>/trading_desk_<TICKER>/` (legacy `<WORKROOT>/td_bundle_<TICKER>_<date>/` is accepted — output still migrates to the new `detail_reports_<as_of>/` layout).
+Locate the workspaces: NEW output goes to `<TICKER_WS>/`; the PRIOR bundle is `<previous_bundle>`, the newest `detail_reports_*` under `<PREV_WS>` (= `--prev-dir` if given, else `<TICKER_WS>`). Legacy `td_bundle_<TICKER>_<date>` bundles are accepted — output still migrates to the new `detail_reports_<as_of>/` layout.
 
 **Source + data-mode context.** Also read `<WORKROOT>/trading_desk_config.json` (if present) and the previous manifest's `data_source` — reuse the recorded source (e.g. `alphavantage | mcp:polygon | stooq+web`) without re-asking; refetches use the same source's fetch pass (and its persisted `trading_desk_config/adapters/` transforms for bulk groups). Reuse the previous manifest's `data_mode` as the default and ANNOUNCE both (`alpha_vantage | av_free_degraded | web_fallback`). Run the full market-snapshot **source + tier preflight (Step 0)** ONLY if the workspace records no context (no `data_source`/`data_mode` in the previous manifest and no config file) — keep it light; do not re-probe a workspace that already declared its source and tier.
 
@@ -42,18 +46,18 @@ Find the ticker workspace under `<WORKROOT>`: `<WORKROOT>/trading_desk_<TICKER>/
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/refresh_plan.py \
-  --ticker-dir <WORKROOT>/trading_desk_<TICKER> [--as-of <YYYY-MM-DD>]
+  --ticker-dir <TICKER_WS> [--prev-dir <PREV_DIR>] [--as-of <YYYY-MM-DD>]
 ```
 
-It writes `<WORKROOT>/trading_desk_<TICKER>/refresh_plan.json` (path printed to stdout). (`refresh_plan.py` discovers `trading_desk_config/scales` + `proposals/` from the `--ticker-dir` parent — i.e. `<WORKROOT>` — so an absolute `--ticker-dir` roots scale monitoring at the workspace.) Exit 2 = no previous bundle ("nothing to refresh — run a full analysis first") → tell the user to run `full-trade-analysis` first and stop.
+Pass **`--prev-dir <PREV_DIR>`** whenever the caller gave one (a fresh `--output-dir` refresh) — `refresh_plan.py` reads the PRIOR bundle from `--prev-dir` (else from `--ticker-dir`), and roots the new `refresh_plan.json` + scale/proposal discovery at `--ticker-dir` (= `<TICKER_WS>`, walked up to find `trading_desk_config/scales` under either the flat or nested layout). It writes `<TICKER_WS>/refresh_plan.json` (path printed to stdout). Exit 2 = no previous bundle ("nothing to refresh — run a full analysis first") → tell the user to run `full-trade-analysis` first and stop.
 
-**Coverage freshness (coverage-first).** If `<WORKROOT>/trading_desk_<TICKER>/coverage/` exists, compare the latest reported quarter (the fresh `earnings_calendar` / `snapshot.events`, `snapshot.fundamentals`) against the quarter the coverage model was built on. If a **new quarter reported since the coverage model** was last built, the model is stale for this refresh — **run FSI `equity-research:model-update` on the `coverage/` artifacts before rescoring** (updating them in place), exactly as full-trade-analysis Phase 0.5 (a) does. A model-update is **append-only to the coverage**: it revises the existing artifacts and **appends a new `{"skill": "equity-research:model-update", ...}` entry to `coverage/coverage_manifest.json`** (and refreshes `generated_utc`) — it does NOT re-initiate. **Note it in the plan presentation** ("coverage current" or "coverage stale — model-update for <quarter> before rescore"). If no `coverage/` exists, the refresh carries the previous run's coverage mode (`web_compressed` floor) forward — nothing to update.
+**Coverage freshness (coverage-first).** If `<TICKER_WS>/coverage/` exists, compare the latest reported quarter (the fresh `earnings_calendar` / `snapshot.events`, `snapshot.fundamentals`) against the quarter the coverage model was built on. If a **new quarter reported since the coverage model** was last built, the model is stale for this refresh — **run FSI `equity-research:model-update` on the `coverage/` artifacts before rescoring** (updating them in place), exactly as full-trade-analysis Phase 0.5 (a) does. A model-update is **append-only to the coverage**: it revises the existing artifacts and **appends a new `{"skill": "equity-research:model-update", ...}` entry to `coverage/coverage_manifest.json`** (and refreshes `generated_utc`) — it does NOT re-initiate. **Note it in the plan presentation** ("coverage current" or "coverage stale — model-update for <quarter> before rescore"). If no `coverage/` exists, the refresh carries the previous run's coverage mode (`web_compressed` floor) forward — nothing to update.
 
 **The full-depth gate is an INITIATION contract, re-checked on refresh in the RECORDED mode.** The full FSI-depth `coverage_qc.py` gate (full-trade-analysis Phase 0.5) governs the INITIAL coverage build — a refresh never re-initiates, so it does not re-decide depth. But after any model-update (or before rescoring on carried-forward coverage), **re-run `coverage_qc.py` in the mode the manifest records** so the updated coverage still meets the depth floor it was built to:
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/coverage_qc.py \
-  --coverage <WORKROOT>/trading_desk_<TICKER>/coverage \
+  --coverage <TICKER_WS>/coverage \
   --mode <the manifest's depth_mode: full | shallow>
 ```
 
@@ -73,13 +77,15 @@ This monitoring is disclosure-only within the refresh — the refresh **signals*
 
 ## Step 3 — Assemble the new bundle (refetch some, copy the rest)
 
-Create `<WORKROOT>/trading_desk_<TICKER>/detail_reports_<as_of>/raw/` (= `<BUNDLE>`) and start a fresh `manifest.json` (same skeleton as market-snapshot Step 0.5, with the previous `data_mode`). Every `raw/…` path below is under `<BUNDLE>/`.
+Create `<TICKER_WS>/detail_reports_<as_of>/raw/` (= `<BUNDLE>`) and start a fresh `manifest.json` (same skeleton as market-snapshot Step 0.5, with the previous `data_mode`). Every `raw/…` path below is under `<BUNDLE>/`.
 
 For each group in `refresh_plan.groups`:
-- **`action: "reuse"`** → `cp` the raw file from the previous bundle's `raw/` into the new bundle's `raw/`, AND copy its manifest entry **VERBATIM** into the new manifest — keeping the ORIGINAL `retrieved_utc` (honest provenance; the plan only reused it because it is in-window, so QC passes).
+- **`action: "reuse"`** → `cp` the raw file from `<previous_bundle>`'s `raw/` (under `<PREV_WS>` — READ-only) into the new bundle's `raw/`, AND copy its manifest entry **VERBATIM** into the new manifest — keeping the ORIGINAL `retrieved_utc` (honest provenance; the plan only reused it because it is in-window, so QC passes).
 - **`action: "refetch"`** → fetch it per the **market-snapshot SKILL's conventions** — the SAME endpoints, manifest keys, `return_full_data=true` + `datatype=json` rules, and the web gap-fill steps for web groups (`web_spot_check`, `short_interest`, and the `earnings_calendar` web fallback). Record a NEW `retrieved_utc`. `options_chain` with reason `absent last run` is a gap-fill — fetch it if the tier allows; if the tier blocks it, leave it absent and disclose (options stand aside, exactly as in a fresh degraded run).
 
-For `iv_history`: `reuse` → leave the parent cache untouched; `refresh` → run the market-snapshot **Step 4** batched biweekly sampling to refresh `<WORKROOT>/trading_desk_<TICKER>/iv_history_<TICKER>.json` — the SAME two-phase collapse (parallel `HISTORICAL_OPTIONS` fetches → `<BUNDLE>/raw/iv_samples.json` manifest → ONE `scripts/build_iv_history.py --samples <BUNDLE>/raw/iv_samples.json --daily <BUNDLE>/raw/daily_adjusted.json --out <WORKROOT>/trading_desk_<TICKER>/iv_history_<TICKER>.json` call that deletes the consumed chains) — never the retired per-sample fetch→one-liner→`rm` loop (~26 API calls, a few turns; skip on any degraded/fallback tier).
+For `iv_history`:
+- **`reuse`** → the cache carries forward. **When `--prev-dir` was given** (a fresh, empty `<TICKER_WS>` with no cache of its own), **`cp` the prior cache `<PREV_DIR>/iv_history_<TICKER>.json` → `<TICKER_WS>/iv_history_<TICKER>.json`** (append-only: read prior, write new, never touch the prior) — **GUARDED on the prior file existing** (on a degraded/governed tier the prior run skipped IV sampling, so there is no cache to copy and the refresh proceeds with `iv_pctile_1yr` null, exactly as today). Without `--prev-dir` (v1.1.0), the prior cache is already the sibling in `<TICKER_WS>` — leave it untouched.
+- **`refresh`** → run the market-snapshot **Step 4** batched biweekly sampling to (re)build `<TICKER_WS>/iv_history_<TICKER>.json` — the SAME two-phase collapse (parallel `HISTORICAL_OPTIONS` fetches → `<BUNDLE>/raw/iv_samples.json` manifest → ONE `scripts/build_iv_history.py --samples <BUNDLE>/raw/iv_samples.json --daily <BUNDLE>/raw/daily_adjusted.json --out <TICKER_WS>/iv_history_<TICKER>.json` call that deletes the consumed chains) — never the retired per-sample fetch→one-liner→`rm` loop (~26 API calls, a few turns; skip on any degraded/fallback tier).
 
 ---
 
@@ -129,7 +135,7 @@ Re-run the full module chain against the new bundle, in dependency order — **t
 ## Step 6 — Render BOTH reports (blocking)
 
 ```bash
-# Full report → written to <WORKROOT>/trading_desk_<TICKER>/ (the TICKER folder, one level
+# Full report → written to <TICKER_WS>/ (the TICKER folder, one level
 # above the detail_reports_<as_of>/ bundle) as <TICKER>_Trade_Report_<as_of>.md
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_report.py \
   --bundle <BUNDLE>
@@ -174,7 +180,7 @@ The PDFs (`<TICKER>_Trade_Report_<as_of>.pdf`, `<TICKER>_Detail_<as_of>.pdf`, `<
 
 ## Step 7 — Append the thesis entry (dated, append-only)
 
-Append a dated section to `<WORKROOT>/trading_desk_<TICKER>/thesis_entry.md` (create if absent — never overwrite prior entries). Fill from the module JSONs / delta report ONLY:
+Append a dated section to `<TICKER_WS>/thesis_entry.md` (create if absent — never overwrite prior entries). Fill from the module JSONs / delta report ONLY:
 
 ```markdown
 ## Refresh — <TICKER> (<as_of>)

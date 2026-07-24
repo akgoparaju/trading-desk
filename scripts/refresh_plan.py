@@ -283,35 +283,48 @@ def _group_decision(group, present, age, window, forced_by_event):
 # Sector-scale falsifier monitoring
 # --------------------------------------------------------------------------- #
 
-def _scales_dirs(ticker_dir):
-    """Directories to scan for active scale JSONs.
+def _walk_up_for(start, subdir, max_levels=3):
+    """First ancestor of ``start`` (inclusive) whose ``<dir>/<subdir>`` is an existing
+    directory, or None.
 
-    The workspace root is the ticker-dir PARENT (``<WORKROOT>/trading_desk_<T>`` ->
-    ``<WORKROOT>``), so scales live at ``<WORKROOT>/trading_desk_config/scales``.
-    Deriving it from ``ticker_dir`` (rather than ``os.getcwd()``) means a redirected
-    run (``--output-dir <WORKROOT>`` with an absolute ``--ticker-dir``) roots scale
-    discovery at the workspace, never the process CWD. For an un-redirected run
-    ``ticker_dir`` is CWD-relative, so its parent resolves to the CWD -- byte-identical
-    to the pre-1.1.0 ``os.getcwd()`` primary. Only existing directories are returned.
+    Walks UP at most ``max_levels`` so scale/proposal discovery is FLATTEN-transparent:
+    under ``--output-dir`` (v1.2.0 flat layout) the ``--ticker-dir`` IS the workspace
+    root, so ``trading_desk_config/…`` sits directly under it (0 up); under the nested
+    ``<WORKROOT>/trading_desk_<T>`` layout it is one level up; and for an un-redirected
+    (human) run ``ticker_dir`` is CWD-relative so the parent resolves to the CWD.
+    Byte-identical to the pre-1.2.0 ``dirname(ticker_dir)`` derivation in the nested /
+    human cases (a ``trading_desk_config`` never lives INSIDE the ticker dir, so the
+    inclusive first hop is skipped there), and additionally correct when flat.
     """
-    candidates = [
-        os.path.join(os.path.dirname(os.path.normpath(ticker_dir)),
-                     _SCALES_SUBDIR),
-    ]
+    try:
+        d = os.path.abspath(start) if start else None
+    except (TypeError, ValueError):
+        d = None
     seen = set()
-    out = []
-    for path in candidates:
-        # realpath (not just normpath) so the cwd-primary and ticker-parent-legacy
-        # locations collapse to one when they are the SAME directory reached via a
-        # symlink (e.g. macOS /var -> /private/var) -- a scale must not be scanned
-        # (and its falsifiers double-counted) twice.
-        real = os.path.realpath(path)
-        if real in seen:
-            continue
-        seen.add(real)
-        if os.path.isdir(real):
-            out.append(real)
-    return out
+    for _ in range(max_levels):
+        if not d or d in seen:
+            break
+        seen.add(d)
+        cand = os.path.join(d, subdir)
+        if os.path.isdir(cand):
+            return cand
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return None
+
+
+def _scales_dirs(ticker_dir):
+    """The active-scales dir for a ticker workspace (0 or 1 entry, realpath'd).
+
+    Resolves ``trading_desk_config/scales`` by walking up from ``ticker_dir`` (see
+    ``_walk_up_for``) — flatten-transparent and byte-identical to the pre-1.2.0
+    ``dirname(ticker_dir)`` derivation for the nested/human layouts. Only an existing
+    directory is returned; realpath so a symlinked workspace resolves canonically.
+    """
+    found = _walk_up_for(ticker_dir, _SCALES_SUBDIR)
+    return [os.path.realpath(found)] if found else []
 
 
 def _evaluate_scale_falsifiers(scale, snapshot):
@@ -398,22 +411,16 @@ def _scan_scales(ticker_dir, snapshot):
 def _pending_proposals(ticker_dir):
     """Filenames of drafted-but-unratified scale proposals (sorted).
 
-    Scans ``<WORKROOT>/trading_desk_config/scales/proposals/`` at the ticker-dir
-    parent (the workspace root -- same derivation as ``_scales_dirs``, so a
-    redirected run honors ``--output-dir`` and an un-redirected run resolves to the
-    CWD, byte-identical to pre-1.1.0). A refresh surfaces these so an unratified
-    proposal is never silently pending.
+    Scans ``trading_desk_config/scales/proposals/`` at the workspace root, resolved by
+    walking up from ``ticker_dir`` (same ``_walk_up_for`` derivation as ``_scales_dirs``
+    — flatten-transparent, byte-identical to pre-1.2.0 for the nested/human layouts).
+    A refresh surfaces these so an unratified proposal is never silently pending.
     """
     names = set()
-    candidates = [
-        os.path.join(os.path.dirname(os.path.normpath(ticker_dir)),
-                     _PROPOSALS_SUBDIR),
-    ]
-    for path in candidates:
-        norm = os.path.normpath(path)
-        if os.path.isdir(norm):
-            for f in glob.glob(os.path.join(norm, "*.json")):
-                names.add(os.path.basename(f))
+    props_dir = _walk_up_for(ticker_dir, _PROPOSALS_SUBDIR)
+    if props_dir:
+        for f in glob.glob(os.path.join(props_dir, "*.json")):
+            names.add(os.path.basename(f))
     return sorted(names)
 
 
@@ -519,7 +526,13 @@ def main(argv=None):
                     "selective refetch vs reuse per group, event detection, and "
                     "a refetch-cost estimate. Writes refresh_plan.json.")
     parser.add_argument("--ticker-dir", required=True,
-                        help="the ticker workspace, e.g. ./trading_desk_MU")
+                        help="the NEW ticker workspace (where the plan + new bundle "
+                             "go), e.g. ./trading_desk_MU or a flat --output-dir root")
+    parser.add_argument("--prev-dir", default=None,
+                        help="the PRIOR workspace root to read the previous bundle "
+                             "from (the dir whose immediate children are "
+                             "detail_reports_*). Default: resolve the prior under "
+                             "--ticker-dir (v1.1.0 behavior).")
     parser.add_argument("--as-of", default=None,
                         help="planning date YYYY-MM-DD (default: today)")
     parser.add_argument("--out", default=None,
@@ -536,7 +549,13 @@ def main(argv=None):
         as_of = date.today()
 
     try:
-        bundle = find_previous_bundle(args.ticker_dir)
+        # The PRIOR bundle is read from --prev-dir when given (a fresh, empty
+        # --output-dir refresh points here at the previous run's workspace), else
+        # from --ticker-dir (v1.1.0: the prior lives in the same workspace). Scale/
+        # proposal discovery + the plan output stay rooted at --ticker-dir (the NEW
+        # workspace), so current scales govern and the plan lands in the new dir.
+        prev_root = args.prev_dir or args.ticker_dir
+        bundle = find_previous_bundle(prev_root)
         plan = build_plan(args.ticker_dir, bundle, as_of)
     except PlanError as exc:
         print("ERROR: %s" % exc, file=sys.stderr)

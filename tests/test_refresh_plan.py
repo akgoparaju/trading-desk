@@ -819,5 +819,46 @@ class ScaleCwdTests(unittest.TestCase):
             self.assertIsInstance(plan["scale_review_required"], bool)
 
 
+class PrevDirTests(unittest.TestCase):
+    """v1.2.0 --prev-dir: read the PRIOR bundle from a SEPARATE workspace while the
+    plan + scale discovery root at the NEW (fresh, possibly empty) --ticker-dir."""
+
+    def test_prev_dir_resolves_prior_from_separate_workspace(self):
+        with tempfile.TemporaryDirectory() as prevtmp, \
+                tempfile.TemporaryDirectory() as newtmp:
+            # Prior workspace (its immediate child is detail_reports_* → this is the
+            # dir kurama passes as --prev-dir).
+            prev_ticker_dir, _ = _make_workspace(prevtmp, AS_OF)
+            # A fresh, empty --output-dir: no prior of its own.
+            with self.assertRaises(refresh_plan.PlanError):
+                refresh_plan.find_previous_bundle(newtmp)
+
+            out = os.path.join(newtmp, "refresh_plan.json")
+            rc = _run_main(["--ticker-dir", newtmp, "--prev-dir", prev_ticker_dir,
+                            "--as-of", AS_OF, "--out", out])
+            self.assertEqual(rc, 0)
+            with open(out) as fh:
+                plan = json.load(fh)
+            # Plan was built from the PRIOR bundle (ticker + groups present)...
+            self.assertEqual(plan["ticker"], "MU")
+            self.assertIn("groups", plan)
+            # ...and written into the NEW workspace, never the prior.
+            self.assertTrue(os.path.isfile(out))
+            self.assertFalse(
+                os.path.isfile(os.path.join(prev_ticker_dir, "refresh_plan.json")),
+                "the prior workspace must be left untouched (append-only)")
+
+    def test_no_prev_dir_is_v1_1_0_behavior(self):
+        """Without --prev-dir the prior resolves under --ticker-dir (unchanged)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ticker_dir, _ = _make_workspace(tmp, AS_OF)
+            out = os.path.join(ticker_dir, "refresh_plan.json")
+            rc = _run_main(["--ticker-dir", ticker_dir, "--as-of", AS_OF, "--out", out])
+            self.assertEqual(rc, 0)
+            with open(out) as fh:
+                plan = json.load(fh)
+            self.assertEqual(plan["ticker"], "MU")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,10 +22,10 @@ Trigger phrases: "company context MU", "build context module for AAPL", or full-
 
 This skill accepts an optional **`--output-dir <ABS_DIR>`** argument (the orchestrator passes it when it invoked this module). Resolve it FIRST and call the result **`WORKROOT`**:
 
-- **`--output-dir <ABS_DIR>` given** → `WORKROOT = <ABS_DIR>` (absolute). The ticker workspace, its `coverage/`, and the bundle are read/written under here.
-- **`--output-dir` absent** → `WORKROOT = .` (the invoker's CWD — today's behavior, byte-for-byte unchanged).
+- **`--output-dir <ABS_DIR>` given** → `WORKROOT = <ABS_DIR>` (absolute), and the ticker workspace is FLAT — `TICKER_WS = <WORKROOT>` (v1.2.0: drop the `trading_desk_<TICKER>/` segment). The bundle + `coverage/` are read under `<TICKER_WS>/`.
+- **`--output-dir` absent** → `WORKROOT = .`, nested `TICKER_WS = ./trading_desk_<TICKER>` (the invoker's CWD layout — byte-for-byte unchanged).
 
-Everywhere below that reads `./trading_desk_<TICKER>/…` (the bundle glob, `coverage/`), use `<WORKROOT>/…`. If the orchestrator already handed you an **absolute bundle path**, use it verbatim (it is already rooted at `<WORKROOT>`); `<bundle>`-relative writes (`module_context.json`, `brief_context.md`) stay inside that bundle.
+Everywhere below that reads `./trading_desk_<TICKER>/…` (the bundle glob, `coverage/`) → use `<TICKER_WS>/…`. If the orchestrator already handed you an **absolute bundle path**, use it verbatim (already rooted correctly); `<bundle>`-relative writes (`module_context.json`, `brief_context.md`) stay inside that bundle.
 
 ---
 
@@ -34,7 +34,7 @@ Everywhere below that reads `./trading_desk_<TICKER>/…` (the bundle glob, `cov
 Under `<WORKROOT>` (or the absolute bundle path the orchestrator handed you), find the newest bundle for the ticker:
 
 ```bash
-ls -dt <WORKROOT>/trading_desk_<TICKER>/detail_reports_* <WORKROOT>/td_bundle_<TICKER>_* 2>/dev/null | head -1
+ls -dt <TICKER_WS>/detail_reports_* <WORKROOT>/td_bundle_<TICKER>_* 2>/dev/null | head -1
 ```
 
 Newest first across both layouts (the new `trading_desk_<TICKER>/detail_reports_<date>/` bundle and the legacy `td_bundle_<TICKER>_<date>/`). **If NO bundle exists**, invoke the `market-snapshot` skill for `<TICKER>` first, then continue with the bundle it produces. The bundle's `snapshot.json` (single source of truth) supplies `meta.ticker` / `meta.as_of_utc` and every number the prose may cite; its `raw/news_sentiment.json` and `snapshot.events` feed the live tape.
@@ -47,9 +47,9 @@ Pick the mode by what is available, and disclose it. The mode is pinned in the m
 
 ### `coverage_distilled` (FSI initiation present)
 
-If an FSI equity-research **initiation** exists for the ticker (the `coverage/` artifacts — initiation research, financial model, valuation docs — under `<WORKROOT>/trading_desk_<TICKER>/coverage/`), reuse them. By the time this module is authored, Phase 0.5 has already run the initiation at **FULL FSI depth** and its **coverage QC gate** (`coverage_qc.py`) has passed — so `coverage/` carries the nine FSI Task-1 research sections, the 3-statement model, the DCF/comps valuation, the transcribed `valuation_anchors.json`, and the provenance `coverage_manifest.json`. You are distilling from a verified, full-depth artifact set, not from a stub:
+If an FSI equity-research **initiation** exists for the ticker (the `coverage/` artifacts — initiation research, financial model, valuation docs — under `<TICKER_WS>/coverage/`), reuse them. By the time this module is authored, Phase 0.5 has already run the initiation at **FULL FSI depth** and its **coverage QC gate** (`coverage_qc.py`) has passed — so `coverage/` carries the nine FSI Task-1 research sections, the 3-statement model, the DCF/comps valuation, the transcribed `valuation_anchors.json`, and the provenance `coverage_manifest.json`. You are distilling from a verified, full-depth artifact set, not from a stub:
 
-1. Read `<WORKROOT>/trading_desk_<TICKER>/coverage/` artifacts (research.md / model.md / valuation.md, or whatever the initiation produced).
+1. Read `<TICKER_WS>/coverage/` artifacts (research.md / model.md / valuation.md, or whatever the initiation produced).
 2. Distill the business / competitive / cases / risks from the FULL coverage.
 3. **Every claim cites the artifact section** — the finding's `source` is the exact section, e.g. `"coverage/research.md §Competitive Landscape"` or `"coverage/valuation.md §DCF"`.
 4. Fold the **live tape** from the bundle's `raw/news_sentiment.json` (recent headlines) and `snapshot.events` (dated catalysts).
