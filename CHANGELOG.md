@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.1 — 2026-07-25 · One-shot report trim — `word_cap` failures become actionable in a single edit
+
+Ships `cb7fb13` (Phase 2 of the token-efficiency programme) as a release, because **the plugin cache is keyed by VERSION**: `1.2.0/` already exists, so a fix merged under an unchanged version string would never reach a live run. No behavioral change to any score, grade, action, or gate verdict — **only the text of a `report_qc` failure message**. Suite **1989 pass, 2 skip**.
+
+- **`check_word_cap` names the cut instead of just the total.** The old failure said `N words > cap 2100` — no location, no magnitude — so shaving a few words and re-running the whole QC was the rational response, once per shave. It now reports per-page counts, identifies the largest section, and states the exact cut needed to land BELOW the cap with a 40-word margin (`_WORD_TRIM_MARGIN`), so **one edit ends the loop**. The cap itself (2100) is unchanged, and so is how the prose is authored: the author still writes freely, then cuts its own weakest material.
+- **Measured on a matched single-variable A/B** (ORCL refresh, prior workspace restored byte-for-byte, only `report_qc.py` differing between arms): word-cap failures **8 → 1**; `report_qc` invocations **14 → 3**; the report/trim phase **25 → 10 calls, $7.55 → $3.07**. Both arms passed every gate with **zero waivers**, same `Hold/Trim` action, composite C→C.
+- **Deliberately NOT changed, after review:** per-slot write-to-budget stamps in the skeleton, and raising or removing the 2100 cap — both declined as quality-affecting. Writing *to* a budget is not the same as writing freely and then cutting the weakest material.
+
 ## 1.2.0 — 2026-07-24 · Flat workspace + `--prev-dir` — a per-run dir the caller controls end to end
 
 Builds on v1.1.0's `--output-dir`. A programmatic caller stores each run in its own per-ticker, per-run-date directory and passes a per-ticker `--output-dir` — so (a) the `trading_desk_<TICKER>/` collision subfolder is redundant noise (ticker twice, date twice), and (b) a refresh into a FRESH dated dir had no way to read the prior bundle (which lives in the previous run's dir). Two additive changes, **both gated on `--output-dir` being present**; the 2.0.0 decision contract and snapshot schema are untouched. Suite **1983 pass, 2 skip** (+7).
