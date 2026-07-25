@@ -1,6 +1,6 @@
 # Spec — G1–G4 capital-trust fixes (from the GOOG review validation)
 
-**Date:** 2026-07-21 · **Source:** `jutsu-trading-desk/docs/reviews/2026-07-21-goog-review-validation.md` · **Bar:** no guesses, data-driven, 95% confidence.
+**Date:** 2026-07-21 · **Source:** internal review `docs/reviews/2026-07-21-goog-review-validation.md` · **Bar:** no guesses, data-driven, 95% confidence.
 **Standing gates (project contract):** real-data E2E re-score before commit (read before/after grade, not just green tests); reference-value verification for any new primitive; verify the diff against intent, not the subagent's passing test.
 
 Each task below carries a **data finding** section — what the code/data actually supports — because two of the four differ materially from the review's framing. Those differences are surfaced, not silently absorbed.

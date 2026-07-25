@@ -1,6 +1,6 @@
 # Spec — Wave 1: Confidence / Provenance Layer (`confidence-v1.0.0`)
 
-**Date:** 2026-07-20 · **Status:** proposed · **Source:** `jutsu-trading-desk/docs/reviews/2026-07-20-development-priorities.md` (Wave 1, B23) + the three user-ratified decisions (per-module badge + composite roll-up; driver = source + depth + staleness; disclosure-first).
+**Date:** 2026-07-20 · **Status:** proposed · **Source:** internal review `docs/reviews/2026-07-20-development-priorities.md` (Wave 1, B23) + the three user-ratified decisions (per-module badge + composite roll-up; driver = source + depth + staleness; disclosure-first).
 
 **Goal.** Every report — premium or degraded — ships a **per-module confidence badge + a composite roll-up**, computed **deterministically by script** (never LLM judgment) from three axes: **source** (where the data came from), **depth** (rubric maturity), **staleness** (print freshness / reuse). Level = the **weakest link** (`min`) of the three. This makes "no MCP → medium/low" a first-class, versioned artifact and turns rubric maturity into a visible, honest signal ("this dimension is still shallow" until its R-wave lands).
 

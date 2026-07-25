@@ -820,24 +820,25 @@ def check_footer_integrity(report_text, docs):
 def check_word_cap(report_text):
     """Total prose across pages 1-3 vs the cap, with a ONE-SHOT trim instruction.
 
-    WHY THE DETAIL: measured on two real ORCL refreshes, this check was the single
-    biggest driver of the report-authoring loop. The author writes over the cap,
-    then trims a little and re-runs the WHOLE QC to see whether it landed -- once
-    per shave. On the kurama refresh, 12 of 16 QC runs failed here, walking
-    2961 -> 2783 -> 2569 -> ... -> 2103 before passing; on the plugin-only refresh,
-    7 of 11, walking 2188 -> ... -> 2100. Each cycle is an API call that re-reads
-    the agent's whole accumulated context, so the convergence tail is expensive.
+    WHY THE DETAIL: measured across several real refreshes, this check was the
+    single biggest driver of the report-authoring loop. The author writes over the
+    cap, then trims a little and re-runs the WHOLE QC to see whether it landed --
+    once per shave. Observed tails converged on the cap a few words at a time
+    (e.g. 2209 -> 2157 -> 2138 -> ... -> 2095), with most QC runs in the phase
+    failing here. Each cycle is an API call that re-reads the agent's whole
+    accumulated context, so the convergence tail is disproportionately expensive.
 
     The old message reported only the total -- no indication of WHERE the excess sat
     or HOW MUCH to remove -- so shaving minimally and re-checking was the rational
     response. This one names the largest section and the exact cut needed to land
-    below the cap WITH margin: a single edit.
+    below the cap WITH margin: a single edit. A matched before/after on the same
+    report reduced word-cap failures in the phase from 8 to 1.
 
     Deliberately NOT changed: the cap itself, and how the prose is authored. The
     author still writes freely and then cuts its own weakest material; only the
-    number of round-trips needed to do it changes. (Ratified with Anil 2026-07-24:
-    quality-affecting variants -- per-slot write-to-budget, and moving the cap --
-    were declined in favour of this quality-neutral half.)
+    number of round-trips needed to do it changes. Quality-affecting variants --
+    per-slot write-to-budget stamps, and moving the cap -- were considered and
+    declined in favour of this quality-neutral change.
     """
     sections = _page_sections(report_text)
     if not sections:

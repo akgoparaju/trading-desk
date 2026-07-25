@@ -827,7 +827,7 @@ class PrevDirTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as prevtmp, \
                 tempfile.TemporaryDirectory() as newtmp:
             # Prior workspace (its immediate child is detail_reports_* → this is the
-            # dir kurama passes as --prev-dir).
+            # dir a caller passes as --prev-dir).
             prev_ticker_dir, _ = _make_workspace(prevtmp, AS_OF)
             # A fresh, empty --output-dir: no prior of its own.
             with self.assertRaises(refresh_plan.PlanError):

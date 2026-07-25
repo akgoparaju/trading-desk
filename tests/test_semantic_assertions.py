@@ -209,8 +209,9 @@ class TestRegistration(unittest.TestCase):
 # LIVE-DEFECT CATCH: the actual shipped GOOG pdf_slots.json.
 # --------------------------------------------------------------------------- #
 
-_GOOG_BUNDLE = ("/Users/ankugo/dev/jutsu-trading-desk/trading_desk_GOOG/"
-                "detail_reports_2026-07-21")
+# Integration gate; opt-in via TD_TEST_BUNDLE_DIR pointing at a dated
+# detail_reports_* bundle. Empty when unset, so these tests skip.
+_GOOG_BUNDLE = os.environ.get("TD_TEST_BUNDLE_DIR", "")
 
 
 class TestGoogLiveDefect(unittest.TestCase):

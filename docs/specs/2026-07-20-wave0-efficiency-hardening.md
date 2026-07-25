@@ -1,6 +1,6 @@
 # Spec — Wave 0: Efficiency & Correctness Hardening
 
-**Date:** 2026-07-20 · **Status:** proposed · **Owner:** — · **Source:** `jutsu-trading-desk/docs/reviews/2026-07-20-development-priorities.md` (Wave 0). Companion inputs: the efficiency audit (T1/T2/E1) + the quality review's quick fixes (QF1–5).
+**Date:** 2026-07-20 · **Status:** proposed · **Owner:** — · **Source:** internal review `docs/reviews/2026-07-20-development-priorities.md` (Wave 0). Companion inputs: the efficiency audit (T1/T2/E1) + the quality review's quick fixes (QF1–5).
 
 **Goal.** Ship the cheap, pure-win speed and correctness fixes **first** — no schema change, no rubric-band change, no quality trade-off — so the expensive Wave 1–4 work (which each need many validation runs) iterates on a faster, cleaner machine. Every item here is either a wall-clock win or a correctness/honesty bug.
 

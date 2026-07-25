@@ -980,13 +980,13 @@ if __name__ == "__main__":
 
 
 # --------------------------------------------------------------------------- #
-# word_cap: ONE-SHOT trim instruction (Phase 2-3, token-efficiency work).
+# word_cap: ONE-SHOT trim instruction (token-efficiency work).
 #
 # WHY THESE EXIST: word_cap was the single biggest driver of the report-authoring
-# loop. Measured on two real ORCL refreshes, the author trimmed a few words and
-# re-ran the WHOLE QC per shave -- 12 of 16 QC runs on the kurama refresh
-# (2961 -> 2783 -> ... -> 2103), 7 of 11 on the plugin-only run. Each cycle is an
-# API call re-reading the agent's accumulated context.
+# loop. Measured across several real refreshes, the author trimmed a few words and
+# re-ran the WHOLE QC per shave, converging on the cap a few words at a time
+# (e.g. 2209 -> 2157 -> ... -> 2095), with most QC runs in the phase failing here.
+# Each cycle is an API call re-reading the agent's accumulated context.
 #
 # The failure detail must therefore be ACTIONABLE IN ONE EDIT: total, per-page
 # breakdown, the exact cut with margin, and which section is largest. The cap

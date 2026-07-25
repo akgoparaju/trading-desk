@@ -155,6 +155,15 @@ python3 -m unittest discover -s tests
 
 Python 3.10+, standard library only — no pip installs.
 
+A handful of tests are **integration gates** that validate against a real ticker workspace rather than a fixture. They skip unless you point them at one, so the suite stays hermetic on a clean checkout:
+
+```
+TD_TEST_COVERAGE_DIR=<workspace>/coverage \
+TD_TEST_WORKSPACE_DIR=<workspace> \
+TD_TEST_BUNDLE_DIR=<workspace>/detail_reports_<YYYY-MM-DD> \
+  python3 -m unittest discover -s tests
+```
+
 ## Disclaimer
 
 For educational and research purposes only. Not financial advice. Nothing here is a recommendation to buy or sell any security. Verify all figures independently before acting.

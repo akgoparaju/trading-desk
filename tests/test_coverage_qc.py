@@ -688,11 +688,12 @@ class TestAdjustedFinancialsCheck(unittest.TestCase):
             self.assertIs(by_name["adjusted_financials"]["passed"], False)
 
     def test_goog_real_coverage_passes(self):
-        # Validate against the real GOOG coverage dir (integration gate).
-        goog_cov = (
-            "/Users/ankugo/dev/jutsu-trading-desk/trading_desk_GOOG/coverage")
-        if not os.path.isdir(goog_cov):
-            self.skipTest("GOOG coverage dir not accessible")
+        # Integration gate against a real coverage dir. Opt-in: point
+        # TD_TEST_COVERAGE_DIR at a workspace's coverage/ directory. Skipped
+        # when unset, so the suite stays hermetic on a clean checkout.
+        goog_cov = os.environ.get("TD_TEST_COVERAGE_DIR", "")
+        if not goog_cov or not os.path.isdir(goog_cov):
+            self.skipTest("set TD_TEST_COVERAGE_DIR to run this integration gate")
         result = cq.check_adjusted_financials(goog_cov)
         self.assertIs(result["passed"], True, result["detail"])
 
@@ -838,10 +839,10 @@ class TestScenarioDriversCheck(unittest.TestCase):
             self.assertIs(by_name["scenario_drivers"]["passed"], False)
 
     def test_goog_real_coverage_passes(self):
-        goog_cov = (
-            "/Users/ankugo/dev/jutsu-trading-desk/trading_desk_GOOG/coverage")
-        if not os.path.isdir(goog_cov):
-            self.skipTest("GOOG coverage dir not accessible")
+        # Integration gate; opt-in via TD_TEST_COVERAGE_DIR (see above).
+        goog_cov = os.environ.get("TD_TEST_COVERAGE_DIR", "")
+        if not goog_cov or not os.path.isdir(goog_cov):
+            self.skipTest("set TD_TEST_COVERAGE_DIR to run this integration gate")
         result = cq.check_scenario_drivers(goog_cov)
         self.assertIs(result["passed"], True, result["detail"])
 

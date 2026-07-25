@@ -1612,15 +1612,15 @@ class TestAdjustedGOOGFixture(unittest.TestCase):
 
     def setUp(self):
         import json
-        snap_path = (
-            "/Users/ankugo/dev/jutsu-trading-desk/trading_desk_GOOG/"
-            "detail_reports_2026-07-21/snapshot_GOOG_2026-07-21.json")
-        anchors_path = (
-            "/Users/ankugo/dev/jutsu-trading-desk/trading_desk_GOOG/"
-            "coverage/valuation_anchors.json")
-        adj_path = (
-            "/Users/ankugo/dev/jutsu-trading-desk/trading_desk_GOOG/"
-            "coverage/adjusted_financials.json")
+        # Integration gate against a real workspace. Opt-in: point
+        # TD_TEST_WORKSPACE_DIR at a ticker workspace containing coverage/ and
+        # a dated detail_reports_*/ bundle. Skipped when unset, so the suite
+        # stays hermetic on a clean checkout.
+        ws = os.environ.get("TD_TEST_WORKSPACE_DIR", "")
+        snap_path = os.path.join(
+            ws, "detail_reports_2026-07-21/snapshot_GOOG_2026-07-21.json")
+        anchors_path = os.path.join(ws, "coverage/valuation_anchors.json")
+        adj_path = os.path.join(ws, "coverage/adjusted_financials.json")
         try:
             with open(snap_path) as f:
                 self.snap = json.load(f)
@@ -1629,7 +1629,8 @@ class TestAdjustedGOOGFixture(unittest.TestCase):
             with open(adj_path) as f:
                 self.adjusted = json.load(f)
         except OSError:
-            self.skipTest("GOOG bundle files not accessible")
+            self.skipTest(
+                "set TD_TEST_WORKSPACE_DIR to run this integration gate")
 
     def test_goog_score_neutral(self):
         # Score with and without adjusted must be identical (GOOG tiers hold).

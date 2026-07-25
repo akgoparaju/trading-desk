@@ -1,6 +1,6 @@
 # Spec — Wave 2: Event-Aware Risk (R1) — data + disclosure now, scoring gated on calibration
 
-**Date:** 2026-07-20 · **Status:** Part A proposed (executable); **Part B GATED on a user calibration decision** · **Source:** `jutsu-trading-desk/docs/reviews/2026-07-19-analysis-quality-review.md` R1 + Part-3 Risk table; `.../2026-07-20-development-priorities.md` Wave 2 (B24).
+**Date:** 2026-07-20 · **Status:** Part A proposed (executable); **Part B GATED on a user calibration decision** · **Source:** internal review `docs/reviews/2026-07-19-analysis-quality-review.md` R1 + Part-3 Risk table; `.../2026-07-20-development-priorities.md` Wave 2 (B24).
 
 **Verification note (no-guessing).** Two Explore passes mapped the current risk rubric and the snapshot's event/gap/news data at `file:line`. The split below is not a scoping preference — it is where the evidence runs out: the DATA computations are deterministic (95%); the SCORING re-weight + two of the six data signals are calibration/heuristic choices the review itself marks as the user's (B8/B9) and which cannot reach 95% without a decision. **I will not fabricate a weight vector, a short-seller entity list, or an EWMA half-life and call it 95%.**
 

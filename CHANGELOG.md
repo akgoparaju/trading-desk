@@ -2,10 +2,10 @@
 
 ## 1.2.1 — 2026-07-25 · One-shot report trim — `word_cap` failures become actionable in a single edit
 
-Ships `cb7fb13` (Phase 2 of the token-efficiency programme) as a release, because **the plugin cache is keyed by VERSION**: `1.2.0/` already exists, so a fix merged under an unchanged version string would never reach a live run. No behavioral change to any score, grade, action, or gate verdict — **only the text of a `report_qc` failure message**. Suite **1989 pass, 2 skip**.
+Ships the one-shot trim fix as its own release, because **the plugin cache is keyed by VERSION**: a fix merged under an unchanged version string never reaches an installed run. No behavioral change to any score, grade, action, or gate verdict — **only the text of a `report_qc` failure message**. Suite **1989 pass, 2 skip**.
 
 - **`check_word_cap` names the cut instead of just the total.** The old failure said `N words > cap 2100` — no location, no magnitude — so shaving a few words and re-running the whole QC was the rational response, once per shave. It now reports per-page counts, identifies the largest section, and states the exact cut needed to land BELOW the cap with a 40-word margin (`_WORD_TRIM_MARGIN`), so **one edit ends the loop**. The cap itself (2100) is unchanged, and so is how the prose is authored: the author still writes freely, then cuts its own weakest material.
-- **Measured on a matched single-variable A/B** (ORCL refresh, prior workspace restored byte-for-byte, only `report_qc.py` differing between arms): word-cap failures **8 → 1**; `report_qc` invocations **14 → 3**; the report/trim phase **25 → 10 calls, $7.55 → $3.07**. Both arms passed every gate with **zero waivers**, same `Hold/Trim` action, composite C→C.
+- **Measured on a matched single-variable A/B** (same ticker and workspace restored byte-for-byte, only `report_qc.py` differing between arms): word-cap failures **8 → 1**; `report_qc` invocations **14 → 3**; the report/trim phase **25 → 10 API calls**, a ~59% reduction in the context that phase re-reads. Both arms passed every gate with **zero waivers** and produced the same grade, action, and composite.
 - **Deliberately NOT changed, after review:** per-slot write-to-budget stamps in the skeleton, and raising or removing the 2100 cap — both declined as quality-affecting. Writing *to* a budget is not the same as writing freely and then cutting the weakest material.
 
 ## 1.2.0 — 2026-07-24 · Flat workspace + `--prev-dir` — a per-run dir the caller controls end to end
@@ -19,7 +19,7 @@ Builds on v1.1.0's `--output-dir`. A programmatic caller stores each run in its 
 
 ## 1.1.0 — 2026-07-24 · `--output-dir` workspace root — decouple all run I/O from the process CWD
 
-The engine wrote its bundle CWD-relative with no redirect, which breaks a programmatic caller whose process CWD is pinned to a foreign repo root (a sandboxed portfolio-OS host, where a `cd` does not persist between tool calls). Such a caller could only fail-closed rather than scatter the bundle into the wrong repo. The entry skills now accept an optional **`--output-dir <ABS_DIR>`** that roots ALL of a run's workspace I/O — bundle, `trading_desk_config.json`, `coverage/`, adapters, scales, rendered report + PDFs — at that absolute directory, decoupled from CWD. Omitting the flag reproduces 1.0.0 behavior **byte-for-byte**. Additive and backward-compatible; the **2.0.0** decision contract and the inbound snapshot schema are untouched. Suite **1976 pass, 2 skip** (+11).
+The engine wrote its bundle CWD-relative with no redirect, which breaks a programmatic caller whose process CWD is pinned to a foreign repo root (a sandboxed host application, where a `cd` does not persist between tool calls). Such a caller could only fail-closed rather than scatter the bundle into the wrong repo. The entry skills now accept an optional **`--output-dir <ABS_DIR>`** that roots ALL of a run's workspace I/O — bundle, `trading_desk_config.json`, `coverage/`, adapters, scales, rendered report + PDFs — at that absolute directory, decoupled from CWD. Omitting the flag reproduces 1.0.0 behavior **byte-for-byte**. Additive and backward-compatible; the **2.0.0** decision contract and the inbound snapshot schema are untouched. Suite **1976 pass, 2 skip** (+11).
 
 - **Entry skills accept `--output-dir` and thread it (`WORKROOT`).** `full-trade-analysis`, `refresh-analysis`, `market-snapshot`, and `company-context` resolve `WORKROOT` first (absolute; `mkdir -p`; default `.` = the invoker's CWD), rewrite every `./trading_desk_<T>/…`, `./trading_desk_config.json`, and `./trading_desk_config/…` reference to `<WORKROOT>/…`, pass `--output-dir <WORKROOT>` into the sub-skills they invoke, and hand every downstream `python3 scripts/…` an absolute path built from `<WORKROOT>`. **One root governs BOTH reads and writes** (so a caller's "symlink coverage into the workspace" step resolves). The downstream scorer/render skills were already `--bundle`/`--out`/`--anchors`-explicit and needed no prose change — the orchestrator hands them absolute paths.
 - **Script hardening — the CWD fallbacks the skill path can still reach are closed, deriving the workspace root from the bundle/ticker-dir the skill already passes (byte-identical when un-redirected).** `score_composite.py` auto-loads its default `trading_desk_config.json` from the bundle's WORKSPACE ROOT (walk-up), not the process CWD; `refresh_plan.py` scale + proposal discovery derives from the `--ticker-dir` parent (dropped the `os.getcwd()` primary); `render_pdf.py` methodology-page scale lookup adds the derived workspace root as a base. `session_notice.py` is a SessionStart hook that `--output-dir` structurally cannot reach (a read-only CWD probe with no bundle/CWD writes) — documented, intentionally out of scope.
@@ -71,7 +71,7 @@ full deterministic chain to a gates-PASS decision, byte-identical across runs).
 ## 0.18.0 — 2026-07-22 · Downstream integration contract (FR-1/2/3/5-id/6)
 
 Makes the plugin's per-ticker output a stable, versioned, machine-consumable contract for a downstream
-governed portfolio-OS, per its reviewed integration requests. The heavy analytics were
+governed downstream consumer, per its reviewed integration requests. The heavy analytics were
 already computed; this release **consolidates + versions + exposes** them — near-zero new computation.
 The consolidated decision object is the single file a consumer reads and pins against. Suite **1924 pass,
 2 skip** (was 1894/2; +30 net new tests). Decision-contract gates verified PASS end-to-end on the live
@@ -360,7 +360,7 @@ rewrite / PDF not verifiable in-env), not skipped. Suite **1676 pass**.
 
 ### Capital-trust fixes (GOOG review, G1–G4 + O10b + O19)
 
-From the GOOG review validation (`jutsu-trading-desk/docs/reviews/2026-07-21-goog-review-validation.md`).
+From an external GOOG review, cross-examined and validated.
 Spec: `docs/specs/2026-07-21-G1-G4-capital-trust-spec.md`. Bar: no guesses, data-driven, 95% confidence.
 
 - **O19 — risk-unit sizing output + entry-state field (Portfolio-OS handoff).** Two additive
