@@ -643,8 +643,10 @@ class TestScriptedValuesTrace(unittest.TestCase):
         self.assertIn("90", self.text)
 
     def test_ev_breakeven_in_report(self):
-        # The renderer's _fmt uses %g (6 sig figs): 104.9107 -> "104.911".
-        self.assertIn(rr._fmt(_EV_BREAKEVEN), self.text)
+        # 1.2.2: the EV-breakeven ENTRY is a price, so it renders through
+        # _fmt_price (2dp max): 104.9107 -> "104.91" (was %g's "104.911").
+        self.assertIn(rr._fmt_price(_EV_BREAKEVEN), self.text)
+        self.assertIn("104.91", self.text)
 
     def test_bull_target_in_report(self):
         self.assertIn("150", self.text)
@@ -2051,12 +2053,14 @@ class TestBuildCapitalStatus(unittest.TestCase):
 
     def test_eligible_shows_eligible_no_override(self):
         block = rr.build_capital_status(_eligible_contract())
-        self.assertIn("**Evidence grade:** B (composite 72/100)", block)
+        # 1.2.2: composite scores render at 1dp (_fmt_score), so 72 -> "72.0".
+        self.assertIn("**Evidence grade:** B (composite 72.0/100)", block)
         self.assertIn("**Capital status:** ELIGIBLE", block)
         self.assertIn("**Blockers:** none", block)
         self.assertIn("**Action if unowned:** ACCUMULATE_ON_WEAKNESS", block)
         self.assertIn("**Action if owned:** HOLD", block)
-        self.assertIn("**Hurdle-clearing price:** 104.911", block)
+        # 1.2.2: the hurdle-clearing PRICE renders through _fmt_price (2dp).
+        self.assertIn("**Hurdle-clearing price:** 104.91", block)
         # The eligible block must NOT carry a WAIT override.
         self.assertNotIn("WAIT", block)
 
@@ -2068,8 +2072,9 @@ class TestBuildCapitalStatus(unittest.TestCase):
                       "LOW_COMPOSITE_CONFIDENCE, VALUATION_MODEL_CONFLICT", block)
         self.assertIn("**Action if unowned:** WAIT_FOR_EVENT", block)
         self.assertIn("**Action if owned:** HOLD_NO_ADD", block)
-        # Hurdle-clearing price rendered from the contract (%g -> 332.232).
-        self.assertIn("**Hurdle-clearing price:** 332.232", block)
+        # Hurdle-clearing price rendered from the contract; 1.2.2 prints prices
+        # at 2dp (_fmt_price), so 332.2321... -> "332.23".
+        self.assertIn("**Hurdle-clearing price:** 332.23", block)
 
     def test_ineligible_discloses_ev_band_line(self):
         # O10b (PROVISIONAL v1.1.0): the EV-uncertainty band line, every number a
@@ -2103,8 +2108,9 @@ class TestBuildTheCallGoverned(unittest.TestCase):
         self.assertIn("HOLD_NO_ADD if owned", head)
         # A bare "Accumulate" must NOT appear on the governing headline.
         self.assertNotIn("Accumulate", head)
-        # The composite action appears ONLY under a labeled evidence read.
-        self.assertIn("_evidence read:_ Hold/Accumulate-on-weakness", out)
+        # The composite action appears ONLY under a labeled evidence read
+        # (1.2.2 renders the label as bold "**Evidence read:**", not italics).
+        self.assertIn("**Evidence read:** Hold/Accumulate-on-weakness", out)
 
     def test_eligible_headline_unchanged_plus_eligible_marker(self):
         comp = _composite_doc()  # grade C, action Hold/Trim
@@ -2255,7 +2261,7 @@ class TestPage1CapitalGovernanceE2E(unittest.TestCase):
             # The governing headline leads with the capital status; the composite
             # action is demoted to an evidence read (not a bare buy).
             self.assertIn("CAPITAL STATUS: WAIT", text)
-            self.assertIn("_evidence read:_ Hold/Accumulate-on-weakness", text)
+            self.assertIn("**Evidence read:** Hold/Accumulate-on-weakness", text)
             # The govern check passes on the corrected render.
             docs = rr.load_bundle(d)
             res = rq.check_capital_action_governed(text, docs)
@@ -2632,3 +2638,174 @@ class TestBuildTradeplanTableRiskUnits(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------------------------------------------- #
+# 1.2.2 -- PRESENTATION of script-minted numbers.
+#
+# WHY THESE EXIST: the renderer printed raw JSON values at a reader -- a market
+# cap as "mktcap 1427214735", a composite as "41.6894", lowercase header cells,
+# and "weekly close below n/a" when the plan minted no technical level. None of
+# that is a scoring change; it is the difference between a decision report and a
+# JSON dump. The formatters are pure, so they are pinned directly, and the
+# provenance contract they must satisfy (report_qc admits a value rounded to the
+# precision it DISPLAYS) is pinned in tests/test_report_qc.py.
+# --------------------------------------------------------------------------- #
+
+class TestNumberHumanizers(unittest.TestCase):
+    """_fmt_money / _fmt_score / _fmt_price / _fmt (no scientific notation)."""
+
+    def test_money_billions_two_decimals(self):
+        # The AMSC market cap, the defect that motivated the change.
+        self.assertEqual(rr._fmt_money(1427214735.0), "$1.43B")
+
+    def test_money_millions_one_decimal(self):
+        self.assertEqual(rr._fmt_money(482500000.0), "$482.5M")
+
+    def test_money_trillions_and_thousands(self):
+        self.assertEqual(rr._fmt_money(1.2e12), "$1.20T")
+        self.assertEqual(rr._fmt_money(25000.0), "$25.0K")
+
+    def test_money_below_a_thousand_has_no_suffix(self):
+        self.assertEqual(rr._fmt_money(999.0), "$999.00")
+
+    def test_money_sign_is_outside_the_dollar(self):
+        self.assertEqual(rr._fmt_money(-1427214735.0), "-$1.43B")
+
+    def test_money_none_is_na(self):
+        self.assertEqual(rr._fmt_money(None), "n/a")
+
+    def test_money_never_scientific(self):
+        for v in (1.427e9, 4.2e12, 6.1e10, 3.3e7):
+            self.assertNotIn("e", rr._fmt_money(v).lower())
+
+    def test_score_is_one_decimal(self):
+        self.assertEqual(rr._fmt_score(41.6894), "41.7")
+        self.assertEqual(rr._fmt_score(72), "72.0")
+        self.assertEqual(rr._fmt_score(59.4), "59.4")
+
+    def test_score_none_is_na(self):
+        self.assertEqual(rr._fmt_score(None), "n/a")
+
+    def test_price_is_at_most_two_decimals(self):
+        self.assertEqual(rr._fmt_price(24.7913), "24.79")
+        self.assertEqual(rr._fmt_price(117.4964), "117.5")
+        self.assertEqual(rr._fmt_price(100.0), "100")
+        self.assertEqual(rr._fmt_price(29.45), "29.45")
+
+    def test_price_none_is_na(self):
+        self.assertEqual(rr._fmt_price(None), "n/a")
+
+    def test_fmt_never_emits_scientific_notation(self):
+        # %g flips to exponent form outside ~[1e-5, 1e6); a report must not.
+        for v in (1427214735.5, 1.23e-7, -4.56e11, 9.87e-9):
+            self.assertNotIn("e", rr._fmt(v).lower())
+
+    def test_fmt_plain_decimal_output_is_unchanged(self):
+        # Every value %g already rendered plainly must be byte-identical.
+        for v in (0.175, 117.4964, 41.6894, 0.085, 82.0, 1.9):
+            self.assertEqual(rr._fmt(v), (str(int(v)) if float(v).is_integer()
+                                          else f"{v:g}"))
+
+
+class TestHeaderPresentation(unittest.TestCase):
+    """build_header_block: capitalized labels + a humanized market cap."""
+
+    def setUp(self):
+        self.block = rr.build_header_block(_snapshot_doc())
+
+    def test_market_cap_is_humanized_not_raw(self):
+        self.assertIn("Mktcap $111.0B", self.block)
+        self.assertNotIn("111000000000", self.block)
+
+    def test_labels_are_capitalized(self):
+        for label in ("Last ", "Mktcap ", "52wk ", "Next event "):
+            self.assertIn(label, self.block)
+        for lowered in ("| last ", "mktcap 1", "next event 2026"):
+            self.assertNotIn(lowered, self.block)
+
+    def test_last_and_52wk_are_price_formatted(self):
+        self.assertIn("Last 100 (as of 2026-07-16)", self.block)
+        self.assertIn("52wk 60–130", self.block)
+
+
+class TestEvidenceReadLabel(unittest.TestCase):
+    """The demoted composite action carries a bold, readable label."""
+
+    def test_label_is_bold_evidence_read(self):
+        comp = _composite_doc()
+        comp["action"] = "Hold/Accumulate-on-weakness"
+        out = rr.build_the_call(comp, _ineligible_contract())
+        self.assertIn("**Evidence read:** Hold/Accumulate-on-weakness", out)
+        self.assertNotIn("_evidence read:_", out)
+
+    def test_label_still_matches_the_qc_demotion_regex(self):
+        # check_capital_action_governed drops lines labeled as an evidence read;
+        # the relabel must not silently re-promote the action to a buy directive.
+        comp = _composite_doc()
+        comp["action"] = "Hold/Accumulate-on-weakness"
+        out = rr.build_the_call(comp, _ineligible_contract())
+        read_line = [ln for ln in out.splitlines() if "Accumulate" in ln][0]
+        self.assertTrue(rq._EVIDENCE_READ_RE.search(read_line))
+
+
+class TestNullTechnicalInvalidation(unittest.TestCase):
+    """A missing technical level renders as an explicit em-dash, never 'n/a'."""
+
+    def _tradeplan_without_technical_level(self):
+        tp = _tradeplan_doc()
+        tp["stock_plan"]["invalidation"]["technical_leg"] = {
+            "level": None, "condition": "weekly close below"}
+        return tp
+
+    def test_tradeplan_row_is_em_dash_with_pointer(self):
+        table = rr.build_tradeplan_table(self._tradeplan_without_technical_level())
+        row = [ln for ln in table.splitlines()
+               if ln.startswith("| Invalidation (technical)")][0]
+        self.assertIn("—", row)
+        self.assertIn("module_tradeplan", row)
+        self.assertNotIn("n/a", row)
+        self.assertNotIn("weekly close below n/a", row)
+
+    def test_monitoring_alert_is_em_dash_with_pointer(self):
+        block = rr.build_monitoring(self._tradeplan_without_technical_level())
+        alert = [ln for ln in block.splitlines()
+                 if ln.startswith("- Technical alert:")][0]
+        self.assertIn("—", alert)
+        self.assertNotIn("n/a", alert)
+
+    def test_present_level_is_unchanged_condition_plus_price(self):
+        table = rr.build_tradeplan_table(_tradeplan_doc())
+        self.assertIn("| Invalidation (technical) | weekly close below 82 |", table)
+
+
+class TestFooterApiTierNotesBullets(unittest.TestCase):
+    """meta.api_tier_notes render ONE BULLET PER NOTE, not a ';'-joined line."""
+
+    def _footer(self, notes):
+        snap = _snapshot_doc()
+        snap["meta"]["api_tier_notes"] = notes
+        return rr.build_integrity_footer(snap, {})
+
+    def test_one_bullet_per_note(self):
+        notes = ["first governance note", "second degradation note",
+                 "third disclosure note"]
+        footer = self._footer(notes)
+        self.assertIn("- API tier notes:", footer)
+        for n in notes:
+            self.assertIn(f"  - {n}", footer)
+        # not the old single joined line
+        self.assertNotIn("first governance note; second degradation note", footer)
+
+    def test_multiline_note_is_collapsed_into_its_own_bullet(self):
+        footer = self._footer(["a note that\nspans   two lines"])
+        self.assertIn("  - a note that spans two lines", footer)
+
+    def test_empty_list_renders_none(self):
+        self.assertIn("- API tier notes: none", self._footer([]))
+
+    def test_mandated_footer_strings_survive(self):
+        footer = self._footer(["one note"])
+        self.assertIn("### Data Integrity", footer)
+        self.assertIn("- Snapshot as of: 2026-07-16T00:00:00Z", footer)
+        self.assertIn("not financial advice", footer.lower())

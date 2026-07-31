@@ -66,7 +66,15 @@ _DISCLAIMER = ("_This report is for educational and research purposes only. It i
 # --------------------------------------------------------------------------- #
 
 def _fmt(x):
-    """Compact number formatting (stable across runs; mirrors the scorers)."""
+    """Compact number formatting (stable across runs; mirrors the scorers).
+
+    ``%g`` is kept for every value it renders in plain decimal form (byte-for-byte
+    the historical output), but it flips to SCIENTIFIC notation outside roughly
+    [1e-5, 1e6) -- and a report must never print ``1.42721e+09`` at a reader. When
+    ``%g`` would go exponential this falls back to a plain fixed-point rendering.
+    Large-magnitude DOLLAR values should use _fmt_money instead of relying on this
+    fallback; this is the belt-and-braces floor for every other float.
+    """
     if x is None:
         return "n/a"
     if isinstance(x, bool):
@@ -74,8 +82,74 @@ def _fmt(x):
     if isinstance(x, float) and x.is_integer():
         return str(int(x))
     if isinstance(x, float):
-        return f"{x:g}"
+        s = f"{x:g}"
+        if "e" in s or "E" in s:
+            if abs(x) < 1:
+                s = f"{x:.10f}".rstrip("0").rstrip(".") or "0"
+            else:
+                s = f"{x:.2f}".rstrip("0").rstrip(".")
+        return s
     return str(x)
+
+
+def _fmt_score(x):
+    """A 0-100 score / contribution: exactly ONE decimal place.
+
+    The scorers carry full float precision (a composite of 41.6894); printing that
+    in a decision report is noise dressed as precision. One decimal is the reading
+    resolution of the rubric bands. Non-numeric input degrades to _fmt.
+    """
+    if x is None:
+        return "n/a"
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return _fmt(x)
+    return f"{float(x):.1f}"
+
+
+def _fmt_price(x):
+    """A price / level / per-share dollar figure: at most TWO decimals.
+
+    Trailing zeros are trimmed (24.7913 -> '24.79'; 117.4964 -> '117.5'; 100.0 ->
+    '100') so the cell reads like a quote. report_qc's displayed-precision matcher
+    admits the rounding: a token is in-bundle iff the bundle value rounds to
+    exactly the precision printed.
+    """
+    if x is None:
+        return "n/a"
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return _fmt(x)
+    v = round(float(x), 2)
+    if v == int(v):
+        return str(int(v))
+    return f"{v:.2f}".rstrip("0").rstrip(".")
+
+
+# Magnitude suffixes for _fmt_money, largest first.
+_MONEY_SUFFIXES = ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K"))
+
+
+def _fmt_money(x):
+    """A large-magnitude dollar value, humanized: 1427214735 -> '$1.43B'.
+
+    Mantissa precision is FIXED by magnitude -- 2 decimals below 10, 1 decimal at
+    or above it ('$1.43B', '$482.5M') -- and trailing zeros are NOT trimmed, so the
+    printed precision is unambiguous and report_qc can round the bundle value to
+    exactly that many places to verify it. Below $1K the raw dollar amount is
+    printed at 2dp (no suffix).
+    """
+    if x is None:
+        return "n/a"
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return _fmt(x)
+    v = float(x)
+    sign = "-" if v < 0 else ""
+    mag = abs(v)
+    for scale, suffix in _MONEY_SUFFIXES:
+        if mag >= scale:
+            mantissa = mag / scale
+            dp = 2 if mantissa < 10 else 1
+            return f"{sign}${mantissa:.{dp}f}{suffix}"
+    return f"{sign}${mag:.2f}"
 
 
 def _pct(frac, dp=1):
@@ -246,10 +320,10 @@ def build_header_block(snapshot):
 
     rows = [
         [f"**{ticker}**",
-         f"last {_fmt(last)} (as of {as_of_date})",
-         f"mktcap {_fmt(mktcap)}",
-         f"52wk {_fmt(wk_lo)}–{_fmt(wk_hi)}",
-         f"next event {event_cell}"],
+         f"Last {_fmt_price(last)} (as of {as_of_date})",
+         f"Mktcap {_fmt_money(mktcap)}",
+         f"52wk {_fmt_price(wk_lo)}–{_fmt_price(wk_hi)}",
+         f"Next event {event_cell}"],
     ]
     return _table(["Ticker", "Last", "Market Cap", "52-Week Range", "Next Binary Event"],
                   rows)
@@ -282,12 +356,13 @@ def build_capital_status(contract):
     blockers = contract.get("capital_blockers") or []
     blockers_text = ", ".join(blockers) if blockers else "none"
     lines = [
-        f"- **Evidence grade:** {grade} (composite {_fmt(score)}/100)",
+        f"- **Evidence grade:** {grade} (composite {_fmt_score(score)}/100)",
         f"- **Capital status:** {status}",
         f"- **Blockers:** {blockers_text}",
         f"- **Action if unowned:** {contract.get('action_unowned', '?')}",
         f"- **Action if owned:** {contract.get('action_owned', '?')}",
-        f"- **Hurdle-clearing price:** {_fmt(contract.get('hurdle_clearing_price'))}",
+        f"- **Hurdle-clearing price:** "
+        f"{_fmt_price(contract.get('hurdle_clearing_price'))}",
     ]
     # O10b (PROVISIONAL v1.1.0): disclose the EV-uncertainty band when present.
     # Every number is a contract field so number-provenance stays intact; the line
@@ -332,10 +407,10 @@ def build_the_call(composite, contract=None):
     if eligible is False:
         owned = contract.get("action_owned", "HOLD_NO_ADD")
         line = (f"**{grade} evidence · CAPITAL STATUS: {_CAPITAL_WAIT_LABEL} "
-                f"({owned} if owned)** (composite {_fmt(score)}/100, "
+                f"({owned} if owned)** (composite {_fmt_score(score)}/100, "
                 f"{profile} profile)")
     else:
-        line = (f"**{grade} — {action}** (composite {_fmt(score)}/100, "
+        line = (f"**{grade} — {action}** (composite {_fmt_score(score)}/100, "
                 f"{profile} profile)")
         if eligible is True:
             line += " · Capital status: ELIGIBLE"
@@ -354,7 +429,7 @@ def build_the_call(composite, contract=None):
     # When capital is INELIGIBLE the composite action must never stand as a bare
     # buy instruction: demote it to a labeled evidence read on its own line.
     if eligible is False:
-        line += f"\n\n_evidence read:_ {action}"
+        line += f"\n\n**Evidence read:** {action}"
 
     return line + "\n\n<!-- SLOT:tension -->"
 
@@ -365,10 +440,14 @@ def build_composite_table(composite):
     dims = composite.get("dimensions", [])
     rows = []
     for d in dims:
-        rows.append([d.get("name"), _fmt(d.get("score")), _fmt(d.get("weight")),
-                     _fmt(d.get("contribution")), _read(d.get("score"))])
-    rows.append(["**composite**", f"**{_fmt(composite.get('score'))}**", "**1.0**",
-                 f"**{_fmt(composite.get('score'))}**",
+        # Scores/contributions at 1dp; the WEIGHT keeps its native form (0.35) --
+        # it is a rubric constant, not a measurement.
+        rows.append([d.get("name"), _fmt_score(d.get("score")),
+                     _fmt(d.get("weight")),
+                     _fmt_score(d.get("contribution")), _read(d.get("score"))])
+    rows.append(["**composite**", f"**{_fmt_score(composite.get('score'))}**",
+                 "**1.0**",
+                 f"**{_fmt_score(composite.get('score'))}**",
                  f"**{_read(composite.get('score'))}**"])
 
     table = _table(["Dimension", "Score", "Weight", "Contribution", "Read"], rows)
@@ -382,12 +461,28 @@ def build_composite_table(composite):
     cells = []
     for p in ("trader", "balanced", "long-term"):
         s = sens.get(p) or {}
-        cell = f"{p}: {_fmt(s.get('score'))}/{s.get('grade', '?')}"
+        cell = f"{p}: {_fmt_score(s.get('score'))}/{s.get('grade', '?')}"
         cells.append(f"**{cell}**" if differ else cell)
     sens_line = "**Sensitivity** (per profile): " + " · ".join(cells)
     if differ:
         sens_line += "  _(grades differ across profiles)_"
     return table + "\n\n" + sens_line
+
+
+# Rendered in place of "<condition> n/a" when the trade plan minted NO technical
+# invalidation level. "weekly close below n/a" reads as a real instruction with a
+# missing number; an em-dash plus the pointer says the level does not exist and
+# names where it would have come from.
+_NO_TECH_LEVEL_CELL = "— (no technical level minted; see module_tradeplan)"
+
+
+def _invalidation_technical_text(technical_leg):
+    """The technical invalidation cell/alert text, or the explicit no-level mark."""
+    tl = technical_leg or {}
+    level = tl.get("level")
+    if level is None:
+        return _NO_TECH_LEVEL_CELL
+    return f"{tl.get('condition', '')} {_fmt_price(level)}".strip()
 
 
 def build_tradeplan_table(tradeplan, contract=None):
@@ -406,28 +501,30 @@ def build_tradeplan_table(tradeplan, contract=None):
     rows = []
 
     dc = sp.get("dont_chase", {}) or {}
-    rows.append(["Don't-chase", f"above {_fmt(dc.get('above'))} ({dc.get('convention', '')})"])
+    rows.append(["Don't-chase",
+                 f"above {_fmt_price(dc.get('above'))} "
+                 f"({dc.get('convention', '')})"])
 
     for i, e in enumerate(sp.get("entries", []) or [], start=1):
         tag = " (sized down)" if e.get("sized_down") else ""
         rows.append([f"Entry {i}",
-                     f"{_fmt(e.get('level'))} — {e.get('condition', '')}; "
+                     f"{_fmt_price(e.get('level'))} — {e.get('condition', '')}; "
                      f"EV-at-level {_fmt(e.get('ev_at_level'))}{tag}"])
 
     exits = sp.get("exits", {}) or {}
     pt = exits.get("profit_take") or {}
     if pt:
-        rows.append(["Profit-take", f"{_fmt(pt.get('level'))} ({pt.get('type', '')})"])
+        rows.append(["Profit-take",
+                     f"{_fmt_price(pt.get('level'))} ({pt.get('type', '')})"])
     bt = exits.get("bull_target") or {}
     if bt:
         note = f" ({bt.get('note')})" if bt.get("note") else ""
-        rows.append(["Bull target", f"{_fmt(bt.get('level'))}{note}"])
+        rows.append(["Bull target", f"{_fmt_price(bt.get('level'))}{note}"])
 
     inv = sp.get("invalidation", {}) or {}
     tl = inv.get("technical_leg") or {}
     fl = inv.get("fundamental_leg") or {}
-    rows.append(["Invalidation (technical)",
-                 f"{tl.get('condition', '')} {_fmt(tl.get('level'))}"])
+    rows.append(["Invalidation (technical)", _invalidation_technical_text(tl)])
     rows.append(["Invalidation (fundamental)",
                  f"{fl.get('metric', '')} {fl.get('threshold', '')}"])
 
@@ -460,14 +557,14 @@ def build_tradeplan_table(tradeplan, contract=None):
             (f"{_fmt(ru.get('shares_per_risk_unit'))} sh per "
              f"${ru.get('risk_budget_usd', 1000)} risk · "
              f"binding {ru.get('binding_leg')} "
-             f"{_fmt(ru.get('binding_loss_per_share'))}/sh "
-             f"(ref entry {_fmt(ru.get('entry_ref'))})")
+             f"{_fmt_price(ru.get('binding_loss_per_share'))}/sh "
+             f"(ref entry {_fmt_price(ru.get('entry_ref'))})")
         ])
 
     hedge = sp.get("hedge", {}) or {}
     if hedge.get("required"):
         strikes = hedge.get("strikes_from") or []
-        strike_txt = ", ".join(_fmt(s) for s in strikes)
+        strike_txt = ", ".join(_fmt_price(s) for s in strikes)
         rows.append(["Hedge",
                      f"required — {hedge.get('trigger', '')}; "
                      f"{hedge.get('structure', '')} from {strike_txt}"])
@@ -581,7 +678,7 @@ def _score_headline(label, module, slot_suffix):
     score = module.get("score") if isinstance(module, dict) else None
     ver = module.get("rubric_version", "?") if isinstance(module, dict) else "?"
     badge = _confidence_badge(module)
-    return f"### {label} — {_fmt(score)}/100 (rubric v{ver}){badge}"
+    return f"### {label} — {_fmt_score(score)}/100 (rubric v{ver}){badge}"
 
 
 def build_technical_evidence(technical, bundle=None):
@@ -594,10 +691,10 @@ def build_technical_evidence(technical, bundle=None):
                    key=lambda e: e["level"])[:3]
     rows = []
     for e in below:
-        rows.append(["support", _fmt(e.get("level")), e.get("type", ""),
+        rows.append(["support", _fmt_price(e.get("level")), e.get("type", ""),
                      _pct(e.get("pct_from_last"))])
     for e in above:
-        rows.append(["resistance", _fmt(e.get("level")), e.get("type", ""),
+        rows.append(["resistance", _fmt_price(e.get("level")), e.get("type", ""),
                      _pct(e.get("pct_from_last"))])
     table = _table(["Side", "Level", "Type", "% from last"], rows)
     brief_span = _read_brief_span(bundle, "technical", "BRIEF")
@@ -658,7 +755,7 @@ def build_risk_evidence(risk, bundle=None):
     dm = ((risk.get("tables", {}) or {}).get("downside_map") or [])[:5]
     rows = []
     for r in dm:
-        rows.append([_fmt(r.get("level")), r.get("type", ""),
+        rows.append([_fmt_price(r.get("level")), r.get("type", ""),
                      _pct(r.get("pct_from_last"))])
     table = _table(["Level", "Type", "% from last"], rows)
     brief_span = _read_brief_span(bundle, "risk", "BRIEF")
@@ -680,11 +777,11 @@ def build_thesis_evidence(composite, bundle=None):
     rows = []
     for sc in scenarios:
         rows.append([sc.get("name", ""), _fmt(sc.get("prob")),
-                     _fmt(sc.get("price_target"))])
+                     _fmt_price(sc.get("price_target"))])
     table = _table(["Scenario", "Probability", "Price Target"], rows)
     ev_line = (f"EV at current: {_fmt(ev.get('ev_at_current'))} · "
                f"hurdle {_fmt(ev.get('hurdle_total'))} · "
-               f"EV-breakeven entry {_fmt(ev.get('ev_breakeven_entry'))}")
+               f"EV-breakeven entry {_fmt_price(ev.get('ev_breakeven_entry'))}")
     # The composite-score skill writes brief_composite.md (not brief_thesis.md);
     # its part-2 BRIEF span is the tension sentence that belongs here.
     # No SIGNAL marker exists in brief_composite.md, so the signal slot falls
@@ -731,7 +828,7 @@ def build_sr_and_downside(technical, risk):
     ladder_rows = []
     for e in sorted(ladder, key=lambda e: e.get("level", 0), reverse=True):
         basis = e.get("basis", "")
-        ladder_rows.append([_fmt(e.get("level")), e.get("type", ""), basis,
+        ladder_rows.append([_fmt_price(e.get("level")), e.get("type", ""), basis,
                             _pct(e.get("pct_from_last"))])
     ladder_tbl = _table(["Level", "Type", "Basis", "% from last"], ladder_rows)
 
@@ -740,7 +837,7 @@ def build_sr_and_downside(technical, risk):
     for r in dm:
         basis = r.get("basis", "")
         method = f" ({r.get('method')})" if r.get("method") else ""
-        dm_rows.append([_fmt(r.get("level")), r.get("type", ""),
+        dm_rows.append([_fmt_price(r.get("level")), r.get("type", ""),
                         basis + method, _pct(r.get("pct_from_last"))])
     dm_tbl = _table(["Level", "Type", "Basis", "% from last"], dm_rows)
 
@@ -759,7 +856,7 @@ def build_catalyst_calendar(snapshot):
     ne = events.get("next_earnings") if isinstance(events, dict) else None
     if isinstance(ne, dict) and ne.get("date"):
         cons = ne.get("consensus_eps")
-        note = f"consensus EPS {_fmt(cons)}" if cons is not None else ""
+        note = f"consensus EPS {_fmt_price(cons)}" if cons is not None else ""
         # QF4: empty note -> em-dash; past event -> append " (past)".
         note = note or "—"
         if as_of_date and ne.get("date", "") < as_of_date:
@@ -784,10 +881,10 @@ def build_scenario_ev(composite):
     rows = []
     for sc in scenarios:
         rows.append([sc.get("name", ""), _fmt(sc.get("prob")),
-                     _fmt(sc.get("price_target"))])
+                     _fmt_price(sc.get("price_target"))])
     tbl = _table(["Scenario", "Probability", "Price Target"], rows)
     ev_line = (f"EV at current {_fmt(ev.get('ev_at_current'))} · "
-               f"EV-breakeven entry {_fmt(ev.get('ev_breakeven_entry'))} · "
+               f"EV-breakeven entry {_fmt_price(ev.get('ev_breakeven_entry'))} · "
                f"hurdle {_fmt(ev.get('hurdle_total'))}")
     return "\n".join(["### Scenario & Expected Value", "", tbl, "", ev_line])
 
@@ -820,8 +917,8 @@ def build_valuation_reconciliation(reconcile, snapshot):
             sc = scenarios.get(name)
             if not isinstance(sc, dict):
                 continue
-            rows.append([name, _fmt(sc.get("eps_fy28")),
-                         _fmt(sc.get("fcf_fy28_m"))])
+            rows.append([name, _fmt_price(sc.get("eps_fy28")),
+                         _fmt_price(sc.get("fcf_fy28_m"))])
         if rows:
             parts.append("")
             parts.append(_table(["Scenario", "EPS FY28", "FCF FY28 ($m)"], rows))
@@ -833,7 +930,7 @@ def build_valuation_reconciliation(reconcile, snapshot):
         implied = reverse.get("implied_terminal_g")
         g_base = reverse.get("g_base")
         if implied is not None:
-            rline = (f"**Reverse-DCF**: the {_fmt(last)} price implies "
+            rline = (f"**Reverse-DCF**: the {_fmt_price(last)} price implies "
                      f"~{_pct(implied)} perpetual FCF growth vs the model's "
                      f"{_pct(g_base)} base (holding FCF + WACC fixed) — a "
                      f"DISCLOSURE, not a new price target.")
@@ -867,14 +964,15 @@ def build_options_expression(options, tradeplan):
     rec = options.get("recommended_structures", []) or []
     rec_rows = []
     for st in rec:
-        legs = "; ".join(f"{lg.get('side')} {lg.get('type')} {_fmt(lg.get('strike'))}"
+        legs = "; ".join(f"{lg.get('side')} {lg.get('type')} "
+                         f"{_fmt_price(lg.get('strike'))}"
                          for lg in st.get("legs", []))
         net = st.get("net_credit")
-        net_txt = (f"credit {_fmt(net)}" if net is not None
-                   else f"debit {_fmt(st.get('net_debit'))}")
+        net_txt = (f"credit {_fmt_price(net)}" if net is not None
+                   else f"debit {_fmt_price(st.get('net_debit'))}")
         rec_rows.append([st.get("name", ""), legs, net_txt,
-                         _fmt(st.get("max_loss")),
-                         "; ".join(_fmt(b) for b in st.get("breakevens", [])),
+                         _fmt_price(st.get("max_loss")),
+                         "; ".join(_fmt_price(b) for b in st.get("breakevens", [])),
                          f"{_fmt(st.get('pop'))} ({st.get('pop_method', '')})"])
     rec_tbl = (_table(["Structure", "Legs", "Net", "Max Loss", "Breakevens",
                        "PoP (method)"], rec_rows)
@@ -888,10 +986,11 @@ def build_options_expression(options, tradeplan):
     hedge = options.get("hedge_structure")
     hedge_block = ""
     if isinstance(hedge, dict):
-        legs = "; ".join(f"{lg.get('side')} {lg.get('type')} {_fmt(lg.get('strike'))}"
+        legs = "; ".join(f"{lg.get('side')} {lg.get('type')} "
+                         f"{_fmt_price(lg.get('strike'))}"
                          for lg in hedge.get("legs", []))
         hedge_block = (f"\n\n**Hedge structure**: {hedge.get('type', '')} "
-                       f"[{legs}], cost {_fmt(hedge.get('cost'))}.")
+                       f"[{legs}], cost {_fmt_price(hedge.get('cost'))}.")
 
     expr = tradeplan.get("expression", {}) or {}
     mpp = expr.get("mode_per_profile", {}) or {}
@@ -924,7 +1023,7 @@ def build_monitoring(tradeplan):
     tl = inv.get("technical_leg") or {}
     fl = inv.get("fundamental_leg") or {}
     alerts = [
-        f"- Technical alert: {tl.get('condition', '')} {_fmt(tl.get('level'))}",
+        f"- Technical alert: {_invalidation_technical_text(tl)}",
         f"- Fundamental alert: {fl.get('metric', '')} {fl.get('threshold', '')}",
         "- Review cadence: reassess on the next earnings print or a both-leg breach.",
     ]
@@ -949,8 +1048,14 @@ def build_integrity_footer(snapshot, modules):
     missing = meta.get("missing", []) or []
     missing_line = (", ".join(missing) if missing else "none")
 
-    api_notes = meta.get("api_tier_notes", []) or []
-    api_line = "; ".join(str(n) for n in api_notes) if api_notes else "none"
+    # API tier notes: ONE BULLET PER NOTE. These are the governance/degradation
+    # disclosures (which broker, which field group was refetched, what was left
+    # null and why); joining them with "; " into one wall-of-text line is what made
+    # the block look condensable. Each note's internal whitespace is collapsed so a
+    # multi-line note stays inside its own bullet -- report_qc.footer_completeness
+    # matches under the same normalization, so a dropped note FAILS the gate.
+    api_notes = [" ".join(str(n).split()) for n in (meta.get("api_tier_notes") or [])]
+    api_notes = [n for n in api_notes if n]
 
     # rubric versions per module + expression rule version + schema version.
     ver_bits = []
@@ -1012,7 +1117,13 @@ def build_integrity_footer(snapshot, modules):
         f"- Snapshot as of: {as_of}",
         f"- Sources (field group @ retrieved): {src_line}",
         f"- QC attestation: {attest}",
-        f"- API tier notes: {api_line}",
+    ]
+    if api_notes:
+        lines.append("- API tier notes:")
+        lines.extend(f"  - {n}" for n in api_notes)
+    else:
+        lines.append("- API tier notes: none")
+    lines += [
         f"- Staleness / missing disclosures: {missing_line}",
         f"- Rubric versions: {ver_line}",
         f"- Provisional disclosures: {prov_line}",
@@ -1099,12 +1210,12 @@ def build_delta_composite_table(old_comp, new_comp):
         o = old_dims.get(name, {}).get("score")
         n = new_dims.get(name, {}).get("score")
         delta = (round(n - o, 4) if (o is not None and n is not None) else None)
-        rows.append([name, _fmt(o), _fmt(n), _fmt(delta)])
+        rows.append([name, _fmt_score(o), _fmt_score(n), _fmt_score(delta)])
     # composite row.
     o_s, n_s = old_comp.get("score"), new_comp.get("score")
     d_s = round(n_s - o_s, 4) if (o_s is not None and n_s is not None) else None
-    rows.append(["**composite**", f"**{_fmt(o_s)}**", f"**{_fmt(n_s)}**",
-                 f"**{_fmt(d_s)}**"])
+    rows.append(["**composite**", f"**{_fmt_score(o_s)}**",
+                 f"**{_fmt_score(n_s)}**", f"**{_fmt_score(d_s)}**"])
     tbl = _table(["Dimension", "Old", "New", "Δ"], rows)
 
     og, ng = old_comp.get("grade"), new_comp.get("grade")
@@ -1122,8 +1233,8 @@ def build_delta_ev(old_comp, new_comp):
     ne = new_comp.get("ev", {}) or {}
     rows = [
         ["ev_at_current", _fmt(oe.get("ev_at_current")), _fmt(ne.get("ev_at_current"))],
-        ["ev_breakeven_entry", _fmt(oe.get("ev_breakeven_entry")),
-         _fmt(ne.get("ev_breakeven_entry"))],
+        ["ev_breakeven_entry", _fmt_price(oe.get("ev_breakeven_entry")),
+         _fmt_price(ne.get("ev_breakeven_entry"))],
     ]
     return _table(["EV Metric", "Old", "New"], rows)
 
@@ -1152,7 +1263,8 @@ def build_delta_levels(old_tp, new_tp):
     old_m = _level_map(old_tp)
     new_m = _level_map(new_tp)
     names = list(dict.fromkeys(list(old_m) + list(new_m)))
-    rows = [[name, _fmt(old_m.get(name)), _fmt(new_m.get(name))] for name in names]
+    rows = [[name, _fmt_price(old_m.get(name)), _fmt_price(new_m.get(name))]
+            for name in names]
     return _table(["Level", "Old", "New"], rows)
 
 

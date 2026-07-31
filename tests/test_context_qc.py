@@ -526,3 +526,71 @@ class TestContextHelpers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------------------------------------------- #
+# Magnitude figures ("$1.43B") must trace IDENTICALLY on the context gate and the
+# report gate (review finding, 1.2.2).
+#
+# The context scrub used to strip the K/M/B/T suffix and check only the bare
+# mantissa. The moment render_report began printing "$1.43B" the two gates
+# diverged: the report gate accepted it via the displayed-precision matcher, the
+# context gate orphaned it -- while seven SKILL.md files now tell authors to write
+# exactly that form. The scrub now masks magnitude figures through the
+# product-name scrub and hands them to the same matcher, INTACT.
+# --------------------------------------------------------------------------- #
+
+class TestContextMagnitudeFiguresMatchTheReportGate(unittest.TestCase):
+
+    _MKTCAP = 111000000000.0        # the _mk_bundle fixture's mktcap_computed
+
+    def _run(self, prose):
+        with tempfile.TemporaryDirectory() as d:
+            _mk_bundle(d)
+            m = _valid_context()
+            m["business"]["what_they_sell"] = prose
+            path = _write_context(d, m)
+            return _qc_context(d, path)
+
+    def test_humanized_market_cap_passes_the_context_gate(self):
+        rc, out, err = self._run("A $111.0B market cap on that share count.")
+        self.assertEqual(rc, 0, out + err)
+
+    def test_wrong_humanized_market_cap_orphans(self):
+        rc, out, err = self._run("A $115.0B market cap on that share count.")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("number_provenance", out)
+
+    def test_context_and_report_gates_agree_on_the_same_token(self):
+        # The same token, the same bundle, the same verdict on both gates.
+        with tempfile.TemporaryDirectory() as d:
+            _mk_bundle(d)
+            docs = rq.render_report.load_bundle(d)
+            for token, expected in (("$111.0B", True), ("$115.0B", False)):
+                with self.subTest(token=token):
+                    report_verdict = rq.check_number_provenance(
+                        f"Mktcap {token}", docs)["passed"]
+                    self.assertIs(report_verdict, expected)
+                    m = {"live_tape": []}
+                    scrubbed = rq._scrub_context_prose(f"Mktcap {token}.", m)
+                    context_verdict = rq.check_number_provenance(
+                        scrubbed, docs)["passed"]
+                    self.assertIs(context_verdict, report_verdict)
+
+    def test_scrub_keeps_the_magnitude_token_whole(self):
+        m = {"live_tape": []}
+        out = rq._scrub_context_prose("cap $1.43B and 482.5M and 42B", m)
+        for tok in ("$1.43B", "482.5M", "42B"):
+            self.assertIn(tok, out)
+
+    def test_scrub_still_removes_product_names_next_to_a_magnitude(self):
+        m = {"live_tape": []}
+        out = rq._scrub_context_prose("HBM3E ramp worth $1.43B on A100", m)
+        self.assertIn("$1.43B", out)
+        self.assertNotIn("HBM3E", out)
+        self.assertNotIn("A100", out)
+
+    def test_scrub_leaves_no_mask_placeholder_behind(self):
+        m = {"live_tape": []}
+        out = rq._scrub_context_prose("cap $1.43B, 42B, 30x, 200bps", m)
+        self.assertNotIn("\x00", out)
