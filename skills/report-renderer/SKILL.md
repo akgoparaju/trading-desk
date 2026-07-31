@@ -49,13 +49,13 @@ The script writes `<TICKER>_Trade_Report_<date>.md` (exact path — bundle or pa
 
 Read the rendered report. Replace each `<!-- SLOT:name -->` with prose. **The slot-fill rule: no new numbers.** Every figure you mention must already be printed in a scripted table on that page — QC will catch any number that is not in the bundle. If a *table* is wrong, that is a module/bundle bug — fix the module and re-render; never edit a scripted number in the report.
 
-Word budgets (kept tight — the whole report has a 2100-word cap):
+Word budgets (the whole report has a 2100-word cap, **prose and headings only** — pipe-table rows and the `### Data Integrity` section are excluded by `report_qc`, so the budget is entirely yours to spend on prose. **Target ≤1,000 words of authored prose across all slots; a small overage is acceptable — the gate's margin handles it.**):
 
 | Slot | Budget | Content |
 |------|--------|---------|
 | `tension` | 1 sentence | the one real tension in the call (e.g. "constructive score, but the print is a coin-flip and IV is cheap") |
 | `event_playbook` | 3 bullets | beat / inline / miss → the pre-committed action for each, vs the printed implied move |
-| `brief_<dim>` (×5) | ≤120 words each | **transcluded verbatim** by `render_report.py` from `<bundle>/brief_<dim>.md` (the `<!-- BRIEF:START -->`…`<!-- BRIEF:END -->` span) — you do NOT re-condense; the word cap is enforced upstream at module-brief authoring time. If the file or markers are absent the slot mark is left open; fill it manually as before. |
+| `brief_<dim>` (×5) | ≤150 words each (aim ~120) | **transcluded verbatim** by `render_report.py` from `<bundle>/brief_<dim>.md` (the `<!-- BRIEF:START -->`…`<!-- BRIEF:END -->` span) — you do NOT re-condense; the word cap is enforced upstream at module-brief authoring time. If the file or markers are absent the slot mark is left open; fill it manually as before. |
 | `signal_<dim>` (×5) | 1 line each | **transcluded verbatim** by `render_report.py` from the `<!-- SIGNAL:START -->`…`<!-- SIGNAL:END -->` span in `brief_<dim>.md`. If absent, fill manually. |
 | `catalyst_notes` | 1-2 lines | context on the scheduled catalysts |
 | `monitoring_notes` | 1-2 lines | what would change the call between now and the next review |
@@ -71,12 +71,13 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/report_qc.py --bundle ./trading_desk_<TICK
   --report <path printed by render_report.py, e.g. ./<TICKER>_Trade_Report_<date>.md>
 ```
 
-The gate prints a check table and exits 0 (pass) or 1 (fail). The checks: **number_provenance** (every report number traces to the bundle), composite_arithmetic, ev_consistency, invalidation_both_legs, sizing_within_cap, strikes_in_chain, pop_method_labeled, expression_consistency, footer_integrity, word_cap (≤2100), **no_empty_slots**.
+The gate prints a check table and exits 0 (pass) or 1 (fail). The checks: **number_provenance** (every report number traces to the bundle), composite_arithmetic, ev_consistency, invalidation_both_legs, sizing_within_cap, strikes_in_chain, pop_method_labeled, expression_consistency, footer_integrity, **footer_completeness** (every `snapshot.meta.api_tier_notes` entry appears in the footer), word_cap (≤2100, prose + headings only), **no_empty_slots**.
 
 **Fix loop — fix PROSE, never numbers:**
 - `no_empty_slots` fail → you left a slot unfilled. Fill it.
 - `number_provenance` fail (orphan number) → you typed a number a bundle table does not carry. Remove it or rephrase to the printed figure. **Never** invent a number to satisfy prose.
-- `word_cap` fail → a slot is too long. Tighten.
+- `word_cap` fail → a slot is too long. Tighten (the count is prose + headings only — no table row or the Data Integrity section is inflating it, so an overage is yours to fix).
+- `footer_completeness` fail → you (or a prior edit) dropped an `api_tier_notes` entry from the footer. **RESTORE** the deleted note(s) verbatim. **Never** condense or paraphrase the `### Data Integrity` section — it is mandated disclosure, and since it no longer counts against the word cap there is no reason to touch it.
 - A **table**-driven check fails (composite_arithmetic / ev_consistency / sizing / strikes / pop_method) → this is a bundle/module bug, not a prose bug. Fix the module and **re-render** (Step 2), then re-fill and re-run.
 
 Re-run until exit 0. Then print the QC verdict and the report path to the user.
@@ -161,7 +162,7 @@ When the user wants a change-report vs a prior bundle:
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_report.py --bundle ./<new_bundle> --delta --previous ./<old_bundle>
 ```
 
-Both bundles need `module_composite`. Output: `<TICKER>_Delta_Report_<date>.md` — written to the **same location rule as the full report** (the bundle's parent under the `detail_reports_<date>/` layout, inside the bundle for legacy) and printed to stdout. It carries a composite delta table (old/new/Δ, grade change bolded), EV delta, level changes, structures added/removed, and a `delta_interpretation` slot. Fill that one slot, then QC the delta (auto-detected by filename — it runs checks number_provenance / footer_integrity / no_empty_slots only). **Pass `--previous` to the QC too** so the Δ columns (which are script-computed differences, not bundle leaves) and the old-value columns are recognized as in-bundle:
+Both bundles need `module_composite`. Output: `<TICKER>_Delta_Report_<date>.md` — written to the **same location rule as the full report** (the bundle's parent under the `detail_reports_<date>/` layout, inside the bundle for legacy) and printed to stdout. It carries a composite delta table (old/new/Δ, grade change bolded), EV delta, level changes, structures added/removed, and a `delta_interpretation` slot. Fill that one slot, then QC the delta (auto-detected by filename — it runs checks number_provenance / footer_integrity / footer_completeness / no_empty_slots only; the delta renders the same Data-Integrity footer, so the completeness check applies unchanged). **Pass `--previous` to the QC too** so the Δ columns (which are script-computed differences, not bundle leaves) and the old-value columns are recognized as in-bundle:
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/report_qc.py --bundle ./<new_bundle> \
@@ -184,7 +185,7 @@ If the **financial-analysis docx skill** is available, offer to convert the pass
 - **The §12 gate is blocking.** A report that fails report_qc does not ship. Exit 0 is the ship criterion.
 - **Fix tables in the module, not the report.** If a scripted figure is wrong, the fix is upstream (re-run the module, re-render) — editing a number in the `.md` would pass a wrong figure past the gate on the next run and defeats the whole architecture.
 - **Waivers are disclosed, not silent.** A genuinely justified failure can be waived (`--waive "check:reason"`, same mechanics as the snapshot gate) — the report table then shows WAIVED with the reason. Use this only for a real, disclosed exception, never to hide a fabricated number.
-- **Word cap ~2100.** The three pages together must stay under the cap. The `brief_<dim>` word cap (≤120 words each) is enforced upstream at module-brief authoring time — each module SKILL instructs the LLM to stay within 120 words when it writes `brief_<dim>.md`. The render-time LLM does not re-condense transcluded briefs; the lever is authoring discipline in the upstream module step.
+- **Word cap ~2100, prose and headings only.** The three pages together must stay under the cap, but `report_qc` counts prose and headings only — pipe-table rows and the `### Data Integrity` section are excluded, so the whole budget is the author's to spend on prose. **Target ≤1,000 words of authored prose across all slots; a small overage is acceptable — the gate's margin handles it.** The `brief_<dim>` word cap (≤150 words each, aim ~120) is enforced upstream at module-brief authoring time — each module SKILL instructs the LLM to stay within that budget when it writes `brief_<dim>.md`. The render-time LLM does not re-condense transcluded briefs; the lever is authoring discipline in the upstream module step.
 - **The docket is a render of the SAME bundle; md stays the source of truth.** The PDFs (exec/detail, + delta on a refresh) carry only script-minted numbers + gated `pdf_slots.json` prose. If the render venv is not built, `render_env.py --check` exits 3 → announce md-only with the one-line bootstrap and skip the PDF steps; **the docket never blocks the md report.**
 - **The slots gate is blocking and cannot be bypassed.** `render_pdf` refuses exec/detail unless `report_qc.py --pdf-slots` stamped `qc_passed=true`. Fix slot PROSE, never numbers — the same discipline as the md gate.
 - **The METHODOLOGY appendix, footer stamps, and scale banners are fully scripted — nothing to author.** The methodology page keeps every detail transparent (rubric versions, weights, valuation formulas, active scale, conventions, governance) rendered purely from the module + scale JSONs; it is **out of `pdf_slots.json` scope** — do not try to write or edit it. Slot authoring is unchanged (the four prose blocks). Weight-set / scale footer stamps and the scale-review / pending-proposal banners likewise come from the module and refresh-plan JSONs, never from prose.
