@@ -74,7 +74,7 @@ The script writes `<bundle>/module_options.json` (path printed to stdout). **How
 
 ## Step 4 — Write the brief
 
-Read `module_options.json` (small — read it directly). Write `<bundle>/brief_options.md`. **Every number comes from the JSON/snapshot — zero computed-in-prose numbers.** Format discipline (uniform with the evidence briefs): open with a verdict headline line (`### Options — {vol verdict} / {n} structures (rubric v{ver})`), round displayed floats to 2 dp in prose and tables (full precision stays in the JSON), and END with a one-line `**Signal:**` read — the disclaimer goes below the signal, never in place of it.
+Read `module_options.json` (small — read it directly). Write `<bundle>/brief_options.md`. **Every number comes from the JSON/snapshot — zero computed-in-prose numbers.** Format discipline (uniform with the evidence briefs): open with a verdict headline line (`### Options — {vol verdict} / {n} structures (rubric v{ver})`), write complete sentences in plain English — spell out metric names ("IV 96%", "25Δ skew"), never snake_case identifiers or `->` arrows, and large magnitudes as $16.7B, never scientific notation — round displayed floats to 2 dp in prose and tables (full precision stays in the JSON), and END with a one-line `**Signal:**` read — the disclaimer goes below the signal, never in place of it.
 
 **Headline first (the gate):** one **bold** line stating the IV-vs-realized verdict — e.g. **"IV 96% but 14 pts BELOW realized → cheap_vs_realized: premium selling has no edge here."** This is the decision, not decoration.
 

@@ -1050,3 +1050,388 @@ def test_word_cap_skips_when_no_page_sections():
     r = rq.check_word_cap("no page headers at all")
     assert r["passed"] is None
     assert "SKIP" in r["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# word_cap: WHAT IS COUNTED (1.2.2).
+#
+# WHY THESE EXIST: the cap was enforced over the RAW page text, which includes
+# every script-minted pipe-table row and the mandated ### Data Integrity footer.
+# Measured on four production bundles the ZERO-PROSE skeleton alone ran
+# 2,816-3,935 words, so 2100 was unsatisfiable by prose editing -- and the one
+# thing that did move the number was deleting scripted content. In production an
+# author reached PASS by cutting 78% of the mandated footer. Counting only the
+# text an author can actually influence is what makes the cap a prose budget
+# again; these tests pin exactly what is in and out of the count.
+# --------------------------------------------------------------------------- #
+
+def _page_with(body):
+    """A one-page report whose Page-1 body is ``body`` verbatim."""
+    return "# T\n\n## Page 1 — Decision\n" + body + "\n"
+
+
+def test_word_cap_excludes_pipe_table_rows():
+    prose = "w " * 100
+    table = ("| Level | Type | Basis |\n"
+             "| --- | --- | --- |\n"
+             "| 82 | swing_low | ohlcv |\n"
+             "| 90 | ma200 | ohlcv |\n")
+    with_table = rq.check_word_cap(_page_with(prose + "\n" + table))
+    without = rq.check_word_cap(_page_with(prose))
+    assert with_table["detail"] == without["detail"]
+    # 100 filler + the 3 words of "1 — Decision" consumed into the body
+    assert "p1 103" in with_table["detail"]
+
+
+def test_word_cap_excludes_indented_table_rows():
+    # A row indented under a list item is still a table row.
+    r = rq.check_word_cap(_page_with("w w\n   | a | b | c | d | e |\n"))
+    assert "p1 5" in r["detail"]   # "1 — Decision" (3) + "w w" (2)
+
+
+def test_word_cap_excludes_the_data_integrity_section():
+    prose = "w " * 50
+    footer = ("### Data Integrity\n\n"
+              "- API tier notes:\n"
+              "  - a very long governance disclosure that must not cost the "
+              "author a single word of budget\n"
+              "- Plugin version: 1.2.2\n\n"
+              "_Not financial advice._\n")
+    with_footer = rq.check_word_cap(_page_with(prose + "\n" + footer))
+    without = rq.check_word_cap(_page_with(prose))
+    assert with_footer["detail"] == without["detail"]
+
+
+def test_word_cap_data_integrity_exclusion_ends_at_the_next_same_level_heading():
+    body = ("### Data Integrity\n" + ("skipped " * 30)
+            + "\n### Monitoring Protocol\n" + ("counted " * 7) + "\n")
+    r = rq.check_word_cap(_page_with(body))
+    # 3 ("1 — Decision") + 3 ("### Monitoring Protocol") + 7 counted
+    assert "p1 13" in r["detail"]
+
+
+def test_word_cap_still_counts_prose_and_headings():
+    r = rq.check_word_cap(_page_with("### Technical\n\nreal prose words here\n"))
+    assert "p1 9" in r["detail"]   # 3 + "### Technical" (2) + 4 prose words
+
+
+def test_word_cap_fail_message_states_what_is_excluded():
+    r = rq.check_word_cap(_pages(900, 900, 900))
+    assert r["passed"] is False
+    assert "counting prose only" in r["detail"]
+    assert "Data Integrity" in r["detail"]
+    assert "table rows" in r["detail"]
+
+
+def test_word_cap_pass_message_states_what_is_excluded():
+    r = rq.check_word_cap(_pages(10, 10, 10))
+    assert r["passed"] is True
+    assert "counting prose only" in r["detail"]
+
+
+def test_word_cap_cut_and_largest_section_are_computed_on_filtered_text():
+    """The one-shot instruction must point at the PROSE, not at a fat table."""
+    fat_table = "| a b c d e f g h |\n" * 400
+    body1 = ("w " * 200) + "\n" + fat_table
+    body2 = "w " * 2100
+    text = ("# T\n\n## Page 1 — Decision\n" + body1
+            + "\n## Page 2 — Evidence\n" + body2
+            + "\n## Page 3 — Context & Protocol\nw\n")
+    r = rq.check_word_cap(text)
+    assert r["passed"] is False
+    assert "p2 is the largest section" in r["detail"]
+    counted = int(r["detail"].split(" words across")[0])
+    cut = int(r["detail"].split("CUT >= ")[1].split(" words")[0])
+    assert counted - cut == rq._WORD_CAP - rq._WORD_TRIM_MARGIN
+
+
+def test_word_cap_and_margin_constants_are_unchanged():
+    assert rq._WORD_CAP == 2100
+    assert rq._WORD_TRIM_MARGIN == 40
+
+
+# --------------------------------------------------------------------------- #
+# footer_completeness (1.2.2, BLOCKING).
+#
+# WHY THIS EXISTS: footer_integrity asserts three STRINGS -- as_of, the rubric
+# versions, and the disclaimer. It says nothing about meta.api_tier_notes, which
+# carry the substantive disclosure (which broker served the data, what was left
+# null and why). A production report deleted 78% of the mandated footer and
+# footer_integrity still passed. This gate makes a dropped note a FAILURE that
+# names the note.
+# --------------------------------------------------------------------------- #
+
+_NOTES = [
+    "All market data fetched via the governed broker mcp__kurama__av_market_data.",
+    "iv_history NOT built and iv_pctile_1yr left null: known broker limitation.",
+    "pc_ratio_realtime ABSENT: no realtime P/C endpoint on this tier.",
+]
+
+
+def _notes_docs(notes):
+    return {"snapshot": {"meta": {"api_tier_notes": notes}}}
+
+
+def _footer_report(notes):
+    body = "\n".join(f"  - {n}" for n in notes)
+    return ("# T\n\n## Page 3 — Context & Protocol\n\n### Data Integrity\n\n"
+            "- API tier notes:\n" + body + "\n")
+
+
+def test_footer_completeness_passes_when_every_note_is_present():
+    r = rq.check_footer_completeness(_footer_report(_NOTES), _notes_docs(_NOTES))
+    assert r["passed"] is True
+    assert "all 3" in r["detail"]
+
+
+def test_footer_completeness_fails_and_names_the_deleted_note():
+    report = _footer_report(_NOTES[:2])          # third note deleted
+    r = rq.check_footer_completeness(report, _notes_docs(_NOTES))
+    assert r["passed"] is False
+    assert "1 of 3" in r["detail"]
+    assert "pc_ratio_realtime ABSENT" in r["detail"]
+    # the notes that ARE present must not be named
+    assert "iv_history NOT built" not in r["detail"]
+
+
+def test_footer_completeness_names_every_missing_note():
+    r = rq.check_footer_completeness(_footer_report([]), _notes_docs(_NOTES))
+    assert r["passed"] is False
+    assert "3 of 3" in r["detail"]
+    for note in _NOTES:
+        assert note[:40] in r["detail"]
+
+
+def test_footer_completeness_truncates_a_long_note_in_the_message():
+    long_note = "X" * 300
+    r = rq.check_footer_completeness("no footer here", _notes_docs([long_note]))
+    assert r["passed"] is False
+    assert "X" * 80 + "..." in r["detail"]
+    assert "X" * 100 not in r["detail"]
+
+
+def test_footer_completeness_matches_under_whitespace_normalization():
+    note = "a note that\n   spans  lines"
+    report = "### Data Integrity\n- API tier notes:\n  - a note that spans lines\n"
+    r = rq.check_footer_completeness(report, _notes_docs([note]))
+    assert r["passed"] is True
+
+
+def test_footer_completeness_rejects_a_paraphrase():
+    r = rq.check_footer_completeness(
+        "### Data Integrity\n- API tier notes:\n  - governed broker used\n",
+        _notes_docs([_NOTES[0]]))
+    assert r["passed"] is False
+
+
+def test_footer_completeness_passes_on_empty_or_absent_list():
+    for docs in (_notes_docs([]), _notes_docs(None), {"snapshot": {"meta": {}}},
+                 {"snapshot": {}}, {}):
+        r = rq.check_footer_completeness("anything", docs)
+        assert r["passed"] is True, docs
+        assert "nothing to disclose" in r["detail"]
+
+
+def test_footer_completeness_is_in_the_full_and_delta_check_sets():
+    """It is BLOCKING, and it runs wherever footer_integrity runs."""
+    import inspect
+    src = inspect.getsource(rq.run_report_qc)
+    full, delta = src.count("check_footer_integrity"), src.count(
+        "check_footer_completeness")
+    assert full == delta == 2
+
+
+# --------------------------------------------------------------------------- #
+# number_provenance: FORMATTED-VARIANT matching (1.2.2).
+#
+# The renderer now humanizes what it mints ("$1.43B", "41.7"), so the matcher has
+# to accept a formatted rendering of a bundle value -- but only at the precision
+# the token actually DISPLAYS, or the gate would degrade into "any number that is
+# roughly right". Accept AND reject cases are pinned together for that reason.
+# --------------------------------------------------------------------------- #
+
+_MKTCAP = 1427214735.0          # the real AMSC market cap
+
+
+def _prov(text, **price):
+    return rq.check_number_provenance(text, {"snapshot": {"price": price}})
+
+
+def test_provenance_accepts_a_humanized_market_cap():
+    assert _prov("Mktcap $1.43B", mktcap=_MKTCAP)["passed"] is True
+
+
+def test_provenance_rejects_a_market_cap_rounded_past_its_displayed_precision():
+    r = _prov("Mktcap $1.5B", mktcap=_MKTCAP)
+    assert r["passed"] is False
+    assert "$1.5B" in r["detail"]
+
+
+def test_provenance_rejects_a_wrong_two_decimal_market_cap():
+    assert _prov("Mktcap $1.44B", mktcap=_MKTCAP)["passed"] is False
+
+
+def test_provenance_accepts_a_score_at_its_displayed_precision():
+    assert _prov("composite 41.7/100", last=41.6894)["passed"] is True
+
+
+def test_provenance_rejects_a_score_that_is_not_the_rounding():
+    r = _prov("composite 41.8/100", last=41.6894)
+    assert r["passed"] is False
+    assert "41.8" in r["detail"]
+
+
+def test_provenance_strips_dollar_signs_and_thousands_commas():
+    assert _prov("$1,427,214,735 of market cap", mktcap=_MKTCAP)["passed"] is True
+
+
+def test_provenance_expands_every_magnitude_suffix():
+    assert _prov("$25.0K", last=25000.0)["passed"] is True
+    assert _prov("$482.5M", last=482512345.0)["passed"] is True
+    assert _prov("$61.0B", last=61002432240.0)["passed"] is True
+    assert _prov("$1.20T", last=1200000000000.0)["passed"] is True
+
+
+def test_provenance_suffix_expansion_is_strict():
+    assert _prov("$483.0M", last=482512345.0)["passed"] is False
+    assert _prov("$1.21T", last=1200000000000.0)["passed"] is False
+
+
+def test_provenance_unformatted_tokens_behave_exactly_as_before():
+    """An OLD-format report (raw numbers) must pass identically."""
+    text = ("last 29.45, level 82, ev 0.175, implied 8.5%, "
+            "mktcap 1427214735, breakeven 104.9107")
+    r = rq.check_number_provenance(text, {"snapshot": {"price": {
+        "last": 29.45, "level": 82.0, "ev": 0.175, "implied": 0.085,
+        "mktcap": _MKTCAP, "breakeven": 104.9107}}})
+    assert r["passed"] is True
+
+
+def test_provenance_still_orphans_a_fabricated_number():
+    r = _prov("a rogue $123.45 in prose", last=29.45)
+    assert r["passed"] is False
+    assert "$123.45" in r["detail"]
+
+
+def test_provenance_a_letter_that_is_not_a_magnitude_is_not_a_suffix():
+    # "12MB" must not be read as 12 million; it falls back to the bare 12.
+    r = _prov("a 12MB payload", last=12.0)
+    assert r["passed"] is True
+
+
+def test_token_parts_splits_mantissa_scale_and_displayed_decimals():
+    assert rq._token_parts("$1.43B") == (1.43, 1e9, 2)
+    assert rq._token_parts("482.5M") == (482.5, 1e6, 1)
+    assert rq._token_parts("8.5%") == (8.5, 1.0, 1)
+    assert rq._token_parts("-1,234") == (1234.0, 1.0, 0)
+    assert rq._token_parts("$") == (None, None, None)
+
+
+def test_strip_suffix_preserves_the_percent_marker():
+    assert rq._strip_suffix("$1.43B") == "$1.43"
+    assert rq._strip_suffix("8.5%") == "8.5%"        # the % marker survives
+    assert rq._strip_suffix("1.4B%") == "1.4%"
+    assert rq._strip_suffix("41.7") == "41.7"
+
+
+def test_is_allowed_formatted_never_rejects_what_is_allowed_accepts():
+    """The new path is ADDITIVE: it can only widen, never narrow."""
+    src = {"a": 41.6894, "b": _MKTCAP, "c": 0.085, "d": 82.0}
+    allowed = rq.build_allowed_set(src)
+    match = rq.make_precision_matcher(rq.build_raw_values(src))
+    for tok in ("41.69", "41.7", "42", "8.5%", "82", "0.09", "999.99", "3"):
+        if rq.is_allowed(tok, allowed):
+            assert rq.is_allowed_formatted(tok, allowed, match) is True, tok
+
+
+def test_build_raw_values_is_literal_magnitudes_only():
+    """The percent fold lives in the MATCHER, not the raw set -- composing it with
+    a magnitude suffix is a 100x hole (see the $14.3M test below)."""
+    raw = rq.build_raw_values({"v": 41.6894, "w": -3.0})
+    assert raw == {41.6894, 3.0}
+
+
+def test_precision_matcher_folds_percent_forms_only_for_unsuffixed_tokens():
+    match = rq.make_precision_matcher(rq.build_raw_values({"frac": 0.085}))
+    # unsuffixed: the percent RENDERING of the fraction is admitted
+    assert match(8.5, 1.0, 1) is True
+    assert match(0.085, 1.0, 3) is True
+    # suffixed: the percent fold must NOT compose with the magnitude scaling
+    assert match(8.5, 1e6, 1) is False
+
+
+def test_provenance_suffix_on_a_value_stored_in_its_own_unit_still_traces():
+    """Bundle units are not uniform: a field stored in MILLIONS (fcf_fy28_m
+    3113.2) may legitimately be cited as "3113.2M". The bare part is the correct
+    provenance there, and the old scanner validated exactly that -- dropping the
+    bare path for suffixed tokens would orphan 5 real citations across the four
+    production bundles ("35.3M", "-13.99B", "1.0B", "$113.1M", "731M")."""
+    r = rq.check_number_provenance(
+        "free cash flow of $3,113.2M", {"snapshot": {"fcf_fy28_m": 3113.2}})
+    assert r["passed"] is True
+
+
+# --------------------------------------------------------------------------- #
+# The percent-fold x magnitude-suffix composition hole (review finding, 1.2.2).
+#
+# build_raw_values used to fold the x100 / /100 percent renderings into the raw
+# set. Composed with a K/M/B/T suffix that is a 100x hole: /100 turns a
+# 1,427,214,735 market cap into 14,272,147.35, which "$14.3M" then reproduces at
+# its displayed precision. Reproduced end-to-end on the real AMSC bundle; the OLD
+# gate orphaned that token. The fold now applies ONLY to unsuffixed tokens.
+# --------------------------------------------------------------------------- #
+
+def test_provenance_orphans_a_magnitude_that_is_100x_off():
+    r = _prov("backlog of $14.3M", mktcap=_MKTCAP)
+    assert r["passed"] is False
+    assert "$14.3M" in r["detail"]
+
+
+def test_provenance_orphans_a_magnitude_that_is_one_hundredth_off():
+    r = _prov("a market cap of $142.7T", mktcap=_MKTCAP)
+    assert r["passed"] is False
+
+
+def test_provenance_still_accepts_the_correct_magnitude():
+    assert _prov("Mktcap $1.43B", mktcap=_MKTCAP)["passed"] is True
+
+
+def test_provenance_percent_rendering_of_a_fraction_still_passes():
+    """The fold that had to be narrowed is still there for unsuffixed tokens."""
+    assert _prov("implied move ±8.5%", implied=0.085)["passed"] is True
+    assert _prov("EV of 17.5%", ev=0.175)["passed"] is True
+
+
+# --------------------------------------------------------------------------- #
+# _countable_prose: a NESTED Data Integrity heading must not end the skip early.
+#
+# A delta report nests the footer builder's own "### Data Integrity" inside the
+# page-level "## Data Integrity". Taking the inner (deeper) level let the next
+# "###" heading terminate the exclusion, so everything after it was counted.
+# --------------------------------------------------------------------------- #
+
+def test_countable_prose_nested_data_integrity_keeps_the_outer_level():
+    body = ("## Data Integrity\n"
+            "### Data Integrity\n"
+            + ("skipped " * 20)
+            + "\n### Other Heading\n"
+            + ("skipped " * 20) + "\n")
+    kept = rq._countable_prose(body)
+    assert "skipped" not in kept
+    assert "Other Heading" not in kept
+
+
+def test_countable_prose_same_level_heading_still_ends_the_skip():
+    body = ("### Data Integrity\n" + ("skipped " * 20)
+            + "\n### Other Heading\ncounted words here\n")
+    kept = rq._countable_prose(body)
+    assert "skipped" not in kept
+    assert "counted words here" in kept
+
+
+def test_countable_prose_shallower_heading_ends_a_nested_skip():
+    body = ("## Data Integrity\n### Data Integrity\n" + ("skipped " * 10)
+            + "\n## Page Level Heading\ncounted words here\n")
+    kept = rq._countable_prose(body)
+    assert "skipped" not in kept
+    assert "counted words here" in kept

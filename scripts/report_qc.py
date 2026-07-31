@@ -18,11 +18,14 @@ CHECKS (waiver mechanics mirror qc_gate.py):
  1. number_provenance   -- every numeric token in the report must trace to a
                            snapshot/module numeric leaf (global) or to a number
                            inside one of the WHITELISTED bundle strings the
-                           renderer echoes (with rounding + %-form tolerances).
-                           Date- and version-shaped tokens are matched EXACTLY
-                           against the bundle's own dates/versions (a fake date or
-                           bogus version orphans); only the three exact page
-                           headers are chrome. Orphans FAIL (list capped at 20).
+                           renderer echoes (with rounding + %-form tolerances),
+                           OR be a FORMATTED rendering of one ("$1.43B", "41.7")
+                           that reproduces the bundle value when rounded to the
+                           precision it displays. Date- and version-shaped tokens
+                           are matched EXACTLY against the bundle's own dates/
+                           versions (a fake date or bogus version orphans); only
+                           the three exact page headers are chrome. Orphans FAIL
+                           (list capped at 20).
  2. composite_arithmetic-- Σ(weight × score) == composite score ±0.01; each
                            contribution consistent.
  3. ev_consistency      -- scenario probs sum 1 ±1e-6; ev_at_current recomputed
@@ -38,10 +41,18 @@ CHECKS (waiver mechanics mirror qc_gate.py):
                            executable is false, the executability note appears.
  9. footer_integrity    -- as_of present; every module rubric_version present;
                            disclaimer present.
-10. word_cap            -- total words across the Page 1-3 sections <= 2100.
+9b. footer_completeness -- every snapshot meta.api_tier_notes entry appears in the
+                           report (whitespace-normalized substring match). Closes
+                           the hole footer_integrity leaves: it checks three
+                           strings, not the substantive disclosure. Absent/empty
+                           list -> PASS.
+10. word_cap            -- PROSE words across the Page 1-3 sections <= 2100.
+                           Markdown pipe-table rows and the `### Data Integrity`
+                           section are EXCLUDED from the count (they are script-
+                           minted / mandated, not an author's budget).
 11. no_empty_slots      -- no `<!-- SLOT:` markers remain.
 
-DELTA reports (auto-detected by filename or --delta) run checks {1, 9, 11} only.
+DELTA reports (auto-detected by filename or --delta) run checks {1, 9, 9b, 11}.
 
 stdlib-only.
 """
@@ -330,6 +341,161 @@ def is_allowed(token, allowed):
 
 
 # --------------------------------------------------------------------------- #
+# Formatted-variant matching (1.2.2).
+#
+# render_report now HUMANIZES the numbers it mints: a market cap prints as
+# "$1.43B" instead of "1427214735", a composite as "41.7" instead of "41.6894".
+# The historical matcher works off a 2-dp key set, which cannot express "1.43
+# billion" at all -- so a humanized token would orphan. This adds a second,
+# INDEPENDENT acceptance path: a token matches a CANDIDATE bundle value only when
+# rounding that value to EXACTLY the precision the token prints reproduces the
+# token. Against a given value that is tight -- "41.7" matches 41.6894 and "41.8"
+# does not; "$1.43B" matches 1427214735 and "$1.5B" does not.
+#
+# What it is NOT: a low false-accept rate in the aggregate. A real bundle carries
+# thousands of numeric leaves, and this path (like the historical one) accepts a
+# token if ANY of them projects onto it; measured on the production bundles,
+# roughly half of arbitrary "$X.YZ{B,M}" strings find some leaf that matches at
+# their displayed precision. Provenance is a leakage gate, not a proof of intent:
+# it guarantees a printed number CAME FROM the bundle at the precision claimed,
+# and the semantic checks (composite_arithmetic, ev_consistency, the G4a
+# assertions) are what catch a number used to say something false.
+#
+# The path is purely ADDITIVE -- is_allowed is still consulted on the token's bare
+# numeric part, so every unformatted token behaves byte-for-byte as before.
+# --------------------------------------------------------------------------- #
+
+# Magnitude suffixes a humanized token may carry (mirrors render_report._fmt_money).
+_SUFFIX_SCALE = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
+# The REPORT-side numeric token: _NUM_RE plus an OPTIONAL magnitude suffix, so
+# "$1.43B" scans as ONE token instead of "$1.43" and a stray letter. The negative
+# lookahead keeps "12MB" / "3Mbps" from being read as a magnitude. The bundle-side
+# extractor (extract_numbers, via _NUM_RE) is deliberately unchanged.
+_NUM_TOKEN_RE = re.compile(r"\$?-?\d[\d,]*\.?\d*(?:[KMBT](?![A-Za-z0-9]))?%?")
+
+
+def _token_parts(tok):
+    """Split a report token into ``(mantissa, scale, displayed_decimals)``.
+
+    ``mantissa`` is the absolute number AS PRINTED (suffix not applied),
+    ``scale`` the suffix multiplier (1.0 when there is none), and
+    ``displayed_decimals`` the count of digits after the decimal point as printed
+    -- the precision the matcher is permitted to round a bundle value to.
+    Returns ``(None, None, None)`` when the token is not parseable.
+    """
+    t = tok.strip().lstrip("$")
+    if t.endswith("%"):
+        t = t[:-1]
+    scale = 1.0
+    if t and t[-1] in _SUFFIX_SCALE:
+        scale = _SUFFIX_SCALE[t[-1]]
+        t = t[:-1]
+    t = t.replace(",", "").lstrip("-")
+    if t in ("", "."):
+        return None, None, None
+    dp = len(t.split(".", 1)[1]) if "." in t else 0
+    try:
+        mantissa = float(t)
+    except ValueError:
+        return None, None, None
+    return mantissa, scale, dp
+
+
+def _strip_suffix(tok):
+    """The token without its magnitude suffix (what is_allowed historically saw)."""
+    t = tok
+    pct = t.endswith("%")
+    if pct:
+        t = t[:-1]
+    if t and t[-1] in _SUFFIX_SCALE:
+        t = t[:-1]
+    return t + ("%" if pct else "")
+
+
+def build_raw_values(*objs):
+    """Every RAW numeric leaf magnitude across ``objs`` (no rounding, no folds).
+
+    The displayed-precision matcher needs the UNROUNDED bundle value: "$1.43B"
+    traces to 1427214735 only because round(1.427214735, 2) == 1.43, and
+    build_allowed_set has already collapsed that value to a 2-dp key.
+
+    LITERAL VALUES ONLY. The percent-form (x100 / /100) variants build_allowed_set
+    folds in are applied by make_precision_matcher instead, and ONLY for tokens
+    with no magnitude suffix -- see the composition hazard documented there.
+    """
+    raw = set()
+    for obj in objs:
+        for v in _iter_numeric_leaves(obj):
+            raw.add(abs(v))
+    return raw
+
+
+def make_precision_matcher(raw_values):
+    """Return ``match(mantissa, scale, dp) -> bool`` over ``raw_values``.
+
+    UNSUFFIXED tokens (scale == 1) also match the percent RENDERINGS of a value,
+    mirroring build_allowed_set: a fraction stored as 0.085 is displayed "8.5%".
+
+    SUFFIXED tokens (K/M/B/T) are matched against the LITERAL magnitudes only.
+    Composing the percent fold with a magnitude suffix is a 100x hole: /100 turns
+    a 1,427,214,735 market cap into 14,272,147.35, which a "$14.3M" token then
+    "matches" at its displayed precision -- a two-orders-of-magnitude error the
+    OLD gate rejected. A magnitude suffix is a UNIT declaration, so the value it
+    scales must be the literal one.
+
+    The rounded projection of the bundle is built ONCE per distinct
+    ``(scale, dp)`` pair the report actually uses (typically two or three), not
+    once per token, so the added cost is a couple of set comprehensions rather
+    than a full scan per token.
+    """
+    cache = {}
+
+    def match(mantissa, scale, dp):
+        if mantissa is None:
+            return False
+        key = (scale, dp)
+        projected = cache.get(key)
+        if projected is None:
+            if scale == 1.0:
+                projected = set()
+                for v in raw_values:
+                    projected.add(round(v, dp))
+                    projected.add(round(v * 100.0, dp))
+                    projected.add(round(v / 100.0, dp))
+            else:
+                projected = {round(v / scale, dp) for v in raw_values}
+            cache[key] = projected
+        return mantissa in projected
+
+    return match
+
+
+def is_allowed_formatted(token, allowed, match_precision):
+    """True if ``token`` is either historically allowed or a formatted in-bundle value.
+
+    Path 1 (unchanged): is_allowed over the token's BARE numeric part -- for a
+    token with no magnitude suffix this is exactly the historical behaviour.
+    Path 2 (new): some bundle value, rounded to the token's DISPLAYED precision
+    and scaled by its magnitude suffix, equals the token.
+
+    WHY PATH 1 SURVIVES FOR SUFFIXED TOKENS TOO: bundle units are not uniform --
+    some fields are stored raw (mktcap 1427214735), others already in millions
+    (fcf_fy28_m 3113.2). Prose that writes "35.3M" for a field stored as 35.3 is
+    citing the bundle correctly and merely labelling the unit; measured across the
+    four production bundles, 5 real suffixed tokens ("35.3M", "-13.99B", "1.0B",
+    "$113.1M", "731M") trace ONLY through the bare part. Dropping path 1 for
+    suffixed tokens would orphan all of them -- a false positive, since the old
+    scanner never saw the suffix either and validated exactly the bare part.
+    Path 2 is therefore purely additive: it admits the renderer's humanized forms
+    without removing any acceptance the gate already had.
+    """
+    if is_allowed(_strip_suffix(token), allowed):
+        return True
+    mantissa, scale, dp = _token_parts(token)
+    return match_precision(mantissa, scale, dp)
+
+
+# --------------------------------------------------------------------------- #
 # Report section splitting.
 # --------------------------------------------------------------------------- #
 
@@ -342,6 +508,61 @@ def _page_sections(report_text):
     parts = re.split(r"^## Page ", report_text, flags=re.MULTILINE)
     # parts[0] is the preamble (title); the rest are the three pages.
     return parts[1:]
+
+
+# A markdown pipe-table row (header, separator, or data): its stripped form starts
+# with "|". Every one of these is SCRIPT-minted by render_report from the bundle --
+# the author cannot shorten a table without deleting a scripted number.
+_TABLE_ROW_RE = re.compile(r"^\|")
+# Any ATX heading, with its level captured.
+_HEADING_RE = re.compile(r"^(#{1,6})\s")
+# The mandated disclosure footer's heading. Everything from here to the next
+# heading of the SAME OR HIGHER level (or the end of the page) is the footer.
+_DATA_INTEGRITY_RE = re.compile(r"^(#{1,6})\s+Data Integrity\s*$")
+
+
+def _countable_prose(section_text):
+    """A page body with the UNCOUNTABLE parts removed, for the word cap.
+
+    Two things are dropped:
+
+      * every markdown pipe-table row -- the tables are minted by render_report
+        from the bundle, so their words are not a budget the author can spend;
+      * the whole ``### Data Integrity`` section (heading through to the next
+        heading of the same or higher level, or the end of the page) -- mandated
+        disclosure whose length is set by the snapshot's api_tier_notes, not by
+        the author.
+
+    WHY: measured on four production bundles the ZERO-PROSE skeleton alone ran
+    2,816-3,935 words, so a cap of 2100 over the raw text was unsatisfiable by any
+    amount of prose editing. The one way to "pass" was to delete scripted content
+    -- and in production an author did exactly that, cutting 78% of the mandated
+    footer. Counting only what an author can actually influence makes the cap a
+    prose budget again and removes the incentive to shrink disclosure.
+    """
+    out = []
+    skip_level = None
+    for line in section_text.splitlines():
+        stripped = line.strip()
+        heading = _HEADING_RE.match(stripped)
+        if heading:
+            level = len(heading.group(1))
+            if skip_level is not None and level <= skip_level:
+                skip_level = None          # the footer section ended here
+            if _DATA_INTEGRITY_RE.match(stripped):
+                # Never DOWNGRADE an active skip to a deeper level: a delta report
+                # nests "### Data Integrity" (the footer builder's own heading)
+                # inside "## Data Integrity" (the page heading), and taking the
+                # inner level would let the next "###" end the skip early. The
+                # shallowest active heading owns the section.
+                skip_level = level if skip_level is None else min(skip_level, level)
+                continue
+        if skip_level is not None:
+            continue
+        if _TABLE_ROW_RE.match(stripped):
+            continue
+        out.append(line)
+    return "\n".join(out)
 
 
 # --------------------------------------------------------------------------- #
@@ -514,6 +735,13 @@ def check_number_provenance(report_text, docs, extra_values=None,
     their digits are stripped before scanning. Any other "## Page N" line keeps
     its digits, so "## Page 777" surfaces 777 as an ordinary numeric orphan.
 
+    FORMATTED VARIANTS (1.2.2): the renderer humanizes what it mints ("$1.43B",
+    "41.7"), so a token is ALSO in-bundle when some bundle value rounded to the
+    token's DISPLAYED precision (after expanding a K/M/B/T suffix) reproduces it
+    exactly. Strict by construction: "41.7" traces to 41.6894, "41.8" does not;
+    "$1.43B" traces to 1427214735, "$1.5B" does not. Unformatted tokens keep the
+    historical behaviour byte-for-byte.
+
     ``extra_values`` is an optional list of additional allowed numbers (delta mode:
     the script-computed Δ columns, which are not bundle leaves).
     """
@@ -539,6 +767,25 @@ def check_number_provenance(report_text, docs, extra_values=None,
             list(_iter_whitelisted_string_numbers(previous_docs)))
     if extra_values:
         allowed |= build_allowed_set(list(extra_values))
+
+    # RAW (unrounded) mirror of the same sources, for the displayed-precision
+    # matcher: "$1.43B" / "41.7" are formatted renderings that the 2-dp key set
+    # above cannot express. Same sources, no tolerance expansion.
+    raw_values = build_raw_values(
+        docs.get("snapshot"),
+        *[docs.get(k) for k in docs if k.startswith("module_")])
+    raw_values |= build_raw_values(list(_iter_whitelisted_string_numbers(docs)))
+    raw_values |= build_raw_values(list(_contract_rendered_numbers(docs)))
+    if previous_docs:
+        raw_values |= build_raw_values(
+            previous_docs.get("snapshot"),
+            *[previous_docs.get(k) for k in previous_docs
+              if k.startswith("module_")])
+        raw_values |= build_raw_values(
+            list(_iter_whitelisted_string_numbers(previous_docs)))
+    if extra_values:
+        raw_values |= build_raw_values(list(extra_values))
+    match_precision = make_precision_matcher(raw_values)
 
     allowed_dates = build_allowed_dates(*docs_for_dv)
     allowed_versions = build_allowed_versions(*docs_for_dv)
@@ -585,16 +832,19 @@ def check_number_provenance(report_text, docs, extra_values=None,
     # 4) Numeric tokens on what remains (52-Week label scrubbed inside
     #    extract_numbers). Exclude fixed structural constants that are report
     #    format artifacts, not data: "/100" denominators, "1.0" total weight.
+    #    Tokens are scanned with _NUM_TOKEN_RE so a humanized magnitude ("$1.43B")
+    #    is one token; is_allowed_formatted then accepts it either historically
+    #    (bare part, unchanged behaviour) or at its displayed precision.
     format_constants = {"100", "1.0", "1", "0"}
     scanned = _LABEL_RE.sub(" ", scanned)
-    for m in _NUM_RE.finditer(scanned):
+    for m in _NUM_TOKEN_RE.finditer(scanned):
         tok = m.group(0)
-        if _canonical(tok) is None:
+        if _canonical(_strip_suffix(tok)) is None:
             continue
         raw = tok.strip().lstrip("$").rstrip("%").replace(",", "").lstrip("-")
         if raw in format_constants:
             continue
-        if not is_allowed(tok, allowed):
+        if not is_allowed_formatted(tok, allowed, match_precision):
             orphans.append(tok)
 
     # de-dupe preserving order.
@@ -681,8 +931,9 @@ def check_invalidation_both_legs(report_text, docs):
 
     problems = []
     if tech_level is not None:
-        # the technical level must appear as a number in the report.
-        level_str = render_report._fmt(tech_level)
+        # the technical level must appear as a number in the report, in the SAME
+        # rendering the renderer prints it in (prices are 2dp since 1.2.2).
+        level_str = render_report._fmt_price(tech_level)
         if level_str not in report_text:
             problems.append(f"technical invalidation level {level_str} absent")
     if fund_metric:
@@ -817,6 +1068,65 @@ def check_footer_integrity(report_text, docs):
                    "as_of, rubric versions, and disclaimer all present")
 
 
+def _norm_ws(text):
+    """Collapse every run of whitespace to a single space (both match sides).
+
+    The renderer prints each api_tier_note as its own bullet with internal
+    whitespace collapsed; the note in the snapshot may carry newlines / double
+    spaces. Normalizing both sides makes the comparison about CONTENT, not layout.
+    """
+    return " ".join(str(text).split())
+
+
+def check_footer_completeness(report_text, docs):
+    """Every ``snapshot.meta.api_tier_notes`` entry must appear in the report.
+
+    WHY THIS EXISTS (1.2.2): footer_integrity only asserts that three STRINGS are
+    present -- the as_of stamp, each module's rubric version, and the disclaimer.
+    It says nothing about the api_tier_notes, which are the substantive disclosure:
+    which broker served the data, which field groups were refetched, what was left
+    null and why. In production an author under word-cap pressure deleted 78% of
+    the mandated footer and footer_integrity still passed. This check closes that
+    hole: a note that the snapshot carries but the report does not is a FAIL.
+
+    Matching is substring-under-whitespace-normalization, so re-wrapping a note is
+    fine and paraphrasing/deleting one is not. PASSES when the list is absent or
+    empty (nothing to disclose).
+    """
+    snapshot = docs.get("snapshot") or {}
+    notes = (snapshot.get("meta") or {}).get("api_tier_notes") or []
+    if not isinstance(notes, (list, tuple)) or not notes:
+        return _result("footer_completeness", True,
+                       "no api_tier_notes in the snapshot -- nothing to disclose")
+
+    haystack = _norm_ws(report_text)
+    missing = []
+    present = 0
+    for note in notes:
+        needle = _norm_ws(note)
+        if not needle:
+            continue
+        if needle in haystack:
+            present += 1
+        else:
+            missing.append(needle)
+
+    if missing:
+        shown = [n[:80] + ("..." if len(n) > 80 else "")
+                 for n in missing[:_ORPHAN_CAP]]
+        more = (f" (+{len(missing) - len(shown)} more)"
+                if len(missing) > len(shown) else "")
+        return _result(
+            "footer_completeness", False,
+            f"{len(missing)} of {len(missing) + present} api_tier_note(s) missing "
+            f"from the report: " + " | ".join(f'"{n}"' for n in shown) + more
+            + ". RESTORE the note(s) verbatim under '- API tier notes:' in the "
+              "### Data Integrity footer -- it is mandated disclosure and it does "
+              "not count against the word cap.")
+    return _result("footer_completeness", True,
+                   f"all {present} api_tier_note(s) present in the report footer")
+
+
 def check_word_cap(report_text):
     """Total prose across pages 1-3 vs the cap, with a ONE-SHOT trim instruction.
 
@@ -839,25 +1149,39 @@ def check_word_cap(report_text):
     number of round-trips needed to do it changes. Quality-affecting variants --
     per-slot write-to-budget stamps, and moving the cap -- were considered and
     declined in favour of this quality-neutral change.
+
+    WHAT IS COUNTED (1.2.2): prose + headings + non-table scripted lines. Markdown
+    pipe-table rows and the mandated ``### Data Integrity`` section are EXCLUDED
+    (see _countable_prose). The cap and the margin are unchanged; what changed is
+    that the number being capped is now the budget an author can actually spend.
+    Under the old accounting the zero-prose skeleton alone was 2,816-3,935 words on
+    real bundles, so the only way to "pass" was to delete script-minted content --
+    which is exactly what happened in production (78% of the mandated footer cut).
     """
     sections = _page_sections(report_text)
     if not sections:
         return _result("word_cap", None, "SKIP: no Page sections found")
-    counts = [len(s.split()) for s in sections]
+    counts = [len(_countable_prose(s).split()) for s in sections]
     words = sum(counts)
     per_page = ", ".join(f"p{i + 1} {c}" for i, c in enumerate(counts))
+    excluded = ("counting prose only -- table rows and the Data Integrity "
+                "section are excluded")
     if words > _WORD_CAP:
         target = _WORD_CAP - _WORD_TRIM_MARGIN
         cut = words - target
         fattest = max(range(len(counts)), key=lambda i: counts[i]) + 1
         return _result(
             "word_cap", False,
-            f"{words} words across pages 1-3 > cap {_WORD_CAP} ({per_page}). "
+            f"{words} words across pages 1-3 > cap {_WORD_CAP} ({per_page}; "
+            f"{excluded}). "
             f"CUT >= {cut} words IN ONE EDIT to land at ~{target} "
             f"(cap minus {_WORD_TRIM_MARGIN} margin); p{fattest} is the largest "
             f"section. Trimming to exactly {_WORD_CAP} costs a full QC cycle per "
-            f"re-check -- overshoot the cut instead of converging on it.")
-    return _result("word_cap", True, f"{words} words <= cap {_WORD_CAP} ({per_page})")
+            f"re-check -- overshoot the cut instead of converging on it. "
+            f"Cutting a scripted table row or the Data Integrity footer does "
+            f"NOT reduce this count -- the overage is prose.")
+    return _result("word_cap", True,
+                   f"{words} words <= cap {_WORD_CAP} ({per_page}; {excluded})")
 
 
 def check_no_empty_slots(report_text):
@@ -1714,7 +2038,7 @@ def _is_delta_report(report_path, delta_flag):
 def run_report_qc(bundle, report_path, delta=False, previous=None):
     """Run the applicable checks and return a list of result dicts.
 
-    Full reports run all 11 checks; delta reports run {1, 9, 11} only. For a delta
+    Full reports run all 11 checks; delta reports run {1, 9, 9b, 11} only. For a delta
     report, ``previous`` (the old bundle dir) lets number_provenance account for
     the old bundle's values AND the script-computed Δ columns; without it the Δ
     columns would read as orphans.
@@ -1740,6 +2064,10 @@ def run_report_qc(bundle, report_path, delta=False, previous=None):
             check_number_provenance(report_text, docs, extra_values=extra,
                                     previous_docs=old_docs),
             check_footer_integrity(report_text, docs),
+            # A delta report renders the SAME integrity footer, so the disclosure
+            # completeness gate applies there too (it runs wherever
+            # footer_integrity does).
+            check_footer_completeness(report_text, docs),
             check_no_empty_slots(report_text),
         ]
 
@@ -1753,6 +2081,7 @@ def run_report_qc(bundle, report_path, delta=False, previous=None):
         check_pop_method_labeled(report_text, docs),
         check_expression_consistency(report_text, docs),
         check_footer_integrity(report_text, docs),
+        check_footer_completeness(report_text, docs),
         check_word_cap(report_text),
         check_no_empty_slots(report_text),
         check_judgment_flag_citations(bundle),
@@ -1904,15 +2233,30 @@ _FINDING_REF_RE = re.compile(r"C\d+")
 # from the prose before number_provenance so the reference digit never orphans.
 _CONTEXT_REF_SCRUB_RE = re.compile(r"\(?\bC\d+\)?")
 # Financial shorthand: a numeric run carrying ONLY a TRAILING unit suffix
-# (42B, 9999M, 30x, 45pct, 200bps, 3nm). The suffix is a magnitude/unit label, NOT
-# an identifier -- the numeric part IS a data figure and MUST trace to the bundle,
-# exactly as the report gate treats "$42B" (its _NUM_RE already yields 42 and checks
-# it). We strip ONLY the suffix here, leaving the numeric part for the number scan.
+# (30x, 45pct, 200bps, 3nm). The suffix is a magnitude/unit label, NOT an
+# identifier -- the numeric part IS a data figure and MUST trace to the bundle.
+# We strip ONLY the suffix here, leaving the numeric part for the number scan.
 # Anchored: digits (optional thousands/decimal) + one suffix + word boundary, with
 # NO leading letter (that would be a product name -- handled below). The suffix
 # alternation is ordered longest-first so "bps"/"pct" win over "b"/... boundaries.
+#
+# NOTE (1.2.2): the K/M/B/T MAGNITUDE suffixes are NO LONGER stripped here -- they
+# are masked by _CONTEXT_MAGNITUDE_RE below and handed to the report gate's own
+# suffix-aware matcher intact, so "$1.43B" traces the same way on both gates. They
+# stay in this alternation only for the lowercase-x / word-suffix ordering; the
+# mask runs first, so a magnitude-suffixed figure never reaches this pattern.
 _CONTEXT_UNIT_SUFFIX_RE = re.compile(
     r"\b(\d[\d,]*\.?\d*)(?:bps|pct|nm|mm|[BMKTxX])\b")
+# A K/M/B/T MAGNITUDE figure ("$1.43B", "482.5M", "42B"). Masked before the
+# product-name scrub (which would otherwise eat "43B" as an identifier) and
+# restored afterwards, so number_provenance sees the WHOLE token and applies
+# is_allowed_formatted to it -- the same acceptance the report gate gives it.
+_CONTEXT_MAGNITUDE_RE = re.compile(r"\$?\b\d[\d,]*\.?\d*[BMKT]\b")
+# Placeholder wrapper for a masked magnitude figure. NUL is not a prose character
+# and the payload is digits-only, so neither the unit-suffix pattern (needs a
+# suffix after the digits) nor the product-name pattern (needs a letter) touches it.
+_CONTEXT_MASK_FMT = "\x00{}\x00"
+_CONTEXT_MASK_RE = re.compile(r"\x00(\d+)\x00")
 # A product/model name: an alphanumeric run still carrying a letter AND a digit
 # AFTER unit-suffix stripping (A100, H200, GB300, HBM3E, RTX4090). The letter is
 # part of an identifier, not a data figure, so the whole token is scrubbed before
@@ -2081,29 +2425,48 @@ def _scrub_context_prose(text, module):
     """Remove context-specific CHROME before number_provenance scans the prose.
 
     Non-data token classes are stripped so they never orphan; financial shorthand
-    is UNwrapped so its number DOES trace:
+    is preserved or UNwrapped so its number DOES trace:
       * inline finding references ("(C3)" / "C3") -- citation markers into
         findings[], not figures;
-      * financial shorthand with a TRAILING unit suffix (42B, 9999M, 30x, 45pct,
-        200bps, 3nm) -- the suffix is a magnitude/unit label, but the NUMBER is a
-        real data figure that MUST trace to the bundle. Only the suffix is stripped,
-        exactly mirroring the report gate's handling of "$42B" (its _NUM_RE already
-        yields 42 and checks it); the surviving number flows into the numeric scan;
+      * K/M/B/T MAGNITUDE figures ("$1.43B", "482.5M", "42B") -- masked through the
+        product-name scrub and restored INTACT, so number_provenance applies the
+        same suffix-aware matcher the report gate uses. Before 1.2.2 the suffix was
+        stripped here and only the bare mantissa was checked, which made the two
+        gates diverge the moment the renderer began printing "$1.43B": the report
+        gate accepted it and the context gate orphaned it. The bare-mantissa
+        acceptance is not lost -- is_allowed_formatted still consults it (path 1);
+      * other unit-suffixed shorthand (30x, 45pct, 200bps, 3nm) -- the suffix is a
+        unit label, but the NUMBER is a real data figure that must trace; only the
+        suffix is stripped and the surviving number flows into the numeric scan;
       * product/model names with a letter glued to a digit (HBM3E, A100, GB300) --
-        AFTER the suffix strip above, a token still carrying BOTH a letter and a
-        digit is an identifier, not a data claim (real figures like $95.00 / 8.5% /
-        130 keep a letter-free numeric run and are untouched);
+        AFTER the mask + suffix strip above, a token still carrying BOTH a letter
+        and a digit is an identifier, not a data claim (real figures like $95.00 /
+        8.5% / 130 keep a letter-free numeric run and are untouched);
       * the module's OWN live_tape dates -- these are LLM-authored event dates,
         validated separately by context_structure (parse + <= as_of), so they are
         not checked against the bundle's date set (a live-tape event legitimately
         post-dates the snapshot's fetch dates within the as_of ceiling).
     """
     scrubbed = _CONTEXT_REF_SCRUB_RE.sub(" ", text)
-    # Unwrap unit-suffixed figures FIRST (keep the number), then scrub the residual
-    # product-name identifiers. Order matters: after "42B" -> "42", the product-name
-    # scrub sees a letter-free "42" and leaves it for provenance.
+
+    # Mask magnitude figures FIRST so the product-name scrub cannot eat them
+    # ("1.43B" -> runs "1" and "43B"; the latter carries a letter AND a digit).
+    masked = []
+
+    def _mask(match):
+        masked.append(match.group(0))
+        return _CONTEXT_MASK_FMT.format(len(masked) - 1)
+
+    scrubbed = _CONTEXT_MAGNITUDE_RE.sub(_mask, scrubbed)
+    # Unwrap the remaining unit-suffixed figures (keep the number), then scrub the
+    # residual product-name identifiers. Order matters: after "30x" -> "30", the
+    # product-name scrub sees a letter-free "30" and leaves it for provenance.
     scrubbed = _CONTEXT_UNIT_SUFFIX_RE.sub(r"\1 ", scrubbed)
     scrubbed = _CONTEXT_PRODUCT_NAME_RE.sub(" ", scrubbed)
+    # Restore the magnitude figures for the numeric scan.
+    scrubbed = _CONTEXT_MASK_RE.sub(
+        lambda m: masked[int(m.group(1))], scrubbed)
+
     live = module.get("live_tape")
     if isinstance(live, list):
         for ev in live:

@@ -110,7 +110,7 @@ Exit 0 is REQUIRED. The gate runs two checks and, on pass, stamps `qc: {"qc_pass
 
 ## Step 5 — Write `brief_context.md`
 
-Write `<bundle>/brief_context.md`, **≤200 words**: the situation in plain language (the business in a sentence, the competitive position, and what the live tape says is moving the stock now), then the **top 3 findings** (their claims + sources). This is the human-readable distillation; it cites only claims already in the module.
+Write `<bundle>/brief_context.md`, **≤200 words**: the situation in plain language (the business in a sentence, the competitive position, and what the live tape says is moving the stock now), then the **top 3 findings** (their claims + sources). Write complete sentences in plain English — the brief is read by a human in the final report. Spell out metric names, never snake_case identifiers or `->` arrows; write large magnitudes as $16.7B, never scientific notation. Round displayed floats to 2 dp (full precision stays in the JSON). This is the human-readable distillation; it cites only claims already in the module.
 
 ---
 
