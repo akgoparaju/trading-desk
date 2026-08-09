@@ -70,7 +70,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from scripts import render_report, chain as chain_mod, decision_contract
+from scripts import render_report, chain as chain_mod, decision_contract, ev_kelly
 from scripts._artifact import emit_json
 
 _WORD_CAP = 2100
@@ -983,6 +983,84 @@ def check_exit_ordering(docs):
                        f"profit_take.level {pt_level} > bull_target.level {bt_level}")
     return _result("exit_ordering", True,
                    f"profit_take.level {pt_level} <= bull_target.level {bt_level}")
+
+
+def _sign(x):
+    """-1/0/1 -- 0 is a neutral boundary, not a "side", so a zero EV never
+    reads as disagreeing with either a positive or a negative one."""
+    if x > 0:
+        return 1
+    if x < 0:
+        return -1
+    return 0
+
+
+def check_ev_scenario_agreement(docs):
+    """QC18: the composite's EV must not flip sign against coverage's own
+    DCF-scenario weighting (MU 2026-08-08 institutional QC review, N10 -- the
+    single highest-priority finding of that run: the shipped composite
+    scenario set silently re-weighted coverage's own DCF fan -- comps_high
+    promoted to the modal "base," coverage's own highest-weighted base demoted
+    to a low-probability tail renamed "cycle_break." Verified to 4dp: shipped
+    ev_at +0.0684 vs coverage's own 25/45/30-weighted ev_at -0.1554 -- two fair
+    -value distributions 26% apart, opposite signs, in the SAME bundle).
+
+    Recomputes ev_kelly.ev_at under BOTH the shipped composite scenarios
+    (module_composite.ev.scenarios) and coverage's own DCF scenario fan
+    (module_valuation_reconcile.scenarios, reshaped via
+    ev_kelly.coverage_dcf_scenarios) at the SAME entry (snapshot price.last).
+    FAILs on a sign disagreement between the two EVs (0 is a neutral boundary,
+    never a disagreement with either side). SKIPs -- never FAILs -- whenever
+    either side is unusable: no module_composite/ev.scenarios, no
+    module_valuation_reconcile or no usable scenarios within it (a
+    coverage-absent bundle must never be penalized for this), no price.last,
+    or either probability set failing to sum to 1 (malformed upstream data,
+    not this gate's failure to report)."""
+    comp = docs.get("module_composite")
+    if not isinstance(comp, dict):
+        return _result("ev_scenario_agreement", None, "SKIP: no module_composite")
+    shipped_scenarios = ((comp.get("ev") or {}).get("scenarios")) or []
+    if not shipped_scenarios:
+        return _result("ev_scenario_agreement", None, "SKIP: no ev.scenarios")
+
+    reconcile = docs.get("module_valuation_reconcile")
+    if not isinstance(reconcile, dict):
+        return _result("ev_scenario_agreement", None,
+                       "SKIP: no module_valuation_reconcile "
+                       "(coverage-absent bundle)")
+    coverage_scenarios = ev_kelly.coverage_dcf_scenarios(reconcile.get("scenarios"))
+    if not coverage_scenarios:
+        return _result("ev_scenario_agreement", None,
+                       "SKIP: module_valuation_reconcile.scenarios has no usable "
+                       "probability/dcf_value_per_share entries")
+
+    last = (docs.get("snapshot") or {}).get("price", {}).get("last")
+    if last is None:
+        return _result("ev_scenario_agreement", None, "SKIP: no snapshot price.last")
+
+    shipped_prob_sum = sum(sc.get("prob", 0) for sc in shipped_scenarios)
+    if abs(shipped_prob_sum - 1.0) > 1e-6:
+        return _result("ev_scenario_agreement", None,
+                       f"SKIP: shipped ev.scenarios probs sum {shipped_prob_sum} "
+                       "!= 1 (ev_consistency already flags this)")
+    coverage_prob_sum = sum(sc["prob"] for sc in coverage_scenarios)
+    if abs(coverage_prob_sum - 1.0) > 1e-6:
+        return _result("ev_scenario_agreement", None,
+                       f"SKIP: coverage DCF scenario probs sum {coverage_prob_sum} "
+                       "!= 1 (scenario_drivers malformed upstream)")
+
+    shipped_ev = ev_kelly.ev_at(shipped_scenarios, last)
+    coverage_ev = ev_kelly.ev_at(coverage_scenarios, last)
+
+    if _sign(shipped_ev) * _sign(coverage_ev) < 0:
+        return _result("ev_scenario_agreement", False,
+                       f"shipped ev_at {shipped_ev:.4f} vs coverage-weighted "
+                       f"ev_at {coverage_ev:.4f} disagree in sign -- two "
+                       "fair-value distributions point opposite directions in "
+                       "the same bundle")
+    return _result("ev_scenario_agreement", True,
+                   f"shipped ev_at {shipped_ev:.4f} and coverage-weighted "
+                   f"ev_at {coverage_ev:.4f} agree in sign")
 
 
 def check_strikes_in_chain(docs, bundle):
@@ -2120,6 +2198,9 @@ def run_report_qc(bundle, report_path, delta=False, previous=None):
         # G5b: the trade-plan Size row must not present deployable risk framing
         # while capital is INELIGIBLE (size_governed ⇒ capital_eligible).
         check_size_governed(report_text, docs),
+        # QC18: the composite's EV must not flip sign against coverage's own
+        # DCF-scenario weighting (MU 2026-08-08 institutional QC review, N10).
+        check_ev_scenario_agreement(docs),
     ]
 
 

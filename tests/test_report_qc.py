@@ -1506,3 +1506,181 @@ def test_exit_ordering_is_registered_in_the_non_delta_check_set_only():
     import inspect
     src = inspect.getsource(rq.run_report_qc)
     assert src.count("check_exit_ordering(docs)") == 1
+
+
+# --------------------------------------------------------------------------- #
+# QC18: check_ev_scenario_agreement -- the composite's EV must not flip sign
+# against coverage's own DCF-scenario weighting.
+#
+# WHY: MU 2026-08-08 institutional QC review, N10 (the single highest-priority
+# finding of the run): the shipped composite scenario set silently re-weighted
+# coverage's own DCF fan -- comps_high (893.24, which coverage places BELOW its
+# own spot of 920.95) was promoted to the modal 40% "base," and coverage's own
+# 45%-weighted base (542.16) was demoted to a 13% tail renamed "cycle_break."
+# Verified to 4dp at last 877.57: shipped ev_at +0.0684 vs coverage's own
+# 25/45/30 DCF-weighted ev_at -0.1554 -- two fair-value distributions 26% apart,
+# opposite signs, in the SAME bundle. The report's own blockers (EV_NOT_ROBUST,
+# VALUATION_MODEL_CONFLICT) held capital out anyway -- by luck of the conflict
+# state, not by design. This check makes the sign-disagreement itself a gate.
+#
+# Modeled exactly on check_exit_ordering: bare def returning _result(name,
+# passed, detail); None is SKIP. SKIP when module_valuation_reconcile (or its
+# usable scenarios) is absent -- a coverage-absent bundle must never FAIL this
+# gate. FAIL on a sign disagreement between the two EVs, PASS otherwise.
+# Registered in the non-delta branch of run_report_qc only.
+# --------------------------------------------------------------------------- #
+
+def _reconcile_scenarios(bear, base, bull):
+    """bear/base/bull are (probability, dcf_value_per_share) tuples -- the
+    module_valuation_reconcile.json "scenarios" shape (verbatim copy of
+    coverage/scenario_drivers.json's "scenarios")."""
+    return {"bear": {"probability": bear[0], "dcf_value_per_share": bear[1]},
+            "base": {"probability": base[0], "dcf_value_per_share": base[1]},
+            "bull": {"probability": bull[0], "dcf_value_per_share": bull[1]}}
+
+
+def _ev_scenario_agreement_docs(shipped_scenarios, last, reconcile_scenarios):
+    docs = {"module_composite": {"ev": {"scenarios": shipped_scenarios}},
+            "snapshot": {"price": {"last": last}}}
+    if reconcile_scenarios is not None:
+        docs["module_valuation_reconcile"] = {"scenarios": reconcile_scenarios}
+    return docs
+
+
+# Real MU (2026-08-08 institutional QC review, N10). Pinned from the archived
+# bundle: .../MU/2026-08-08/detail_reports_2026-08-08/scenarios.json (shipped)
+# and .../MU/coverage/scenario_drivers.json's "scenarios" block (coverage's own
+# DCF fan, verbatim-copied into the bundle's module_valuation_reconcile.json).
+# price.last 877.57 is snapshot_MU_2026-08-08.json's price.last. Pinned as
+# literals, not read from disk -- these are a handful of scalars, not the
+# large raw histories test_build_snapshot.py's QC12 fixtures skip-guard on.
+_MU_SHIPPED = [
+    {"name": "bull", "prob": 0.25, "price_target": 1439.44},
+    {"name": "base", "prob": 0.40, "price_target": 893.24},
+    {"name": "bear", "prob": 0.22, "price_target": 681.44},
+    {"name": "cycle_break", "prob": 0.13, "price_target": 542.16},
+]
+_MU_COVERAGE = _reconcile_scenarios((0.25, 261.42), (0.45, 542.16), (0.30, 1439.44))
+
+# Real AAPL (2026-08-07 institutional QC review bundle, archived at
+# .../AAPL/2026-08-07-refresh/detail_reports_2026-08-07/scenarios.json +
+# snapshot_AAPL_2026-08-07.json). Shipped ev_at reproduces to 4dp: -0.0102 at
+# price.last 312.41 -- verified directly against the bundle.
+#
+# AAPL's coverage/ directory has no scenario_drivers.json, and the archived
+# bundle has no module_valuation_reconcile.json at all: coverage's own
+# valuation_anchors.json carries the three DCF values (dcf_bear 108.69 /
+# dcf_base 154.84 / dcf_bull 250.98) but NO probability weighting on them, so
+# there is no real coverage-weighted EV to compare against for this ticker.
+# (A prior version of this fixture invented a 25/45/30 weighting over those
+# anchors and asserted the check PASSED on the resulting EV -- that weighting
+# was never measured or observed anywhere in the bundle. The real AAPL case is
+# a SKIP, not a PASS -- see test_ev_scenario_agreement_skips_on_the_real_aapl_
+# coverage_absent_case below.)
+_AAPL_SHIPPED = [
+    {"name": "bull", "prob": 0.30, "price_target": 320.89},
+    {"name": "base", "prob": 0.45, "price_target": 311.84},
+    {"name": "bear", "prob": 0.25, "price_target": 290.55},
+]
+
+
+def test_ev_scenario_agreement_fails_on_the_real_mu_inversion():
+    docs = _ev_scenario_agreement_docs(_MU_SHIPPED, 877.57, _MU_COVERAGE)
+    res = rq.check_ev_scenario_agreement(docs)
+    assert res["passed"] is False
+    assert "0.0684" in res["detail"]
+    assert "-0.1554" in res["detail"]
+
+
+def test_ev_scenario_agreement_skips_on_the_real_aapl_coverage_absent_case():
+    # AAPL has real, verified ev.scenarios (shipped ev_at -0.0102 at last
+    # 312.41) but no module_valuation_reconcile.json anywhere in its archived
+    # bundle -- coverage never weighted its own DCF fan for this ticker. The
+    # gate must SKIP rather than compare against a fabricated coverage-side EV.
+    docs = _ev_scenario_agreement_docs(_AAPL_SHIPPED, 312.41, None)
+    res = rq.check_ev_scenario_agreement(docs)
+    assert res["passed"] is None
+    assert "SKIP" in res["detail"]
+    assert "module_valuation_reconcile" in res["detail"]
+
+
+def test_ev_scenario_agreement_skips_when_module_valuation_reconcile_absent():
+    docs = _ev_scenario_agreement_docs(_MU_SHIPPED, 877.57, None)
+    res = rq.check_ev_scenario_agreement(docs)
+    assert res["passed"] is None
+    assert "SKIP" in res["detail"]
+
+
+def test_ev_scenario_agreement_skips_when_scenarios_block_absent():
+    docs = {"module_composite": {"ev": {"scenarios": _MU_SHIPPED}},
+            "snapshot": {"price": {"last": 877.57}},
+            "module_valuation_reconcile": {}}
+    res = rq.check_ev_scenario_agreement(docs)
+    assert res["passed"] is None
+    assert "SKIP" in res["detail"]
+
+
+def test_ev_scenario_agreement_skips_when_scenarios_have_no_usable_entries():
+    docs = {"module_composite": {"ev": {"scenarios": _MU_SHIPPED}},
+            "snapshot": {"price": {"last": 877.57}},
+            "module_valuation_reconcile": {"scenarios": {
+                "bear": {"probability": None, "dcf_value_per_share": 261.42}}}}
+    res = rq.check_ev_scenario_agreement(docs)
+    assert res["passed"] is None
+    assert "SKIP" in res["detail"]
+
+
+def test_ev_scenario_agreement_skips_when_module_composite_absent():
+    res = rq.check_ev_scenario_agreement({})
+    assert res["passed"] is None
+    assert "SKIP" in res["detail"]
+
+
+def test_ev_scenario_agreement_skips_when_ev_scenarios_absent():
+    docs = {"module_composite": {"ev": {}},
+            "module_valuation_reconcile": {"scenarios": _MU_COVERAGE},
+            "snapshot": {"price": {"last": 877.57}}}
+    res = rq.check_ev_scenario_agreement(docs)
+    assert res["passed"] is None
+    assert "SKIP" in res["detail"]
+
+
+def test_ev_scenario_agreement_skips_when_last_absent():
+    docs = {"module_composite": {"ev": {"scenarios": _MU_SHIPPED}},
+            "module_valuation_reconcile": {"scenarios": _MU_COVERAGE},
+            "snapshot": {}}
+    res = rq.check_ev_scenario_agreement(docs)
+    assert res["passed"] is None
+    assert "SKIP" in res["detail"]
+
+
+def test_ev_scenario_agreement_skips_when_shipped_probs_dont_sum_to_one():
+    bad_shipped = [{"name": "bull", "prob": 0.5, "price_target": 150.0},
+                   {"name": "bear", "prob": 0.6, "price_target": 80.0}]
+    docs = _ev_scenario_agreement_docs(bad_shipped, 100.0, _MU_COVERAGE)
+    res = rq.check_ev_scenario_agreement(docs)
+    assert res["passed"] is None
+    assert "SKIP" in res["detail"]
+
+
+def test_ev_scenario_agreement_both_zero_is_not_a_disagreement():
+    # A boundary EV of exactly 0 on both sides must not read as opposite signs.
+    shipped = [{"name": "flat", "prob": 1.0, "price_target": 100.0}]
+    coverage = _reconcile_scenarios((0.5, 90.0), (0.0, 100.0), (0.5, 110.0))
+    docs = _ev_scenario_agreement_docs(shipped, 100.0, coverage)
+    res = rq.check_ev_scenario_agreement(docs)
+    assert res["passed"] is True
+
+
+def test_ev_scenario_agreement_zero_vs_positive_is_not_a_disagreement():
+    shipped = [{"name": "flat", "prob": 1.0, "price_target": 110.0}]  # ev > 0
+    coverage = _reconcile_scenarios((0.5, 90.0), (0.0, 100.0), (0.5, 110.0))  # ev == 0
+    docs = _ev_scenario_agreement_docs(shipped, 100.0, coverage)
+    res = rq.check_ev_scenario_agreement(docs)
+    assert res["passed"] is True
+
+
+def test_ev_scenario_agreement_is_registered_in_the_non_delta_check_set_only():
+    import inspect
+    src = inspect.getsource(rq.run_report_qc)
+    assert src.count("check_ev_scenario_agreement(docs)") == 1

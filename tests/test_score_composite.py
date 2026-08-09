@@ -457,7 +457,16 @@ class TestO17BuildModuleGovern(unittest.TestCase):
                                 variant="strong")
         self.assertNotIn("valuation_state", doc_consistent)
         self.assertNotIn("valuation_govern", doc_consistent)
-        self.assertEqual(doc_consistent, doc_plain)
+        # ev.scenario_derivation (QC18) legitimately differs here: _FUND_CONSISTENT
+        # carries comps_low/comps_high anchors that the plain fixture lacks, so its
+        # comps_anchors_available flag flips -- an orthogonal, O17-unrelated
+        # disclosure. Strip it from both before the byte-identity check that
+        # verifies the O17 govern itself added nothing.
+        import copy
+        a, b = copy.deepcopy(doc_consistent), copy.deepcopy(doc_plain)
+        a["ev"].pop("scenario_derivation", None)
+        b["ev"].pop("scenario_derivation", None)
+        self.assertEqual(a, b)
         # And the strong variant is NOT capped (20 points), byte-identical format.
         variant_line = [s for s in doc_consistent["thesis_conviction"]["subscores"]
                         if s.startswith("variant")][0]
@@ -564,6 +573,214 @@ class TestSensitivity(unittest.TestCase):
         self.assertEqual(sens["trader"]["grade"], "B")
         self.assertAlmostEqual(sens["long-term"]["score"], 57.3, places=4)
         self.assertEqual(sens["long-term"]["grade"], "C")
+
+
+# --------------------------------------------------------------------------- #
+# QC18: build_scenario_derivation -- a SCRIPTED (no LLM judgment) disclosure of
+# how each shipped scenario relates to coverage's OWN anchors: dcf_bear/
+# dcf_base/dcf_bull (module_valuation_reconcile.json's DCF scenario fan) and
+# comps_low/comps_high (the fundamental valuation subscore's own anchors).
+#
+# WHY: MU 2026-08-08 institutional QC review, N10 (the single highest-priority
+# finding of the run): the composite's shipped scenario set silently re-weighted
+# coverage's own DCF fan -- comps_high (893.24, which coverage places BELOW its
+# own spot of 920.95) was promoted to the modal 40% "base," and coverage's own
+# 45%-weighted base (542.16) was demoted to a 13% tail renamed "cycle_break."
+# scenario_reasoning named "comps range" but never flagged either move. This
+# function makes that relationship mechanical and unmissable.
+# --------------------------------------------------------------------------- #
+
+def _fund_anchors_full(dcf_base, dcf_bear, dcf_bull, comps_low, comps_high):
+    """A fundamental module doc carrying the FULL 5-anchor valuation inputs
+    (mirrors score_fundamental._ANCHOR_REQUIRED) -- superset of
+    _fundamental_anchors (which only carries dcf_base/comps_low/comps_high for
+    the O17 govern tests)."""
+    return {
+        "skill": "fundamental", "score": 60,
+        "subscores": [
+            {"name": "valuation", "points": 12.75, "max": 17,
+             "inputs": {"anchors": {
+                 "dcf_base": dcf_base, "dcf_bear": dcf_bear, "dcf_bull": dcf_bull,
+                 "comps_low": comps_low, "comps_high": comps_high,
+             }}},
+        ],
+    }
+
+
+def _reconcile_doc(bear, base, bull):
+    """A module_valuation_reconcile.json doc carrying coverage's own DCF
+    scenario fan, keyed bear/base/bull -> (probability, dcf_value_per_share)."""
+    return {"skill": "valuation-reconcile", "scenarios": {
+        "bear": {"probability": bear[0], "dcf_value_per_share": bear[1]},
+        "base": {"probability": base[0], "dcf_value_per_share": base[1]},
+        "bull": {"probability": bull[0], "dcf_value_per_share": bull[1]},
+    }}
+
+
+# Real MU (2026-08-08 institutional QC review, N10 / archived bundle
+# .../MU/2026-08-08/detail_reports_2026-08-08/module_fundamental.json's
+# valuation subscore anchors, cross-checked against coverage/
+# scenario_drivers.json's dcf_reverse_inputs). comps_low 568.13 and
+# comps_high 893.24 are both real, measured values -- neither is filler.
+_MU_FUND_FULL = _fund_anchors_full(
+    dcf_base=542.16, dcf_bear=261.42, dcf_bull=1439.44,
+    comps_low=568.13, comps_high=893.24)
+# bear/base/bull DCF fan pinned from .../MU/coverage/scenario_drivers.json's
+# "scenarios" block (verbatim-copied into module_valuation_reconcile.json).
+_MU_RECONCILE = _reconcile_doc(
+    bear=(0.25, 261.42), base=(0.45, 542.16), bull=(0.30, 1439.44))
+# Shipped scenario set pinned from
+# .../MU/2026-08-08/detail_reports_2026-08-08/scenarios.json.
+_MU_SHIPPED_SCENARIOS = [
+    {"name": "bull", "prob": 0.25, "price_target": 1439.44},
+    {"name": "base", "prob": 0.40, "price_target": 893.24},
+    {"name": "bear", "prob": 0.22, "price_target": 681.44},
+    {"name": "cycle_break", "prob": 0.13, "price_target": 542.16},
+]
+
+# Real AAPL (2026-08-07 institutional QC review bundle). dcf_bear 108.69,
+# dcf_base 154.84, dcf_bull 250.98, comps_low 196.17, comps_high 291.22 are
+# pinned from .../AAPL/coverage/valuation_anchors.json -- verified against the
+# archived bundle. AAPL's shipped scenario set (below) is built from technical
+# levels (earnings-VWAP support, swing low) + street consensus, NOT coverage's
+# DCF/comps anchors -- none of the three shipped price_targets are expected to
+# match any anchor. AAPL's coverage/ directory has no scenario_drivers.json and
+# the bundle has no module_valuation_reconcile.json, so unlike MU there is no
+# coverage-side probability weighting to reconcile against here.
+_AAPL_FUND_FULL = _fund_anchors_full(
+    dcf_base=154.84, dcf_bear=108.69, dcf_bull=250.98,
+    comps_low=196.17, comps_high=291.22)
+_AAPL_SHIPPED_SCENARIOS = [
+    {"name": "bull", "prob": 0.30, "price_target": 320.89},
+    {"name": "base", "prob": 0.45, "price_target": 311.84},
+    {"name": "bear", "prob": 0.25, "price_target": 290.55},
+]
+
+
+class TestScenarioDerivationQC18(unittest.TestCase):
+    def _rows_by_name(self, scenarios, fundamental, reconcile):
+        d = sc.build_scenario_derivation(scenarios, fundamental, reconcile)
+        return d, {r["name"]: r for r in d["rows"]}
+
+    def test_mu_base_is_unmasked_as_coverages_comps_high(self):
+        # The headline finding: shipped "base" @ 40% IS coverage's comps_high,
+        # which carries no probability weight of its own in coverage's DCF fan.
+        _, rows = self._rows_by_name(
+            _MU_SHIPPED_SCENARIOS, _MU_FUND_FULL, _MU_RECONCILE)
+        base = rows["base"]
+        self.assertEqual(base["matched_anchor"], "comps_high")
+        self.assertEqual(base["anchor_value"], 893.24)
+        self.assertIsNone(base["coverage_probability"])
+        self.assertIn("comps_high", base["note"])
+        self.assertIn("40%", base["note"])
+
+    def test_mu_cycle_break_is_unmasked_as_coverages_45pct_base(self):
+        # The second half of the headline finding: the 13%-weighted
+        # "cycle_break" IS coverage's own base case, which coverage weights 45%.
+        _, rows = self._rows_by_name(
+            _MU_SHIPPED_SCENARIOS, _MU_FUND_FULL, _MU_RECONCILE)
+        cb = rows["cycle_break"]
+        self.assertEqual(cb["matched_anchor"], "dcf_base")
+        self.assertEqual(cb["anchor_value"], 542.16)
+        self.assertAlmostEqual(cb["coverage_probability"], 0.45)
+        self.assertIn("dcf_base", cb["note"])
+        self.assertIn("45%", cb["note"])
+        self.assertIn("13%", cb["note"])
+
+    def test_mu_bull_matches_dcf_bull_with_probability_delta_disclosed(self):
+        _, rows = self._rows_by_name(
+            _MU_SHIPPED_SCENARIOS, _MU_FUND_FULL, _MU_RECONCILE)
+        bull = rows["bull"]
+        self.assertEqual(bull["matched_anchor"], "dcf_bull")
+        self.assertAlmostEqual(bull["anchor_value"], 1439.44)
+        self.assertAlmostEqual(bull["coverage_probability"], 0.30)
+
+    def test_mu_bear_matches_no_coverage_anchor(self):
+        _, rows = self._rows_by_name(
+            _MU_SHIPPED_SCENARIOS, _MU_FUND_FULL, _MU_RECONCILE)
+        bear = rows["bear"]
+        self.assertIsNone(bear["matched_anchor"])
+        self.assertIsNone(bear["anchor_value"])
+        self.assertIsNone(bear["coverage_probability"])
+
+    def test_mu_metadata_flags_both_sources_available(self):
+        d, _ = self._rows_by_name(
+            _MU_SHIPPED_SCENARIOS, _MU_FUND_FULL, _MU_RECONCILE)
+        self.assertTrue(d["comps_anchors_available"])
+        self.assertTrue(d["coverage_dcf_scenarios_available"])
+        self.assertEqual(len(d["rows"]), 4)
+
+    def test_aapl_real_numbers_show_no_anchor_overlap(self):
+        # AAPL's shipped set is technical/consensus-anchored, not valuation-
+        # anchored -- a genuine, informative "no conflict" case (contrast to MU).
+        d, rows = self._rows_by_name(
+            _AAPL_SHIPPED_SCENARIOS, _AAPL_FUND_FULL, None)
+        for name in ("bull", "base", "bear"):
+            self.assertIsNone(rows[name]["matched_anchor"], name)
+            self.assertIsNone(rows[name]["coverage_probability"], name)
+        self.assertTrue(d["comps_anchors_available"])
+        self.assertFalse(d["coverage_dcf_scenarios_available"])
+
+    def test_degrades_gracefully_when_both_sources_absent(self):
+        d, rows = self._rows_by_name(
+            _MU_SHIPPED_SCENARIOS, {"skill": "fundamental", "score": 60}, None)
+        self.assertFalse(d["comps_anchors_available"])
+        self.assertFalse(d["coverage_dcf_scenarios_available"])
+        for row in rows.values():
+            self.assertIsNone(row["matched_anchor"])
+        self.assertEqual(len(d["rows"]), 4)
+
+    def test_tolerance_boundary_matches_at_edge_not_beyond(self):
+        scenarios = [
+            {"name": "at_edge", "prob": 0.5, "price_target": 542.165},
+            {"name": "beyond_edge", "prob": 0.5, "price_target": 542.17},
+        ]
+        _, rows = self._rows_by_name(scenarios, _MU_FUND_FULL, _MU_RECONCILE)
+        self.assertEqual(rows["at_edge"]["matched_anchor"], "dcf_base")
+        self.assertIsNone(rows["beyond_edge"]["matched_anchor"])
+
+    def test_never_mutates_the_shipped_scenario_set(self):
+        # build_scenario_derivation is a pure disclosure -- the shipped scenario
+        # dicts passed in must come back byte-identical (no price/prob rewrite).
+        import copy
+        before = copy.deepcopy(_MU_SHIPPED_SCENARIOS)
+        sc.build_scenario_derivation(_MU_SHIPPED_SCENARIOS, _MU_FUND_FULL,
+                                     _MU_RECONCILE)
+        self.assertEqual(_MU_SHIPPED_SCENARIOS, before)
+
+
+class TestScenarioDerivationInBuildModule(unittest.TestCase):
+    """build_module injects scenario_derivation into the ev block without
+    touching the shipped scenario set, ev_at_current, or any score."""
+
+    _SNAP = {"meta": {"ticker": "MU", "as_of_utc": "2026-07-16T00:00:00Z"},
+             "price": {"last": 877.57}}
+
+    def test_scenario_derivation_present_and_correct_with_reconcile_doc(self):
+        mods = _modules(fundamental=_MU_FUND_FULL)
+        doc = sc.build_module(
+            self._SNAP, mods, _MU_SHIPPED_SCENARIOS, "reasoning", "balanced",
+            **_FLAGS, entry_levels=[], valuation_reconcile_doc=_MU_RECONCILE)
+        deriv = doc["ev"]["scenario_derivation"]
+        by_name = {r["name"]: r for r in deriv["rows"]}
+        self.assertEqual(by_name["base"]["matched_anchor"], "comps_high")
+        self.assertEqual(by_name["cycle_break"]["matched_anchor"], "dcf_base")
+        # the shipped scenario set / EV itself is untouched by the disclosure.
+        self.assertEqual(doc["ev"]["scenarios"], _MU_SHIPPED_SCENARIOS)
+        self.assertAlmostEqual(doc["ev"]["ev_at_current"], 0.0684, places=4)
+
+    def test_scenario_derivation_present_and_all_none_without_reconcile_doc(self):
+        # Backward-compatible default: no valuation_reconcile_doc kwarg at all
+        # (existing call sites) -- scenario_derivation still present, degraded.
+        mods = _modules(fundamental={"skill": "fundamental", "score": 60})
+        doc = sc.build_module(
+            self._SNAP, mods, _SCENARIOS, "r", "balanced", **_FLAGS,
+            entry_levels=[])
+        deriv = doc["ev"]["scenario_derivation"]
+        self.assertFalse(deriv["comps_anchors_available"])
+        self.assertFalse(deriv["coverage_dcf_scenarios_available"])
+        for row in deriv["rows"]:
+            self.assertIsNone(row["matched_anchor"])
 
 
 # --------------------------------------------------------------------------- #

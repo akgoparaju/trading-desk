@@ -707,6 +707,149 @@ def build_ev_block(scenarios, scenario_reasoning, last, profile,
 
 
 # --------------------------------------------------------------------------- #
+# QC18: scenario_derivation -- a SCRIPTED (no LLM judgment) disclosure of how
+# each shipped scenario's price_target relates to coverage's OWN anchors.
+#
+# WHY: MU 2026-08-08 institutional QC review, N10 (the single highest-priority
+# finding of the run): the composite's shipped scenario set silently re-weighted
+# coverage's own DCF fan -- comps_high (which coverage places BELOW its own
+# spot) was promoted to the modal "base" scenario, and coverage's own
+# highest-weighted base case was demoted to a low-probability tail renamed
+# "cycle_break". scenario_reasoning described the set without ever flagging
+# either move. This function makes the relationship mechanical: for each
+# shipped scenario it names which coverage anchor (if any) its price_target
+# matches, and the probability coverage assigned to that same value -- so a
+# reader (and report_qc's blocking ev_scenario_agreement gate, QC18) sees the
+# re-weighting directly instead of having to reconstruct it by hand.
+# --------------------------------------------------------------------------- #
+
+# Prices in this codebase are always authored/rendered to 2dp
+# (render_report._fmt_price). A gap smaller than half a cent between a shipped
+# price_target and a coverage anchor can only be float round-trip noise from
+# carrying the SAME literal number through JSON -- never two independently
+# -derived anchors (a DCF scenario vs a comps bound, or two different DCF
+# scenarios) that happen to coincide to the sub-cent by chance. 0.005 is
+# therefore tight enough to never cross-match two genuinely distinct anchors
+# (every real MU/AAPL anchor pair here is $9+ apart) yet loose enough to
+# survive that round-trip noise.
+_ANCHOR_MATCH_TOL = 0.005
+
+# Anchors are checked in this fixed order so a coincidental tie between two
+# anchors (never observed in the real fixtures) resolves deterministically.
+_ANCHOR_CHECK_ORDER = ("dcf_bear", "dcf_base", "dcf_bull", "comps_low", "comps_high")
+
+
+def _comps_anchors(fundamental):
+    """comps_low/comps_high from the fundamental valuation subscore's
+    ``inputs.anchors`` -- the SAME leaf ``valuation_reconcile._valuation_anchors``
+    reads. A local re-derivation rather than an import of that (private,
+    underscore-prefixed) helper, mirroring this project's existing convention
+    of independently re-deriving a shared formula across modules instead of
+    reaching into another module's internals (see score_risk.py's local copy of
+    score_fundamental._ANCHOR_REQUIRED).
+
+    Returns {"comps_low", "comps_high"} or None when the anchors block, or
+    either value, is absent/non-numeric.
+    """
+    if not isinstance(fundamental, dict):
+        return None
+    anchors = None
+    for sub in fundamental.get("subscores") or []:
+        if isinstance(sub, dict) and sub.get("name") == "valuation":
+            inputs = sub.get("inputs")
+            anchors = inputs.get("anchors") if isinstance(inputs, dict) else None
+            break
+    if not isinstance(anchors, dict):
+        return None
+    lo, hi = anchors.get("comps_low"), anchors.get("comps_high")
+    is_num = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool)
+    if not (is_num(lo) and is_num(hi)):
+        return None
+    return {"comps_low": lo, "comps_high": hi}
+
+
+def _pct(x):
+    return f"{x:.0%}" if isinstance(x, (int, float)) and not isinstance(x, bool) else "n/a"
+
+
+def _derivation_note(name, price_target, prob, matched_anchor, coverage_probability):
+    if matched_anchor is None:
+        return (f"{name} ({_fmt(price_target)}) matches none of coverage's anchors "
+                f"(dcf_bear/dcf_base/dcf_bull/comps_low/comps_high) within "
+                f"${_ANCHOR_MATCH_TOL:.3f}.")
+    if coverage_probability is None:
+        return (f"{name} ({_fmt(price_target)}) matches coverage's {matched_anchor} "
+                f"-- a comps bound coverage assigns no probability weight; this "
+                f"scenario set weights it {_pct(prob)} here.")
+    return (f"{name} ({_fmt(price_target)}) matches coverage's {matched_anchor}, "
+            f"which coverage weights {_pct(coverage_probability)} -- this scenario "
+            f"set weights it {_pct(prob)} here.")
+
+
+def build_scenario_derivation(scenarios, fundamental, valuation_reconcile_doc) -> dict:
+    """For each shipped scenario, mechanically name whether its price_target
+    matches one of coverage's OWN anchors -- dcf_bear/dcf_base/dcf_bull
+    (module_valuation_reconcile.json's DCF scenario fan, itself copied verbatim
+    from coverage/scenario_drivers.json) or comps_low/comps_high (the SAME
+    fundamental valuation anchors score_fundamental / valuation_reconcile
+    already consume) -- within $0.005 (``_ANCHOR_MATCH_TOL``), and disclose the
+    probability THIS scenario set assigns vs the probability coverage assigned
+    to the same value (None for a comps match -- a comps bound carries no
+    probability weight in coverage's DCF fan).
+
+    Pure disclosure: never changes the shipped scenario set, ev_at_current, or
+    any score. Degrades gracefully -- absent fundamental anchors and/or absent
+    coverage DCF scenarios still return a full row per scenario with
+    matched_anchor null, so ``ev.scenario_derivation`` is always present.
+    """
+    comps = _comps_anchors(fundamental)
+    reconcile_scenarios = (valuation_reconcile_doc.get("scenarios")
+                           if isinstance(valuation_reconcile_doc, dict) else None)
+    coverage_scenarios = ev_kelly.coverage_dcf_scenarios(reconcile_scenarios)
+    coverage_by_name = {sc["name"]: sc for sc in coverage_scenarios}
+
+    candidates = []
+    for anchor_name in _ANCHOR_CHECK_ORDER:
+        if anchor_name.startswith("dcf_"):
+            cov = coverage_by_name.get(anchor_name)
+            if cov is not None:
+                candidates.append((anchor_name, cov["price_target"], cov["prob"]))
+        elif comps is not None:
+            candidates.append((anchor_name, comps[anchor_name], None))
+
+    rows = []
+    for scen in scenarios:
+        name = scen.get("name")
+        price_target = scen.get("price_target")
+        prob = scen.get("prob")
+        matched_anchor = anchor_value = coverage_probability = None
+        if isinstance(price_target, (int, float)) and not isinstance(price_target, bool):
+            for anchor_name, value, cov_prob in candidates:
+                if abs(price_target - value) <= _ANCHOR_MATCH_TOL:
+                    matched_anchor, anchor_value, coverage_probability = (
+                        anchor_name, value, cov_prob)
+                    break
+        rows.append({
+            "name": name,
+            "price_target": price_target,
+            "prob": prob,
+            "matched_anchor": matched_anchor,
+            "anchor_value": _clean(anchor_value),
+            "coverage_probability": _clean(coverage_probability),
+            "note": _derivation_note(name, price_target, prob, matched_anchor,
+                                     coverage_probability),
+        })
+
+    return {
+        "derivation_version": "scenario-derivation-qc18-v1.0.0",
+        "anchor_match_tolerance": _ANCHOR_MATCH_TOL,
+        "comps_anchors_available": comps is not None,
+        "coverage_dcf_scenarios_available": bool(coverage_scenarios),
+        "rows": rows,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Sensitivity: recompute the FULL composite per profile (EV re-banded per hurdle).
 # --------------------------------------------------------------------------- #
 
@@ -781,13 +924,19 @@ def build_module(snapshot, module_scores, scenarios, scenario_reasoning, profile
                  variant, variant_justification,
                  catalyst_clarity, catalyst_clarity_justification,
                  invalidation, invalidation_justification,
-                 entry_levels, custom_profiles=None, custom_label=None) -> dict:
+                 entry_levels, custom_profiles=None, custom_label=None,
+                 valuation_reconcile_doc=None) -> dict:
     """Build the full module_composite.json document from parsed inputs.
 
     ``custom_profiles``/``custom_label`` come from a --weights-config; when the
     selected profile is customized the composite is weighted with the custom column
     and the doc's ``weight_set`` records the CUSTOM label. The ``dimensions`` rows
     carry the weights ACTUALLY used either way.
+
+    ``valuation_reconcile_doc`` (QC18, optional -- default None, byte-compatible
+    with every existing call site) is the parsed module_valuation_reconcile.json,
+    when present in the bundle. It feeds ONLY the ev.scenario_derivation
+    disclosure (build_scenario_derivation) -- it never touches a score.
     """
     price = snapshot.get("price", {}) if isinstance(snapshot, dict) else {}
     meta = snapshot.get("meta", {}) if isinstance(snapshot, dict) else {}
@@ -820,6 +969,10 @@ def build_module(snapshot, module_scores, scenarios, scenario_reasoning, profile
         composite["score"], valuation_state)
 
     ev = build_ev_block(scenarios, scenario_reasoning, last, profile, entry_levels)
+    # QC18: mechanical disclosure of how the shipped scenarios relate to
+    # coverage's own DCF/comps anchors (never changes ev_at_current or a score).
+    ev["scenario_derivation"] = build_scenario_derivation(
+        scenarios, module_scores.get("fundamental"), valuation_reconcile_doc)
     sensitivity = build_sensitivity(
         module_scores, scenarios, last,
         variant, variant_justification,
@@ -1093,12 +1246,20 @@ def main(argv=None):
 
     entry_levels = args.entry_level or []
 
+    # QC18 (optional, degrade-gracefully): coverage's own DCF scenario fan, when
+    # the O17 valuation-reconcile step has already run for this bundle. Feeds
+    # ONLY the ev.scenario_derivation disclosure -- absent -> that block still
+    # renders with matched_anchor null throughout, never a hard error.
+    valuation_reconcile_doc = _load_module(
+        args.bundle, "module_valuation_reconcile.json")
+
     doc = build_module(
         snapshot, module_scores, scenarios, args.scenario_reasoning, args.profile,
         args.variant, args.variant_justification,
         args.catalyst_clarity, args.catalyst_clarity_justification,
         args.invalidation, args.invalidation_justification,
-        entry_levels, custom_profiles=custom_profiles, custom_label=custom_label)
+        entry_levels, custom_profiles=custom_profiles, custom_label=custom_label,
+        valuation_reconcile_doc=valuation_reconcile_doc)
 
     out = args.out or os.path.join(args.bundle, "module_composite.json")
     emit_json(doc, out)

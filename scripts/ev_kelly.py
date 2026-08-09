@@ -102,6 +102,59 @@ def kelly(scenarios, entry_price) -> dict:
     }
 
 
+# --------------------------------------------------------------------------- #
+# QC18: adapt coverage's own DCF scenario fan into the canonical scenario shape.
+# --------------------------------------------------------------------------- #
+
+# The three roles coverage's DCF fan is keyed by (module_valuation_reconcile.json's
+# "scenarios" block -- itself a verbatim copy of coverage/scenario_drivers.json's
+# "scenarios" -- a DIFFERENT on-disk shape than the ev_kelly scenario contract:
+# {"bear"|"base"|"bull": {"probability", "dcf_value_per_share"}} rather than a
+# list of {"name","prob","price_target"}).
+_COVERAGE_DCF_ROLES = ("bear", "base", "bull")
+
+
+def _is_num(x) -> bool:
+    """True for a real (non-bool) int/float."""
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
+def coverage_dcf_scenarios(reconcile_scenarios) -> list:
+    """Reshape coverage's own DCF scenario fan into the canonical ev_kelly
+    scenario list ``[{"name","prob","price_target"}, ...]``.
+
+    ``reconcile_scenarios`` is ``module_valuation_reconcile.json["scenarios"]``
+    (or the equivalent already-parsed dict): keyed "bear"/"base"/"bull" ->
+    {"probability", "dcf_value_per_share"}. This is the ONE place that performs
+    this reshape -- score_composite's scenario_derivation disclosure and
+    report_qc's ev_scenario_agreement gate (QC18) both call it, so they read the
+    SAME coverage EV off the SAME conversion.
+
+    A role is skipped (never guessed) when it is absent, non-dict, or either
+    field is missing/non-numeric. Output names are prefixed ``dcf_<role>``
+    (``dcf_bear``/``dcf_base``/``dcf_bull``) so they read unambiguously next to
+    a comps anchor. Returns ``[]`` (not an error) when nothing usable is
+    present, when ``reconcile_scenarios`` is not a dict, or when it is empty --
+    callers treat an empty list as "no usable coverage scenarios".
+
+    Does NOT validate that the extracted probabilities sum to 1.0 -- callers
+    that need that gate (e.g. an EV computation) check it themselves, exactly
+    like ``ev_at`` doesn't validate probs either.
+    """
+    if not isinstance(reconcile_scenarios, dict):
+        return []
+    out = []
+    for role in _COVERAGE_DCF_ROLES:
+        node = reconcile_scenarios.get(role)
+        if not isinstance(node, dict):
+            continue
+        prob = node.get("probability")
+        value = node.get("dcf_value_per_share")
+        if _is_num(prob) and _is_num(value):
+            out.append({"name": f"dcf_{role}", "prob": prob, "price_target": value})
+    return out
+
+
 def size_recommendation(f_star, profile, binary_event_within_30d: bool) -> dict:
     """Cap a full-Kelly fraction into a recommended position size.
 
