@@ -1050,9 +1050,25 @@ def build_technicals(rows, series_source=None, next_earnings_date=None,
 # scripts/; coverage/valuation.md's WACC beta is hand-authored prose copied
 # into scenario_drivers.json.dcf_reverse_inputs.wacc and read only as an
 # opaque number by valuation_reconcile.py / coverage_qc.py).
+#
+# Return-basis change: a 24-combination sweep (6 windows x log/simple x
+# adjusted/unadjusted close, 16 tickers) against Alpha Vantage's published
+# overview.Beta found (a) 5y-monthly is the right window and (b) SIMPLE
+# returns fit best (median abs error 0.0114 vs 0.0183 for the log-return
+# variant this used to compute). The same sweep found AV's beta is a RAW
+# (non-Blume-adjusted) 5y-monthly simple-return estimate (OLS of AV on our
+# raw beta: slope 0.9725, intercept 0.0415, R^2 0.9957) -- which is why
+# beta_vendor now agrees closely with this value on most names. beta_vendor
+# remains an unreconciled counterparty: it is never blended into, or used as
+# a fallback for, the scored beta.
 _BETA_BASIS_NOTE = (
-    "This is the single SCORED beta (5y monthly vs SPY, feeding score_risk's "
-    "volatility-state banding). Coverage's WACC beta (coverage/valuation.md, "
+    "This is the single SCORED beta (5y monthly SIMPLE returns vs SPY, "
+    "feeding score_risk's volatility-state banding). Alpha Vantage's "
+    "overview.Beta was measured (16-ticker study) to be a RAW, non-Blume-"
+    "adjusted 5y-monthly simple-return beta, which is why beta_vendor now "
+    "agrees closely with this value on most names -- it remains an "
+    "unreconciled counterparty, never a fallback or blend input. Coverage's "
+    "WACC beta (coverage/valuation.md, "
     "scenario_drivers.json.dcf_reverse_inputs.wacc) is authored independently "
     "by the analyst and is NOT reconciled against this value anywhere in code."
 )
@@ -1072,10 +1088,13 @@ def build_benchmark(stock_rows, spy_rows, sector_rows=None, sector_etf=None,
     absence: missing sector data drops the sector benchmark, never fails).
 
     QC5: beta/corr are a STREET-STANDARD 5-year MONTHLY estimate (60 monthly
-    log-returns vs SPY, ``indicators.beta_corr_monthly``), replacing the prior
-    unsliced full-daily-history beta (~26y of daily returns on a long-listed
-    name -- see docs/QC_REMEDIATION_TRACKER.md QC5). ``beta_basis`` discloses
-    the method, observation count, window, and benchmark symbol.
+    SIMPLE returns vs SPY, ``indicators.beta_corr_monthly``), replacing the
+    prior unsliced full-daily-history beta (~26y of daily returns on a
+    long-listed name -- see docs/QC_REMEDIATION_TRACKER.md QC5). ``beta_basis``
+    discloses the method, observation count, window, benchmark symbol, and
+    return basis (``return_basis: "simple"`` -- a 24-combination sweep found
+    simple returns fit AV's published beta better than the log-return
+    variant this used to compute; see ``indicators.beta_corr_monthly``).
     ``beta_n_days`` KEEPS its pre-existing meaning of CALENDAR DAYS spanned by
     the estimation window (NOT the observation count) -- score_risk.py's
     ``_MIN_BETA_N_DAYS`` confidence gate reads it and must keep passing.
@@ -1100,6 +1119,7 @@ def build_benchmark(stock_rows, spy_rows, sector_rows=None, sector_etf=None,
             "window_end": monthly["window_end"],
             "benchmark_symbol": "SPY",
             "frequency": "monthly",
+            "return_basis": "simple",
             "degraded": monthly["degraded"],
             "note": _BETA_BASIS_NOTE,
         }
@@ -1121,6 +1141,7 @@ def build_benchmark(stock_rows, spy_rows, sector_rows=None, sector_etf=None,
             "window_end": None,
             "benchmark_symbol": "SPY",
             "frequency": "monthly",
+            "return_basis": "simple",
             "degraded": True,
             "degraded_reason": (
                 f"only {max(common_n - 1, 0)} common monthly observations "

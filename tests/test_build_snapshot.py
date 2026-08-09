@@ -1397,8 +1397,9 @@ class TestQCGate(unittest.TestCase):
         # O15 added check_security_master (10th check); QC4 added
         # check_net_cash_vendor_signature (11th, disclosure-only); QC1 added
         # check_forward_pe_crossvendor (12th); QC3 added check_eps (13th) and
-        # check_eps_quarterly_shares (14th).
-        self.assertTrue(len(snap["meta"]["qc"]["checks"]) == 14)
+        # check_eps_quarterly_shares (14th); post-QC1 added
+        # check_beta_crossvendor (15th, blocking).
+        self.assertTrue(len(snap["meta"]["qc"]["checks"]) == 15)
 
     def test_gate_fails_on_corrupt_mktcap(self):
         # G1: ratio must be OUTSIDE the multi-class band (0.15, 1.0) to fail.
@@ -3033,6 +3034,27 @@ class TestQC5MonthlyBetaWiring(unittest.TestCase):
         self.assertNotEqual(bm["beta_n_days"], bm["beta_n_obs"])
         self.assertIsNotNone(bm["beta"])
         self.assertIsNotNone(bm["corr"])
+
+    def test_beta_basis_discloses_return_type_and_vendor_raw_note(self):
+        # Ratified change: beta_corr_monthly now uses SIMPLE returns, and
+        # the disclosed basis must say so, plus explain why beta_vendor
+        # (AV's overview.Beta, measured as a RAW/non-Blume 5y-monthly
+        # simple-return beta) now agrees closely -- it remains an
+        # unreconciled counterparty, never a fallback or blend input.
+        from scripts import build_snapshot as bs
+        stock = self._dated_rows(70, seed=11, start=100.0)
+        spy = self._dated_rows(70, seed=22, start=400.0)
+        bm = bs.build_benchmark(stock, spy, overview={"Beta": "1.30"})
+        self.assertEqual(bm["beta_basis"]["return_basis"], "simple")
+        self.assertIn("raw", bm["beta_basis"]["note"].lower())
+        self.assertIn("WACC", bm["beta_basis"]["note"])
+
+    def test_beta_basis_return_type_present_even_when_beta_withheld(self):
+        from scripts import build_snapshot as bs
+        stock = self._dated_rows(10, seed=11, start=100.0)
+        spy = self._dated_rows(10, seed=22, start=400.0)
+        bm = bs.build_benchmark(stock, spy)
+        self.assertEqual(bm["beta_basis"]["return_basis"], "simple")
 
     def test_degraded_short_history_still_reports_a_beta(self):
         from scripts import build_snapshot as bs

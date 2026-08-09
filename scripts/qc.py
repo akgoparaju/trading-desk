@@ -34,6 +34,20 @@ _PC_TOL = 0.15              # |pc_full_chain - pc_realtime| max spread
 # catch MU's (125.0% delta) -- see check_forward_pe_crossvendor docstring.
 _PE_FWD_CROSSVENDOR_TOL = 0.25
 
+# Post-QC1: benchmark.beta vs benchmark.beta_vendor (AV overview.Beta) --
+# HYBRID tolerance. Fails only when BOTH the relative delta (vs the vendor
+# figure) exceeds 25% AND the absolute delta exceeds 0.15. A pure relative
+# tolerance is fragile at low beta (a real name's beta is 0.231, where a
+# 0.05 absolute miss alone is a ~22% relative miss -- material-looking but
+# immaterial in absolute terms); a pure absolute tolerance is fragile at
+# high beta. Measured relative deltas (simple-return 5y-monthly vs AV,
+# 16-ticker study): 15 of 16 names land within 4%; exactly one -- AT&T at
+# 45.1% (ours 0.229 vs AV 0.417, absolute 0.188) -- exceeds BOTH legs. That
+# one is a TRUE POSITIVE (see check_beta_crossvendor docstring), which is
+# why this check is BLOCKING rather than disclosure-only.
+_BETA_CROSSVENDOR_REL_TOL = 0.25
+_BETA_CROSSVENDOR_ABS_TOL = 0.15
+
 # QC3 leg A / D1-REGRESSION: three-way TTM EPS reconciliation (vendor
 # eps_ttm vs eps_ttm_computed [sum of 4 reportedEPS] vs eps_ttm_from_ni [net
 # income TTM / latest-quarter shares]) -- DISCLOSURE-ONLY (see check_eps
@@ -384,6 +398,57 @@ def check_forward_pe_crossvendor(s):
     return _result("check_forward_pe_crossvendor", passed,
                    f"pe_fwd {pe_fwd:.4g} vs vendor ForwardPE {pe_overview_fwd:.4g}: "
                    f"{diff:.2%} diff (tol {_PE_FWD_CROSSVENDOR_TOL:.0%})")
+
+
+def check_beta_crossvendor(s):
+    """benchmark.beta vs benchmark.beta_vendor (AV overview.Beta) -- BLOCKING.
+
+    QC1 gave forward-P/E a blocking cross-vendor leg (check_forward_pe_
+    crossvendor above); beta had none until now, despite beta_vendor being
+    ingested and compared to nothing.
+
+    HYBRID tolerance, deliberately: fails only when BOTH the relative delta
+    (vs the vendor figure, matching check_forward_pe_crossvendor's
+    convention of dividing by the vendor's own number) exceeds 25% AND the
+    absolute delta exceeds 0.15. A pure relative tolerance is fragile at low
+    beta -- a real name's beta is 0.231, where a 0.05 absolute miss alone is
+    a ~22% relative miss, which would look alarming under a tight relative
+    threshold despite being immaterial in absolute terms. A pure absolute
+    tolerance is fragile at high beta for the mirror-image reason. Measured
+    relative deltas with simple returns across a 16-ticker study: 15 of 16
+    land within 4% (NVDA 0.0%, INTC 0.04%, AAPL 0.5%, JPM 0.5%, TSLA 0.7%,
+    MU 0.8%, MSFT 1.0%, GOOG 1.8%, WMT 2.0%, PG 2.1%, UNH 2.2%, COHR 2.3%,
+    KO 2.6%, JNJ 3.5%, PLTR 3.8%) and exactly one fires: T (AT&T) at 45.1%
+    (ours 0.229 vs AV 0.417, absolute 0.188).
+
+    T is a TRUE POSITIVE, not a false alarm -- traced to the April-2022
+    WarnerMedia/Discovery spinoff, which AV encodes as split_coefficient
+    1.324 on 2022-04-11 (a ~19% one-day drop recorded as a synthetic
+    split). That artifact depresses OUR covariance-based beta; AT&T's real
+    beta is around 0.5-0.6, so OUR number is the corrupted one. This check
+    is therefore a genuine correctness signal about our own value, which is
+    why it is BLOCKING rather than disclosure-only (unlike check_eps, where
+    the measured divergences were structural vendor-basis differences
+    rather than errors in our number). SKIPPED when either value is absent
+    or non-positive (beta comparison not meaningful).
+    """
+    bm = _get(s, "benchmark")
+    beta = _get(bm, "beta")
+    beta_vendor = _get(bm, "beta_vendor")
+    if not (_is_num(beta) and _is_num(beta_vendor)):
+        return _result("check_beta_crossvendor", None,
+                       "SKIP: beta or beta_vendor absent/non-numeric")
+    if beta <= 0 or beta_vendor <= 0:
+        return _result("check_beta_crossvendor", None,
+                       "SKIP: beta or beta_vendor not > 0 (beta comparison n/m)")
+    abs_diff = abs(beta - beta_vendor)
+    rel_diff = abs_diff / abs(beta_vendor)
+    passed = not (rel_diff > _BETA_CROSSVENDOR_REL_TOL and abs_diff > _BETA_CROSSVENDOR_ABS_TOL)
+    return _result("check_beta_crossvendor", passed,
+                   f"beta {beta:.4g} vs vendor Beta {beta_vendor:.4g}: "
+                   f"{rel_diff:.2%} relative / {abs_diff:.4f} absolute diff "
+                   f"(fails only if BOTH > {_BETA_CROSSVENDOR_REL_TOL:.0%} relative "
+                   f"AND > {_BETA_CROSSVENDOR_ABS_TOL:g} absolute)")
 
 
 def check_eps(s):
@@ -999,6 +1064,7 @@ ALL_CHECKS = [
     check_price_spotcheck,
     check_pe_arithmetic,
     check_forward_pe_crossvendor,
+    check_beta_crossvendor,
     check_eps,
     check_eps_quarterly_shares,
     check_net_cash,

@@ -133,10 +133,33 @@ def log_returns(values: list[float]) -> list[float]:
 
     Formula: r_t = ln(values[t] / values[t-1]) for t = 1..len-1.
     Result length = len(values) - 1 (empty if fewer than 2 values).
+
+    Correct basis for VOLATILITY (``realized_vol``): log returns are
+    time-additive, which is what a period-scaled (sqrt(252)) annualization
+    of a standard deviation requires. Do NOT use this for beta -- see
+    ``simple_returns``.
     """
     if len(values) < 2:
         return []
     return [math.log(values[i] / values[i - 1]) for i in range(1, len(values))]
+
+
+def simple_returns(values: list[float]) -> list[float]:
+    """Simple (arithmetic) returns.
+
+    Formula: r_t = values[t] / values[t-1] - 1 for t = 1..len-1.
+    Result length = len(values) - 1 (empty if fewer than 2 values).
+
+    Correct basis for BETA (``beta_corr_monthly``): beta is a market-model
+    regression coefficient feeding a LINEAR pricing model (r_stock = alpha +
+    beta * r_bench), and simple returns are what aggregate linearly across a
+    portfolio -- log returns compound multiplicatively and are a
+    mis-specification for a linear regression coefficient. Log returns
+    remain correct for volatility; see ``log_returns``.
+    """
+    if len(values) < 2:
+        return []
+    return [values[i] / values[i - 1] - 1 for i in range(1, len(values))]
 
 
 def realized_vol(values: list[float], n: int) -> float | None:
@@ -227,33 +250,10 @@ def realized_vol_ex_earnings(closes, dates, earnings_dates, n) -> float | None:
     return statistics.stdev(window) * _ANNUALIZATION
 
 
-def beta_corr(stock: list[float], bench: list[float]) -> dict | None:
-    """Beta and correlation of ``stock`` vs ``bench``.
-
-    Align by taking the last k prices of each, k = min(len(stock), len(bench)).
-    Compute daily log-returns, then:
-        beta = covariance(stock_r, bench_r) / variance(bench_r)  (sample stats)
-        corr = correlation(stock_r, bench_r)                     (Pearson)
-        n_days = k - 1.
-    Returns {"beta", "corr", "n_days"}, or None if k < 60.
-    """
-    k = min(len(stock), len(bench))
-    if k < 60:
-        return None
-    s = stock[-k:]
-    b = bench[-k:]
-    s_r = log_returns(s)
-    b_r = log_returns(b)
-    var_b = statistics.variance(b_r)
-    beta = statistics.covariance(s_r, b_r) / var_b
-    corr = statistics.correlation(s_r, b_r)
-    return {"beta": beta, "corr": corr, "n_days": k - 1}
-
-
 # QC5: street-standard beta window -- 5 years of MONTHLY returns (61 month-end
-# observations -> 60 log-returns), replacing the previous unsliced full-daily-
-# history beta_corr call in build_snapshot.build_benchmark (which could run to
-# ~26 years of daily data on a long-listed name). BETA_MONTHLY_MIN_OBS is the
+# observations -> 60 returns), replacing the previous unsliced full-daily-
+# history beta calculation in build_snapshot.build_benchmark (which could run
+# to ~26 years of daily data on a long-listed name). BETA_MONTHLY_MIN_OBS is the
 # floor below which a monthly beta is withheld rather than reported from an
 # unreliably short window (a beta's standard error scales ~1/sqrt(n); 24
 # monthly returns -- 2 years -- is a conservative floor well under the 60-obs
@@ -297,9 +297,19 @@ def beta_corr_monthly(stock_rows: list[dict], bench_rows: list[dict],
     closes joined by CALENDAR MONTH -- not exact date, since the stock's and
     benchmark's own month-end trading day can differ by a session -- over the
     trailing ``years`` years (target ``years*12 + 1`` common months -> 60
-    monthly log-returns for the 5y default). Uses the SAME sample cov/var
-    statistics as ``beta_corr`` (kept unchanged; this is a distinct,
-    dated-input sibling for a different sampling frequency).
+    monthly returns for the 5y default).
+
+    RETURN BASIS: SIMPLE (arithmetic) returns, not log -- see
+    ``simple_returns`` for the rationale (beta is a linear market-model
+    regression coefficient; simple returns are what aggregate linearly, log
+    returns are a mis-specification here). This was measured against Alpha
+    Vantage's published ``overview.Beta`` across a 24-combination sweep (6
+    windows x log/simple x adjusted/unadjusted, 16 tickers): 5y-monthly/
+    adjusted/simple ranks #1 (median abs error 0.0114, 14/16 tickers within
+    +/-0.05); the log-return variant this function used to compute ranks #2
+    (median abs error 0.0183, 11/16). ``realized_vol`` correctly keeps log
+    returns -- volatility annualization needs the time-additive property log
+    returns have and simple returns don't; do not change that function.
 
     Degrades gracefully: with fewer than ``years*12`` common months but at
     least ``min_obs``, uses whatever is available (``degraded=True``) rather
@@ -324,8 +334,8 @@ def beta_corr_monthly(stock_rows: list[dict], bench_rows: list[dict],
 
     prices_s = [stock_by_month[m] for m in common]
     prices_b = [bench_by_month[m] for m in common]
-    s_r = log_returns(prices_s)
-    b_r = log_returns(prices_b)
+    s_r = simple_returns(prices_s)
+    b_r = simple_returns(prices_b)
     var_b = statistics.variance(b_r)
     beta = statistics.covariance(s_r, b_r) / var_b
     corr = statistics.correlation(s_r, b_r)

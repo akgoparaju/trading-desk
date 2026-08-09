@@ -151,13 +151,14 @@ class TestQCHappyPath(unittest.TestCase):
         failed = [c for c in r["checks"] if c["passed"] is False]
         self.assertEqual(failed, [], f"unexpected failures: {failed}")
 
-    def test_all_fourteen_checks_ran(self):
+    def test_all_fifteen_checks_ran(self):
         # O15 added check_security_master (10th check); QC4 added
         # check_net_cash_vendor_signature (11th, disclosure-only); QC1 added
         # check_forward_pe_crossvendor (12th); QC3 added check_eps (13th) and
-        # check_eps_quarterly_shares (14th).
+        # check_eps_quarterly_shares (14th); post-QC1 added
+        # check_beta_crossvendor (15th, blocking).
         r = Q.run_qc(make_snapshot())
-        self.assertEqual(len(r["checks"]), 14)
+        self.assertEqual(len(r["checks"]), 15)
 
     def test_attestation_mentions_ticker_and_date(self):
         r = Q.run_qc(make_snapshot())
@@ -740,6 +741,100 @@ class TestForwardPECrossVendor(unittest.TestCase):
         checks = _names(r)
         self.assertIn("check_forward_pe_crossvendor", checks)
         self.assertIs(checks["check_forward_pe_crossvendor"]["passed"], True)
+
+
+class TestBetaCrossVendor(unittest.TestCase):
+    """New BLOCKING check (post-QC1): check_beta_crossvendor(benchmark.beta
+    vs benchmark.beta_vendor). QC1 gave forward-P/E a blocking cross-vendor
+    leg; beta had none until now.
+
+    HYBRID tolerance, deliberately: fails only when BOTH the relative delta
+    exceeds 25% AND the absolute delta exceeds 0.15 (denominator = the
+    vendor figure, matching check_forward_pe_crossvendor's convention of
+    dividing by the vendor's own number). A pure relative tolerance is
+    fragile at low beta (JNJ's real beta is 0.231, where a 0.05 absolute
+    miss alone is a ~22% relative miss); a pure absolute tolerance is
+    fragile at high beta. Measured relative deltas with simple returns
+    across a 16-ticker study: 15 of 16 land within 4% (NVDA 0.0%, INTC
+    0.04%, AAPL 0.5%, JPM 0.5%, TSLA 0.7%, MU 0.8%, MSFT 1.0%, GOOG 1.8%,
+    WMT 2.0%, PG 2.1%, UNH 2.2%, COHR 2.3%, KO 2.6%, JNJ 3.5%, PLTR 3.8%)
+    and exactly one fires: T (AT&T) at 45.1% (ours 0.229 vs AV 0.417,
+    absolute 0.188).
+
+    T is a TRUE POSITIVE, not a false alarm -- traced to the April-2022
+    WarnerMedia/Discovery spinoff, which AV encodes as split_coefficient
+    1.324 on 2022-04-11 (a ~19% one-day drop recorded as a synthetic split).
+    That artifact depresses OUR covariance-based beta; AT&T's real beta is
+    around 0.5-0.6, so OUR number is the corrupted one. This check is
+    therefore a genuine correctness signal about our own value, which is
+    why it is BLOCKING rather than disclosure-only (unlike check_eps, where
+    the divergences were structural vendor-basis differences rather than
+    errors in our number).
+    """
+
+    def _run(self, beta, beta_vendor):
+        return Q.check_beta_crossvendor(
+            {"benchmark": {"beta": beta, "beta_vendor": beta_vendor}})
+
+    def test_skips_when_beta_absent(self):
+        r = Q.check_beta_crossvendor({"benchmark": {"beta_vendor": 1.0}})
+        self.assertIsNone(r["passed"])
+
+    def test_skips_when_beta_vendor_absent(self):
+        r = Q.check_beta_crossvendor({"benchmark": {"beta": 1.0}})
+        self.assertIsNone(r["passed"])
+
+    def test_skips_when_either_non_positive(self):
+        self.assertIsNone(self._run(-0.5, 1.0)["passed"])
+        self.assertIsNone(self._run(1.0, 0.0)["passed"])
+        self.assertIsNone(self._run(1.0, -0.2)["passed"])
+
+    def test_fires_on_real_t_shape(self):
+        # ours 0.229 vs AV 0.417: 45.1% relative AND 0.188 absolute -- BOTH
+        # over tolerance -> fails. Real, corrupted-by-spinoff defect.
+        r = self._run(0.229, 0.417)
+        self.assertIs(r["passed"], False)
+
+    def test_passes_on_real_aapl_pair(self):
+        r = self._run(1.081, 1.086)
+        self.assertIs(r["passed"], True)
+
+    def test_passes_on_real_mu_pair(self):
+        r = self._run(2.196, 2.213)
+        self.assertIs(r["passed"], True)
+
+    def test_passes_low_beta_large_relative_small_absolute(self):
+        # JNJ-shaped: vendor 0.231, ours 0.281 -- 21.6% relative (< 25% tol)
+        # but only 0.05 absolute (< 0.15 tol) -- proves the hybrid AND gate
+        # does not fire just because the relative delta looks large at low
+        # beta.
+        r = self._run(0.281, 0.231)
+        self.assertIs(r["passed"], True)
+
+    def test_fails_only_when_both_legs_exceed_tolerance(self):
+        # Large relative (100%) but tiny absolute (0.01) -> must PASS: the
+        # absolute leg alone blocks a spurious fail at near-zero beta.
+        r = self._run(0.02, 0.01)
+        self.assertIs(r["passed"], True)
+        # Small relative (10%) but huge absolute (0.5, e.g. beta 5.5 vs 5.0)
+        # -> must PASS: the relative leg alone blocks a spurious fail at
+        # high beta.
+        r2 = self._run(5.5, 5.0)
+        self.assertIs(r2["passed"], True)
+
+    def test_registered_in_gate(self):
+        s = make_snapshot()
+        s["benchmark"]["beta_vendor"] = 1.12  # close to fixture beta 1.1
+        r = Q.run_qc(s)
+        checks = _names(r)
+        self.assertIn("check_beta_crossvendor", checks)
+        self.assertIs(checks["check_beta_crossvendor"]["passed"], True)
+
+    def test_skips_in_gate_when_beta_vendor_absent(self):
+        # make_snapshot()'s benchmark block carries no beta_vendor.
+        r = Q.run_qc(make_snapshot())
+        checks = _names(r)
+        self.assertIsNone(checks["check_beta_crossvendor"]["passed"])
 
 
 class TestCheckEpsReconciliation(unittest.TestCase):

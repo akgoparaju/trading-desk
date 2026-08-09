@@ -1,4 +1,4 @@
-import math, unittest
+import math, statistics, unittest
 from scripts import indicators as I
 
 class TestIndicators(unittest.TestCase):
@@ -32,6 +32,24 @@ class TestIndicators(unittest.TestCase):
         v = [100.0] * 22; v[-1] = 110.0
         self.assertAlmostEqual(I.pct_return(v, 21), 0.10)
         self.assertIsNone(I.pct_return([1.0], 21))
+
+    def test_simple_returns_exact(self):
+        # r_t = P_t / P_{t-1} - 1, arithmetic (not log) returns.
+        r = I.simple_returns([100.0, 110.0, 99.0])
+        self.assertAlmostEqual(r[0], 0.10)
+        self.assertAlmostEqual(r[1], -0.10)
+        self.assertEqual(I.simple_returns([100.0]), [])
+        self.assertEqual(I.simple_returns([]), [])
+
+    def test_simple_returns_differ_from_log_returns(self):
+        # Simple and log returns are numerically different (they only agree
+        # to first order for small moves) -- beta must use simple, vol must
+        # keep log; this pins that the two helpers are NOT interchangeable.
+        v = [100.0, 150.0, 90.0]
+        simple = I.simple_returns(v)
+        log = I.log_returns(v)
+        self.assertNotAlmostEqual(simple[0], log[0], places=3)
+        self.assertNotAlmostEqual(simple[1], log[1], places=3)
 
     def test_realized_vol_zero_for_constant_growth(self):
         v = [100 * (1.001 ** i) for i in range(40)]
@@ -96,15 +114,6 @@ class TestIndicators(unittest.TestCase):
         self.assertIsNone(I.realized_vol_ex_earnings(closes, dates, [], 20))
         self.assertIsNone(I.realized_vol_ex_earnings(closes, dates[:5], [], 5))
         self.assertIsNone(I.realized_vol_ex_earnings(closes, dates, [], 1))
-
-    def test_beta_of_self_is_one(self):
-        import random; random.seed(7)
-        p = [100.0]
-        for _ in range(300): p.append(p[-1] * (1 + random.gauss(0, 0.01)))
-        b = I.beta_corr(p, p)
-        self.assertAlmostEqual(b["beta"], 1.0, places=6)
-        self.assertAlmostEqual(b["corr"], 1.0, places=6)
-        self.assertIsNone(I.beta_corr(p[:50], p[:50]))   # < 60 days -> None
 
     def test_max_drawdown_exact(self):
         self.assertAlmostEqual(I.max_drawdown([100, 120, 60, 90]), -0.5)
@@ -691,24 +700,55 @@ class TestBetaCorrMonthly(unittest.TestCase):
     ]
 
     def test_aapl_matches_measured_ground_truth(self):
+        # Ratified change: beta_corr_monthly uses SIMPLE (not log) returns --
+        # a 24-combination sweep vs Alpha Vantage's overview.Beta found 5y-
+        # monthly/adjusted/simple ranks #1 (median abs error 0.0114) while
+        # the log-return variant (previously pinned here at 1.078050) ranks
+        # #2 (median 0.0183). AV's published AAPL Beta is 1.086.
         r = I.beta_corr_monthly(self._AAPL_STOCK, self._AAPL_SPY)
         self.assertIsNotNone(r)
         self.assertEqual(r["n_obs"], 60)
-        self.assertAlmostEqual(r["beta"], 1.078050, places=6)
-        self.assertAlmostEqual(r["corr"], 0.694895, places=6)
+        self.assertAlmostEqual(r["beta"], 1.082406991223596, places=6)
+        self.assertAlmostEqual(r["corr"], 0.6885684866620682, places=6)
         self.assertEqual(r["window_start"], "2021-08-31")
         self.assertEqual(r["window_end"], "2026-08-06")
         self.assertFalse(r["degraded"])
 
     def test_mu_matches_measured_ground_truth(self):
+        # Same ratified simple-return switch. Previously pinned log-return
+        # beta was 2.043713; AV's published MU Beta is 2.213.
         r = I.beta_corr_monthly(self._MU_STOCK, self._MU_SPY)
         self.assertIsNotNone(r)
         self.assertEqual(r["n_obs"], 60)
-        self.assertAlmostEqual(r["beta"], 2.043713, places=6)
-        self.assertAlmostEqual(r["corr"], 0.545129, places=6)
+        self.assertAlmostEqual(r["beta"], 2.196408838006559, places=6)
+        self.assertAlmostEqual(r["corr"], 0.5144776515380401, places=6)
         self.assertEqual(r["window_start"], "2021-08-31")
         self.assertEqual(r["window_end"], "2026-08-07")
         self.assertFalse(r["degraded"])
+
+    def test_simple_and_log_betas_diverge_on_mu_volatile_series(self):
+        """Guards against beta_corr_monthly silently reverting to log
+        returns. MU's real 5y-monthly series is volatile enough (2026
+        melt-up) that simple- and log-return beta diverge by ~0.153 -- far
+        above the ~0.007 median divergence measured across a 16-ticker
+        study (divergence grows with return magnitude; INTC measured
+        0.271). This independently recomputes the log-return beta over the
+        SAME common months beta_corr_monthly now uses simple returns for,
+        and asserts the two are NOT interchangeable.
+        """
+        simple = I.beta_corr_monthly(self._MU_STOCK, self._MU_SPY)
+        stock_m = I.month_end_series(self._MU_STOCK)
+        bench_m = I.month_end_series(self._MU_SPY)
+        stock_by_month = {r["month"]: r["adjusted_close"] for r in stock_m}
+        bench_by_month = {r["month"]: r["adjusted_close"] for r in bench_m}
+        common = sorted(set(stock_by_month) & set(bench_by_month))
+        prices_s = [stock_by_month[m] for m in common]
+        prices_b = [bench_by_month[m] for m in common]
+        log_s = I.log_returns(prices_s)
+        log_b = I.log_returns(prices_b)
+        log_beta = statistics.covariance(log_s, log_b) / statistics.variance(log_b)
+        self.assertAlmostEqual(log_beta, 2.043713, places=6)
+        self.assertGreater(abs(simple["beta"] - log_beta), 0.1)
 
     def test_beta_of_self_is_one_monthly(self):
         r = I.beta_corr_monthly(self._AAPL_SPY, self._AAPL_SPY)
