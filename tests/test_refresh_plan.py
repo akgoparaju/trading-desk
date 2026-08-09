@@ -196,6 +196,118 @@ class AlwaysRefetchTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# QC16 fix 2: sector_daily_adjusted must not be permanently locked out of the
+# plan just because it was never fetched. A ticker whose GICS sector resolves to
+# a real SPDR ETF (via the previous snapshot's benchmark.sector_etf, or -- when
+# that has never been populated -- the previous overview.json raw file's Sector
+# field) gets a distinct gap-fill refetch entry when the series is absent from
+# the previous manifest. A ticker with no resolvable ETF mapping is unaffected:
+# nothing to fetch, exactly the pre-fix behavior.
+# --------------------------------------------------------------------------- #
+
+class SectorGapFillTests(unittest.TestCase):
+    def _workspace(self, tmp, prev_as_of=AS_OF, overview_sector=None,
+                   include_sector_file=False, sector_etf_in_snapshot=None,
+                   include_overview_file=True, sector_age=0):
+        ticker_dir = os.path.join(tmp, "trading_desk_MU")
+        bundle_dir = os.path.join(ticker_dir, "detail_reports_%s" % prev_as_of)
+        os.makedirs(os.path.join(bundle_dir, "raw"), exist_ok=True)
+
+        groups = list(_DEFAULT_GROUPS)
+        ages = {}
+        if include_sector_file:
+            groups.append("sector_daily_adjusted")
+            ages["sector_daily_adjusted"] = sector_age
+        manifest = _manifest(prev_as_of, ages=ages, groups=tuple(groups))
+        if not include_overview_file:
+            manifest["files"].pop("overview", None)
+        with open(os.path.join(bundle_dir, "manifest.json"), "w") as fh:
+            json.dump(manifest, fh)
+
+        if include_overview_file:
+            ov = {"Symbol": "MU"}
+            if overview_sector is not None:
+                ov["Sector"] = overview_sector
+            with open(os.path.join(bundle_dir, "raw", "overview.json"), "w") as fh:
+                json.dump(ov, fh)
+
+        snap = {"meta": {"ticker": "MU", "as_of_utc": _utc(prev_as_of)},
+                "events": {"next_earnings": None,
+                          "dividends": {"ex_date": None, "pay_date": None,
+                                       "per_share": None},
+                          "catalysts": []}}
+        if sector_etf_in_snapshot:
+            snap["benchmark"] = {"sector_etf": sector_etf_in_snapshot}
+        with open(os.path.join(bundle_dir, "snapshot_MU_%s.json" % prev_as_of),
+                 "w") as fh:
+            json.dump(snap, fh)
+        return ticker_dir
+
+    def test_sector_gap_fill_when_mapping_resolves_via_overview(self):
+        # The QC16 lockout case: sector_daily_adjusted was NEVER fetched (absent
+        # from the prior manifest), but the raw overview.json's Sector resolves to
+        # a real SPDR ETF -- the plan must add the group with a distinct gap-fill
+        # reason, not silently omit it forever.
+        with tempfile.TemporaryDirectory() as tmp:
+            td = self._workspace(tmp, overview_sector="TECHNOLOGY")
+            _, plan = _plan(td)
+            self.assertIn("sector_daily_adjusted", plan["groups"])
+            g = plan["groups"]["sector_daily_adjusted"]
+            self.assertEqual(g["action"], "refetch")
+            self.assertNotEqual(g["reason"], "absent last run")
+            self.assertIn("gap-fill", g["reason"])
+            self.assertIsNone(g["age_days"])
+
+    def test_sector_gap_fill_via_fast_path_snapshot_sector_etf(self):
+        # Fast path: benchmark.sector_etf is already recorded on the previous
+        # snapshot (the sector series ran successfully at least once), even
+        # though THIS manifest happens to lack the file -- resolution must not
+        # require re-reading the raw overview file in this case.
+        with tempfile.TemporaryDirectory() as tmp:
+            td = self._workspace(tmp, overview_sector=None,
+                                 sector_etf_in_snapshot="XLK")
+            _, plan = _plan(td)
+            self.assertIn("sector_daily_adjusted", plan["groups"])
+            self.assertEqual(plan["groups"]["sector_daily_adjusted"]["action"],
+                             "refetch")
+
+    def test_no_sector_group_when_no_etf_mapping(self):
+        # No Sector field at all -> no resolvable ETF -> the group must NOT
+        # appear in the plan at all (nothing to fetch; pre-fix behavior for a
+        # ticker with no sector mapping is unchanged).
+        with tempfile.TemporaryDirectory() as tmp:
+            td = self._workspace(tmp, overview_sector=None)
+            _, plan = _plan(td)
+            self.assertNotIn("sector_daily_adjusted", plan["groups"])
+
+    def test_no_sector_group_when_sector_unrecognized(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            td = self._workspace(tmp, overview_sector="SOME UNLISTED SECTOR")
+            _, plan = _plan(td)
+            self.assertNotIn("sector_daily_adjusted", plan["groups"])
+
+    def test_no_sector_group_when_overview_file_missing(self):
+        # No overview raw file to consult and no cached benchmark.sector_etf ->
+        # degrade gracefully, exactly like an unresolved mapping.
+        with tempfile.TemporaryDirectory() as tmp:
+            td = self._workspace(tmp, include_overview_file=False)
+            _, plan = _plan(td)
+            self.assertNotIn("sector_daily_adjusted", plan["groups"])
+
+    def test_sector_present_and_fresh_is_reused_not_always_refetch(self):
+        # sector_daily_adjusted must NOT be in ALWAYS_REFETCH -- once present, a
+        # fresh copy is REUSED like any other window-based group, never
+        # wastefully refetched every run regardless of staleness.
+        with tempfile.TemporaryDirectory() as tmp:
+            td = self._workspace(tmp, overview_sector="TECHNOLOGY",
+                                 include_sector_file=True, sector_age=0)
+            _, plan = _plan(td)
+            self.assertNotIn("sector_daily_adjusted", refresh_plan.ALWAYS_REFETCH)
+            g = plan["groups"]["sector_daily_adjusted"]
+            self.assertEqual(g["action"], "reuse")
+
+
+# --------------------------------------------------------------------------- #
 # Window-based reuse vs refetch at boundary ages
 # --------------------------------------------------------------------------- #
 

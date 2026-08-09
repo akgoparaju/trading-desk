@@ -2491,6 +2491,93 @@ class TestSectorDailyOptionalSource(unittest.TestCase):
         self.assertIsNotNone(bm["rel_sector_ret_6m"])
 
 
+class TestSectorMissingDisclosure(unittest.TestCase):
+    """QC16 fix 1: sector_daily_adjusted's exemption from meta.missing must be
+    CONDITIONAL on whether this ticker's GICS sector actually maps to a real SPDR
+    ETF, not unconditional. An unconditional exemption hid an actionable, closeable
+    gap (a ticker whose sector DOES resolve but whose sector series was never
+    fetched looked identical to a ticker in a sector with no ETF at all -- the
+    QC16 lockout root cause)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _build_with_overview(self, overview_extra=None, add_sector_file=False,
+                             sector_file_payload=None):
+        b = BundleBuilder(self.dir)
+        b.add_global_quote()
+        ov = {
+            "Symbol": b.ticker,
+            "MarketCapitalization": f"{b.mktcap:.0f}",
+            "SharesOutstanding": f"{b.shares:.0f}", "EPS": "6.00",
+            "PERatio": f"{b.last / 6.0:.4f}", "52WeekHigh": "140.00",
+            "52WeekLow": "60.00", "Beta": "1.30",
+        }
+        if overview_extra:
+            ov.update(overview_extra)
+        b._add("overview", "overview.json", ov, "COMPANY_OVERVIEW")
+        b.add_daily(); b.add_spy()
+        b.add_income(); b.add_balance(); b.add_cashflow(); b.add_earnings()
+        if add_sector_file:
+            payload = sector_file_payload
+            if payload is None:
+                payload = _daily_json(_walk(320, seed=404, start=190.0))
+            b._add("sector_daily_adjusted", "sector_daily.json", payload,
+                   "TIME_SERIES_DAILY_ADJUSTED")
+        b.write_manifest()
+        proc = _run_build(self.dir)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(self.dir,
+                               f"snapshot_MU_{AS_OF_DATE}.json")) as fh:
+            return json.load(fh)
+
+    def test_missing_lists_sector_when_mapping_resolves_and_absent(self):
+        # ETF mapping resolves (TECHNOLOGY -> XLK) but the series was never
+        # fetched -- this is now an actionable, disclosed gap.
+        snap = self._build_with_overview(overview_extra={"Sector": "TECHNOLOGY"})
+        self.assertIn("sector_daily_adjusted", snap["meta"]["missing"])
+
+    def test_missing_omits_sector_when_no_etf_mapping(self):
+        # No Sector field at all -> no resolvable ETF -> legitimately undefined
+        # sector benchmark -> must NOT be reported as missing.
+        snap = self._build_with_overview()
+        self.assertNotIn("sector_daily_adjusted", snap["meta"]["missing"])
+
+    def test_missing_omits_sector_when_unrecognized_sector(self):
+        # A Sector string that does not map to any SPDR Select Sector ETF is the
+        # same "nothing to fetch" case as no Sector at all.
+        snap = self._build_with_overview(
+            overview_extra={"Sector": "SOME UNLISTED SECTOR"})
+        self.assertNotIn("sector_daily_adjusted", snap["meta"]["missing"])
+
+    def test_missing_omits_sector_when_present_and_mapped(self):
+        # Mapping resolves AND the file is present -> not missing (unchanged
+        # success path).
+        snap = self._build_with_overview(overview_extra={"Sector": "TECHNOLOGY"},
+                                         add_sector_file=True)
+        self.assertNotIn("sector_daily_adjusted", snap["meta"]["missing"])
+
+    def test_missing_lists_sector_when_present_but_unparseable(self):
+        # Mapping resolves and a sector_daily_adjusted file EXISTS, but it is not
+        # a parseable daily series (a fetch corruption) -- the benchmark ends up
+        # with no usable sector data, so the disclosure must match reality, not
+        # mere file existence (mirrors the existing options_chain
+        # present-but-unusable correction at build_snapshot.py:3119-3120).
+        snap = self._build_with_overview(
+            overview_extra={"Sector": "TECHNOLOGY"}, add_sector_file=True,
+            sector_file_payload={"not": "a daily series"})
+        self.assertIn("sector_daily_adjusted", snap["meta"]["missing"])
+        self.assertNotIn("sector_etf", snap["benchmark"])
+
+    def test_web_fundamentals_still_unconditionally_exempt(self):
+        # web_fundamentals is a genuine fallback-only source (never expected in
+        # the standard AV path; its use is disclosed via
+        # fundamentals.web_transcribed_fields) -- QC16 leaves it exempt.
+        snap = self._build_with_overview()
+        self.assertNotIn("web_fundamentals", snap["meta"]["missing"])
+
+
 class TestSecurityMaster(unittest.TestCase):
     """O15: build_security_master pure-function table + snapshot integration."""
 

@@ -45,8 +45,20 @@ def _snap(data_mode="alpha_vantage", latest="2026-07-20",
     }
 
 
-def _tech_doc(rubric="1.0.0"):
-    return {"skill": "technical-analysis", "rubric_version": rubric}
+def _tech_doc(rubric="1.0.0", subscores=None):
+    doc = {"skill": "technical-analysis", "rubric_version": rubric}
+    if subscores is not None:
+        doc["subscores"] = subscores
+    return doc
+
+
+# QC16 fix 3: subscores fixtures for the technical module's sector-RS factor
+# (score_rel_strength / QC10 -- always a member of subscores once rubric hits
+# 1.2.0, excluded=True when it was not evaluable).
+_RS_EXECUTED_SUBSCORES = [
+    {"name": "rel_strength_sector", "points": 5.0, "max": 10.0}]
+_RS_EXCLUDED_SUBSCORES = [
+    {"name": "rel_strength_sector", "points": 0, "max": 0, "excluded": True}]
 
 
 def _risk_doc(rubric="1.0.0"):
@@ -225,13 +237,34 @@ class TestDepthAxis(unittest.TestCase):
         self.assertEqual(d["level"], "HIGH")
         self.assertEqual(d["why"], "regime-conditional depth")
 
-    def test_technical_120_depth_stays_high_discloses_sector_rs(self):
-        # Track O4: technical bumps to v1.2.0 (adds the PROVISIONAL sector-RS
-        # factor). The DEPTH TIER does NOT change (still HIGH -- promotion is a
-        # separate gated task); the why-tag DISCLOSES the new provisional factor.
-        d = C.compute_module(_tech_doc("1.2.0"), _snap())["depth"]
+    def test_technical_120_sector_rs_executed_discloses_in_why(self):
+        # QC16: the why-tag must reflect whether the sector-RS factor ACTUALLY
+        # ran (subscores carries a non-excluded rel_strength_sector row) -- not
+        # merely that the rubric bumped to 1.2.0. The DEPTH TIER does NOT change
+        # (still HIGH -- promotion is a separate gated task).
+        doc = _tech_doc("1.2.0", subscores=_RS_EXECUTED_SUBSCORES)
+        d = C.compute_module(doc, _snap())["depth"]
         self.assertEqual(d["level"], "HIGH")
         self.assertIn("sector", d["why"].lower())
+
+    def test_technical_120_sector_rs_excluded_omits_from_why(self):
+        # QC16 lockout case: a technical-1.2.0 module whose sector-RS factor
+        # never ran (excluded -- no sector data was ever fetched for this ticker)
+        # must NOT claim the factor in its confidence why-tag. Depth tier is
+        # still HIGH (the regime-conditional pass is unaffected by this one
+        # bonus factor's availability).
+        doc = _tech_doc("1.2.0", subscores=_RS_EXCLUDED_SUBSCORES)
+        d = C.compute_module(doc, _snap())["depth"]
+        self.assertEqual(d["level"], "HIGH")
+        self.assertNotIn("sector", d["why"].lower())
+
+    def test_technical_120_no_subscores_omits_from_why(self):
+        # Defensive: a bare 1.2.0 doc with no subscores array at all must not
+        # claim the factor either (absence of evidence is not evidence of
+        # execution).
+        d = C.compute_module(_tech_doc("1.2.0"), _snap())["depth"]
+        self.assertEqual(d["level"], "HIGH")
+        self.assertNotIn("sector", d["why"].lower())
 
     def test_technical_120_overall_high_on_premium_fresh(self):
         # Same end-to-end HIGH as 1.1.0: source HIGH + depth HIGH + staleness HIGH.
@@ -264,10 +297,17 @@ class TestDepthAxis(unittest.TestCase):
         self.assertEqual(C.DEPTH_TABLE["technical"]["1.1.0"][0], "HIGH")
         self.assertEqual(C.DEPTH_TABLE["technical"]["1.1.0"][1],
                          "regime-conditional depth")
-        # technical-v1.2.0 (Track O4): tier UNCHANGED (still HIGH); the why-tag
-        # discloses the sector-RS factor (depth-tag ratified 2026-07-22).
+        # technical-v1.2.0 (Track O4): tier UNCHANGED (still HIGH). QC16: the
+        # STATIC table row carries only the BASE why -- it must NOT claim
+        # "sector" unconditionally (that claim used to be true on rubric version
+        # alone, regardless of whether the factor ever executed). The
+        # execution-gated "; sector-RS" clause is appended dynamically by
+        # _depth_axis (see test_technical_120_sector_rs_executed_discloses_in_why
+        # / test_technical_120_sector_rs_excluded_omits_from_why above).
         self.assertEqual(C.DEPTH_TABLE["technical"]["1.2.0"][0], "HIGH")
-        self.assertIn("sector", C.DEPTH_TABLE["technical"]["1.2.0"][1].lower())
+        self.assertEqual(C.DEPTH_TABLE["technical"]["1.2.0"][1],
+                         "regime-conditional depth")
+        self.assertNotIn("sector", C.DEPTH_TABLE["technical"]["1.2.0"][1].lower())
         self.assertEqual(C.DEPTH_TABLE["sentiment"]["1.0.0"][0], "MEDIUM")
         # sentiment-v1.1.0: depth-tag ratified but the OVERALL badge stays MEDIUM
         # (source cap on short_interest), so the DEPTH row remains MEDIUM.

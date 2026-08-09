@@ -41,7 +41,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from scripts import qc
+from scripts import build_snapshot, qc
 
 # REUSE the QC gate's own staleness table — the planner authorizes a REUSE only
 # STRICTLY INSIDE the window the gate will later age it against (age < window,
@@ -64,6 +64,17 @@ ALWAYS_REFETCH = frozenset({
 # options_chain is always-refetch WHEN present last run; when ABSENT last run it
 # still refetches (fill the gap) but with a distinct reason. Handled explicitly.
 _OPTIONS_CHAIN = "options_chain"
+
+# sector_daily_adjusted (Track O4 / QC16): NOT always-refetch (that would refetch
+# it every run regardless of staleness -- wasteful) and NOT in the universe of
+# "groups present in the previous manifest" when it was never fetched, so left
+# alone it can NEVER enter planned_groups for a ticker that has never had a
+# sector fetch -- a permanent, silent lockout from the sector-RS factor. Handled
+# explicitly: added to planned_groups (see build_plan) ONLY when this ticker's
+# GICS sector resolves to a real SPDR ETF (see _resolve_ticker_sector_etf) AND
+# the series is absent from the previous manifest, with a distinct gap-fill
+# reason in _group_decision.
+_SECTOR_DAILY_ADJUSTED = "sector_daily_adjusted"
 
 # Statement set re-fetched when earnings fell between the two runs — the print
 # revises every one of these, and forces a judgment re-affirmation downstream.
@@ -263,6 +274,15 @@ def _group_decision(group, present, age, window, forced_by_event):
                     "age_days": None}
         return {"action": "refetch", "reason": "always-refetch group",
                 "age_days": age}
+    if group == _SECTOR_DAILY_ADJUSTED and not present:
+        # QC16: reached only when build_plan already resolved a real sector ETF
+        # for this ticker (otherwise the group is never added to planned_groups
+        # at all) -- so an absent series here is always a genuine, closeable gap.
+        # A distinct reason (not the generic "absent last run") keeps this
+        # gap-fill visible and separately auditable in the plan.
+        return {"action": "refetch",
+                "reason": "gap-fill: sector ETF resolved, absent last run",
+                "age_days": None}
     if not present:
         return {"action": "refetch", "reason": "absent last run",
                 "age_days": None}
@@ -424,6 +444,42 @@ def _pending_proposals(ticker_dir):
     return sorted(names)
 
 
+# --------------------------------------------------------------------------- #
+# Sector ETF resolution (QC16 gap-fill signal)
+# --------------------------------------------------------------------------- #
+
+def _resolve_ticker_sector_etf(bundle, snapshot, files):
+    """Resolve this ticker's GICS-sector SPDR ETF symbol, or None.
+
+    Two signals, in order:
+      1. FAST PATH -- the previous snapshot's ``benchmark.sector_etf``, set
+         whenever the sector series successfully ran last time (Track O4). No
+         need to re-read the raw overview file when the answer is already known.
+      2. FALLBACK -- the previous ``overview`` raw file's ``Sector`` field (AV
+         COMPANY_OVERVIEW), resolved through the SAME GICS -> ETF map
+         ``build_snapshot.resolve_sector_etf`` uses. This is what covers a
+         ticker that has NEVER had a sector fetch (the QC16 lockout case),
+         where ``benchmark.sector_etf`` has never been populated so signal 1
+         is unavailable.
+    Returns None if neither signal resolves (unknown/absent sector, or no
+    overview file to consult) -- the sector benchmark is then legitimately
+    undefined and nothing is planned for it (unchanged pre-QC16 behavior).
+    """
+    benchmark = snapshot.get("benchmark") if isinstance(snapshot, dict) else None
+    if isinstance(benchmark, dict) and benchmark.get("sector_etf"):
+        return benchmark["sector_etf"]
+
+    entry = files.get("overview")
+    path = entry.get("path") if isinstance(entry, dict) else None
+    if not path:
+        return None
+    full_path = path if os.path.isabs(path) else os.path.join(bundle, path)
+    overview = build_snapshot.load_raw(full_path)
+    if not isinstance(overview, dict):
+        return None
+    return build_snapshot.resolve_sector_etf(overview.get("Sector"))
+
+
 def build_plan(ticker_dir, bundle, as_of):
     """Build the refresh-plan dict from a previous bundle + an as_of date."""
     manifest = _read_manifest(bundle)
@@ -457,6 +513,17 @@ def build_plan(ticker_dir, bundle, as_of):
     # manifest, plus options_chain (which we plan even when absent — a refresh
     # is a chance to fill it).
     planned_groups = set(files) | {_OPTIONS_CHAIN} | ALWAYS_REFETCH | forced
+
+    # QC16: sector_daily_adjusted gap-fill. Absent from ``files`` alone would
+    # leave it out of planned_groups forever (it is neither always-refetch nor
+    # options_chain) — a ticker whose FIRST run skipped this OPTIONAL fetch would
+    # never be offered it again. Add it ONLY when this ticker's sector actually
+    # resolves to a real SPDR ETF; an unresolvable sector has nothing to fetch,
+    # so the group correctly stays absent from the plan (unchanged behavior).
+    if _SECTOR_DAILY_ADJUSTED not in files:
+        sector_etf = _resolve_ticker_sector_etf(bundle, snapshot, files)
+        if sector_etf is not None:
+            planned_groups = planned_groups | {_SECTOR_DAILY_ADJUSTED}
 
     groups = {}
     for group in sorted(planned_groups):

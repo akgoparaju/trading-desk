@@ -3122,14 +3122,34 @@ def build_snapshot(bundle, ticker):
     # web_fundamentals is a fallback-only source (absent in the normal AV path);
     # its presence/use is disclosed via fundamentals.web_transcribed_fields, so we
     # do NOT report its absence as a "missing" expected source (that would be noise
-    # on every standard-mode build). sector_daily_adjusted (Track O4) is the same:
-    # an OPTIONAL source whose presence/absence is disclosed IN-BAND via the
-    # benchmark block's sector_etf / sector_ret_* keys (present only when a sector
-    # series was fetched AND the sector resolved). It is absent by design on any
-    # build without sector data, so listing it in meta.missing would be noise.
-    _MISSING_DISCLOSURE_EXCLUDED = ("web_fundamentals", "sector_daily_adjusted")
+    # on every standard-mode build). It is UNCONDITIONALLY exempt: there is no
+    # scenario in the standard AV path where fetching it would have been possible
+    # but wasn't -- it either served as a fallback (disclosed separately) or was
+    # never applicable at all, so its absence is never an actionable gap.
+    #
+    # sector_daily_adjusted (Track O4) is CONDITIONALLY exempt (QC16 fix): its
+    # absence is legitimate/undisclosable ONLY when this ticker's GICS sector has
+    # NO SPDR-ETF mapping (sector_etf is None) -- there the sector benchmark is
+    # undefined by construction and nothing could have been fetched. But when the
+    # mapping DOES resolve, an absent series is a genuine, closeable gap: the prior
+    # UNCONDITIONAL exemption made a ticker that simply never had a sector fetch
+    # look identical (in meta.missing) to a ticker with no sector mapping at all --
+    # and because refresh_plan.py plans strictly off "was this in the previous
+    # manifest" (never off this disclosure), that indistinguishability meant the
+    # gap could never surface for a human OR the planner to close, permanently and
+    # silently locking the ticker out of the sector-RS factor on every subsequent
+    # refresh. So a resolvable-but-absent sector series IS now reported missing.
+    _MISSING_DISCLOSURE_EXCLUDED = ["web_fundamentals"]
+    if sector_etf is None:
+        _MISSING_DISCLOSURE_EXCLUDED.append("sector_daily_adjusted")
     optional_keys = [k for k in COVERS
                      if k not in REQUIRED and k not in _MISSING_DISCLOSURE_EXCLUDED]
+    # sector_rows is None whenever the sector series did not actually make it into
+    # the benchmark block -- whether never fetched, or present but unparseable
+    # (parsed_sector is None) -- so present_keys must reflect USABILITY, not mere
+    # file existence, exactly like the options_chain correction just above.
+    if sector_rows is None and "sector_daily_adjusted" in present_keys:
+        present_keys.remove("sector_daily_adjusted")
     missing = [k for k in optional_keys if k not in present_keys]
 
     snapshot = {
