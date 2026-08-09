@@ -106,7 +106,7 @@ Read `module_tradeplan.json` (small — read it directly). Write `<bundle>/brief
 |-----|-------|
 | Don't-chase | `dont_chase.above` (5% above top entry) |
 | Entry 1 / 2 / 3 | `entries[].level` + `condition` + **EV-at-level** (`ev_at_level`); flag `sized_down` if set |
-| Profit-take | `exits.profit_take.level` (`type`) |
+| Profit-take | `exits.profit_take.level` (`type`); when QC6 re-picked it below `bull_target` (`repick: "below_bull_target"`) or nulled it for lack of a candidate (`repick: "no_candidate_below_bull"`), quote `note` verbatim instead of a bare level |
 | Bull target | `exits.bull_target.level` + the required-multiple note; when `triangulated` is true, say the bull was triangulated to `min(scenario_raw, comps_high)` and show `scenario_raw` + `dcf_bull` (reference) so the clip is transparent |
 | Invalidation | **both legs**: technical (`technical_leg.level`, weekly close below) AND fundamental (`fundamental_leg.metric` `threshold`) |
 | Size | `sizing.recommended_pct` + the **Kelly headline** (`sizing.headline`: f* at entry, capped to recommended) + the arithmetic footnote (`sizing.arithmetic`, verbatim) |

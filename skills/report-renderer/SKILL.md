@@ -71,7 +71,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/report_qc.py --bundle ./trading_desk_<TICK
   --report <path printed by render_report.py, e.g. ./<TICKER>_Trade_Report_<date>.md>
 ```
 
-The gate prints a check table and exits 0 (pass) or 1 (fail). The checks: **number_provenance** (every report number traces to the bundle), composite_arithmetic, ev_consistency, invalidation_both_legs, sizing_within_cap, strikes_in_chain, pop_method_labeled, expression_consistency, footer_integrity, **footer_completeness** (every `snapshot.meta.api_tier_notes` entry appears in the footer), word_cap (≤2100, prose + headings only), **no_empty_slots**.
+The gate prints a check table and exits 0 (pass) or 1 (fail). The checks: **number_provenance** (every report number traces to the bundle), composite_arithmetic, ev_consistency, invalidation_both_legs, sizing_within_cap, exit_ordering (QC6: profit_take must never sit at/above bull_target), strikes_in_chain, pop_method_labeled, expression_consistency, footer_integrity, **footer_completeness** (every `snapshot.meta.api_tier_notes` entry appears in the footer), word_cap (≤2100, prose + headings only), **no_empty_slots**.
 
 **Fix loop — fix PROSE, never numbers:**
 - `no_empty_slots` fail → you left a slot unfilled. Fill it.

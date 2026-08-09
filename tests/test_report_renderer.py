@@ -2945,3 +2945,64 @@ class TestFooterApiTierNotesBullets(unittest.TestCase):
         self.assertIn("### Data Integrity", footer)
         self.assertIn("- Snapshot as of: 2026-07-16T00:00:00Z", footer)
         self.assertIn("not financial advice", footer.lower())
+
+
+class TestLiquidityVerdictRendered(unittest.TestCase):
+    """QC11 made module_options.liquidity_verdict truthful; render_report.py
+    never rendered it (grep confirmed zero occurrences of the identifier)
+    even though kurama's decision contract is its only other consumer -- so
+    the field a QC item was just spent fixing was invisible to a human
+    reader. build_options_expression must surface it in the established
+    vol-dashboard-verdict-line style, right after that line and before the
+    recommended/declined tables."""
+
+    def _render(self, liquidity_verdict, pop_key=True):
+        options = _options_doc()
+        if pop_key:
+            options["liquidity_verdict"] = liquidity_verdict
+        else:
+            del options["liquidity_verdict"]
+        return rr.build_options_expression(options, _tradeplan_doc())
+
+    def test_adequate_renders(self):
+        out = self._render("adequate")
+        self.assertIn("**Liquidity**: *adequate*.", out)
+
+    def test_thin_one_cleared_renders(self):
+        out = self._render(
+            "thin -- only 1 structure cleared liquidity/economics screening")
+        self.assertIn(
+            "**Liquidity**: *thin -- only 1 structure cleared "
+            "liquidity/economics screening*.", out)
+
+    def test_thin_declining_renders(self):
+        out = self._render("thin -- declining to force structures")
+        self.assertIn(
+            "**Liquidity**: *thin -- declining to force structures*.", out)
+
+    def test_no_chain_renders(self):
+        out = self._render("no chain -- options analysis unavailable")
+        self.assertIn(
+            "**Liquidity**: *no chain -- options analysis unavailable*.", out)
+
+    def test_absent_key_renders_cleanly_no_literal_none(self):
+        out = self._render(None, pop_key=False)
+        self.assertNotIn("None", out)
+        self.assertIn("**Liquidity**:", out)
+
+    def test_none_value_renders_cleanly_no_literal_none(self):
+        # D7-class bug (already fixed once in the profit-take row): the key
+        # can be PRESENT with value None, and `.get(key, default)` never
+        # applies its default in that case -- must not print literal 'None'.
+        options = _options_doc()
+        options["liquidity_verdict"] = None
+        out = rr.build_options_expression(options, _tradeplan_doc())
+        self.assertNotIn("None", out)
+
+    def test_liquidity_line_between_vol_dashboard_and_recommended(self):
+        out = self._render("adequate")
+        vd_idx = out.index("**Vol dashboard**")
+        liq_idx = out.index("**Liquidity**")
+        rec_idx = out.index("**Recommended structures**")
+        self.assertLess(vd_idx, liq_idx)
+        self.assertLess(liq_idx, rec_idx)

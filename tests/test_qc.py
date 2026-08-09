@@ -165,6 +165,24 @@ class TestQCHappyPath(unittest.TestCase):
         self.assertIn("AAA", r["attestation"])
         self.assertIn("2026-07-16", r["attestation"])
 
+    def test_attestation_stale_print_note_matches_confidence_phrasing(self):
+        # QC8 fixed scripts/confidence.py's staleness label to stop claiming
+        # "weekend" (a weekday-ignorant guess with no weekday computation
+        # backing it) and say only what actually fired: "stale print
+        # (latest_trading_day != as_of)". qc.py's attestation Note carried the
+        # identical "(weekend/stale print)" defect independently -- it must
+        # use the SAME phrasing confidence.py established, so the two never
+        # silently diverge on the same condition.
+        s = make_snapshot()
+        s["meta"]["latest_trading_day"] = "2026-07-15"  # as_of date is 2026-07-16
+        r = Q.run_qc(s)
+        self.assertIn(
+            "Note: as_of 2026-07-16 vs latest trading day 2026-07-15 "
+            "(stale print (latest_trading_day != as_of)).",
+            r["attestation"],
+        )
+        self.assertNotIn("weekend", r["attestation"])
+
 
 class TestPerCheckMutations(unittest.TestCase):
     """Each mutation must flip exactly its target check to failed."""

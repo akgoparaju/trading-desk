@@ -76,13 +76,15 @@ AV `Global Quote` shape: `{"Global Quote": {...}}` with the consumed keys:
 
 AV `COMPANY_OVERVIEW` — a FLAT object. Consumed keys:
 `MarketCapitalization`, `SharesOutstanding`, `52WeekHigh`, `52WeekLow`,
-`EPS`, `PERatio`, `EVToEBITDA`, `PEGRatio`, `ReturnOnEquityTTM`,
+`EPS`, `PERatio`, `EVToEBITDA`, `PEGRatio`, `ReturnOnEquityTTM`, `Beta`,
 `AnalystTargetPrice`,
 `AnalystRatingStrongBuy`, `AnalystRatingBuy`, `AnalystRatingHold`,
 `AnalystRatingSell`, `AnalystRatingStrongSell`,
-`DividendPerShare`, `ExDividendDate`, `DividendDate`.
-(`ForwardPE` is documented for completeness of a company overview but the builder
-derives forward P/E from consensus EPS, not this key.)
+`DividendPerShare`, `ExDividendDate`, `DividendDate`, `ForwardPE`.
+(`ForwardPE` and `Beta` are ingested as cross-vendor counterparties only --
+`pe_overview_fwd` and `beta_vendor` respectively, each feeding a dedicated
+cross-vendor QC check -- never as the builder's own forward P/E or beta, which
+are derived from consensus EPS and the ticker's own daily bars.)
 
 ### `income_statement`, `balance_sheet`, `cash_flow`
 
