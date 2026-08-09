@@ -383,6 +383,14 @@ def check_forward_pe_crossvendor(s):
     AAPL (pe_fwd 35.5019 vs vendor 31.95: 11.1% delta, under tolerance) --
     the AAPL defect was caught by the eps_ntm blend fix itself, not by this
     leg. SKIPPED when either P/E is absent or <= 0 (P/E not meaningful).
+
+    Measured provenance (docstring only -- NOT a behaviour change): a
+    22-ticker survey of this blocking check's headroom against the 25%
+    threshold found the largest PASSING relative deltas were MRVL 20.7% and
+    PLTR 19.7% -- both within ~4-5 points of the boundary. The margin is
+    thin; do not raise or lower _PE_FWD_CROSSVENDOR_TOL on this evidence
+    alone, as that would be exactly the threshold-overfitting this
+    programme has been trying to avoid.
     """
     val = _get(s, "valuation")
     pe_fwd = _get(val, "pe_fwd")
@@ -1110,7 +1118,7 @@ def _build_attestation(snapshot, results, waived_names):
     if isinstance(ltd, str) and ltd and ltd != as_of_date:
         parts.append(
             f"Note: as_of {as_of_date} vs latest trading day {ltd} "
-            f"(weekend/stale print)."
+            f"(stale print (latest_trading_day != as_of))."
         )
 
     return " ".join(parts)

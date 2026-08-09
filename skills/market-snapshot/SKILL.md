@@ -1,6 +1,6 @@
 ---
 name: market-snapshot
-description: Build a verified, QC-gated market data snapshot for a ticker from Alpha Vantage (single source of truth for all downstream trading-desk skills). Use when the user says "snapshot [ticker]", "market snapshot", "build data snapshot", or when any trading-desk skill needs market data. Schema v0.2.1.
+description: Build a verified, QC-gated market data snapshot for a ticker from Alpha Vantage (single source of truth for all downstream trading-desk skills). Use when the user says "snapshot [ticker]", "market snapshot", "build data snapshot", or when any trading-desk skill needs market data. Schema v0.5.0.
 ---
 
 # Market Snapshot (L1 Data Engine)
@@ -436,9 +436,13 @@ result = mcp__governed_av__COMPANY_OVERVIEW(symbol="AAPL")  # your tool name her
 
 # The result is AV-shaped: a flat dict with the consumed keys the builder reads
 # (MarketCapitalization, SharesOutstanding, EPS, PERatio, EVToEBITDA, PEGRatio,
-#  52WeekHigh, 52WeekLow, ReturnOnEquityTTM, AnalystTargetPrice,
+#  52WeekHigh, 52WeekLow, ReturnOnEquityTTM, Beta, AnalystTargetPrice,
 #  AnalystRatingStrongBuy/Buy/Hold/Sell/StrongSell,
-#  DividendPerShare, ExDividendDate, DividendDate).
+#  DividendPerShare, ExDividendDate, DividendDate, ForwardPE).
+# Beta and ForwardPE are ingested as cross-vendor counterparties only
+# (beta_vendor, pe_overview_fwd) -- never as the builder's own scored beta or
+# forward P/E, which are derived from the ticker's own daily bars / consensus
+# EPS respectively.
 # Units are standard AV units (MarketCapitalization in absolute dollars, etc.).
 
 # Save verbatim — do not reformat or compute any number:
@@ -602,7 +606,7 @@ Report to the user (and to any calling skill):
   |-------|-----------------|
   | price | last, 52wk range, mktcap |
   | technicals | RSI14, MA50/MA200 ordering, RV30 |
-  | benchmark | beta, 12m vs SPY |
+  | benchmark | beta (5y monthly, simple) vs SPY |
   | fundamentals | rev growth, margins, FCF TTM |
   | valuation | P/E ttm, P/E fwd, FCF yield |
   | sentiment | ratings, P/C, IV30, IV pctile |

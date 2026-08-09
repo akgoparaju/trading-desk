@@ -1001,6 +1001,14 @@ def build_options_expression(options, tradeplan):
                     f"(iv30 {_fmt(vd.get('iv30'))}, rv20 {_fmt(vd.get('rv20'))}, "
                     f"diff {_fmt(vd.get('diff'))}, IV pctile {_fmt(vd.get('iv_pctile_1yr'))}).")
 
+    # QC11 made liquidity_verdict truthful; its only other consumer is the
+    # kurama decision contract, so surface it here too or it never reaches a
+    # human reader. `or` (not `.get(key, default)`) so a key present with
+    # value None still gets the fallback -- the same class of bug fixed once
+    # already in the profit-take row (D7).
+    liq = options.get("liquidity_verdict") or "not disclosed"
+    liquidity_line = f"**Liquidity**: *{liq}*."
+
     rec = options.get("recommended_structures", []) or []
     rec_rows = []
     for st in rec:
@@ -1042,6 +1050,8 @@ def build_options_expression(options, tradeplan):
         "### Options Expression",
         "",
         verdict_line,
+        "",
+        liquidity_line,
         "",
         "**Recommended structures**",
         "",

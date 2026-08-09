@@ -1562,10 +1562,21 @@ def build_fundamentals(income, balance, cashflow, earnings, estimates,
         next_fy_basis = {
             "current_fy_end": current_row.get("date") if current_row else None,
             "next_fy_end": next_row.get("date") if next_row else None,
+            # Gap 3 (QC_REMEDIATION_TRACKER QC17 is the separate, out-of-scope
+            # re-alignment item): revisions_90d is built from fy[0] -- the
+            # NEAR fiscal-year record -- which is NOT guaranteed to be the
+            # same fiscal year as next_fy_consensus (next_row above). Naming
+            # revisions_fy_end here means a reader can never silently assume
+            # the two fields describe the same fiscal year.
+            "revisions_fy_end": row.get("date"),
             "note": (
                 "next_fy_consensus is the fiscal-year estimate AFTER the row "
                 "whose ~1yr span contains as_of; a row containing as_of is "
-                "the CURRENT fiscal year, not next (QC1)."
+                "the CURRENT fiscal year, not next (QC1). revisions_90d is "
+                "keyed to revisions_fy_end (fy[0], the nearest future "
+                "fiscal-year row) -- this can differ from next_fy_end; the "
+                "two fields are NOT guaranteed to describe the same fiscal "
+                "year (Gap 3)."
             ),
         }
 

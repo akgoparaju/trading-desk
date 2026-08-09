@@ -1493,7 +1493,11 @@ class TestLatestTradingDay(unittest.TestCase):
         combined = proc.stdout + proc.stderr
         self.assertIn("2026-07-14", combined,
                       "expected latest_trading_day date in attestation")
-        self.assertIn("weekend/stale", combined)
+        # Gap 1: qc.py's attestation note must match the phrasing QC8
+        # established in confidence.py -- it never claims "weekend" (no
+        # weekday computation backs that claim), only the condition that
+        # actually fired.
+        self.assertIn("stale print (latest_trading_day != as_of)", combined)
 
     def test_qc_no_note_when_dates_match(self):
         """No stale-print note when as_of date matches latest_trading_day."""
@@ -2814,6 +2818,29 @@ class TestQC1TimeWeightedNtmEpsBlend(unittest.TestCase):
         self.assertAlmostEqual(f["next_fy_consensus"]["eps"], 153.7395, places=4)
         self.assertEqual(f["next_fy_basis"]["current_fy_end"], "2026-08-31")
         self.assertEqual(f["next_fy_basis"]["next_fy_end"], "2027-08-31")
+
+    def test_aapl_revisions_and_next_fy_basis_disclose_different_fiscal_years(self):
+        # Gap 3: QC1 corrected next_fy_consensus to be the FY AFTER the one
+        # containing as_of (2027-09-30 here), but revisions_90d is still
+        # built from fy[0] -- the NEAR fiscal-year record (2026-09-30). Two
+        # adjacent fields in the same fundamentals block now describe
+        # DIFFERENT fiscal years with nothing saying so. next_fy_basis must
+        # name the fiscal year revisions_90d is keyed to, alongside the
+        # existing current_fy_end/next_fy_end, so a reader can never assume
+        # the two fields match.
+        f = self._fundamentals(self._AAPL_ESTIMATES, "2026-08-07")
+        basis = f["next_fy_basis"]
+        # revisions_90d is keyed to the 2026-09-30 record (fy[0]).
+        self.assertAlmostEqual(f["revisions_90d"]["eps_now"], 8.7998, places=4)
+        self.assertEqual(basis["revisions_fy_end"], "2026-09-30")
+        self.assertEqual(basis["next_fy_end"], "2027-09-30")
+        # The whole point of Gap 3: these must be visibly, disclosedly
+        # DIFFERENT fiscal years, not silently assumed to match.
+        self.assertNotEqual(basis["revisions_fy_end"], basis["next_fy_end"])
+        # revisions_90d's scored input itself is UNCHANGED by this fix --
+        # still fy[0], matching current_fy_end (this is a disclosure-only
+        # change, not a re-alignment of which record revisions reads).
+        self.assertEqual(basis["revisions_fy_end"], basis["current_fy_end"])
 
     def test_sum_next_4_fiscal_quarters_path_untouched(self):
         # >=4 future FQ rows must still take the original sum path unchanged.
