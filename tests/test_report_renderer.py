@@ -1415,7 +1415,12 @@ class TestBuildCatalystCalendar(unittest.TestCase):
         # A simple proxy: "consensus EPS n/a" should NOT appear; "—" should.
         self.assertNotIn("consensus EPS n/a", result)
 
-    def test_past_catalyst_labeled(self):
+    def test_past_catalyst_dropped_not_just_labeled(self):
+        # QC9: a stale catalyst row (date < as_of) used to survive in the
+        # rendered calendar merely relabeled "(past)" -- the exact shape of the
+        # MU 2026-08-08 defect, where a dividend ex-date 33 days stale rendered
+        # as a live forward catalyst. It must now be dropped from the table
+        # entirely, not just labeled.
         snap = self._snap(
             "2026-07-16T00:00:00Z", "2026-09-25", 1.88,
             catalysts=[
@@ -1424,9 +1429,10 @@ class TestBuildCatalystCalendar(unittest.TestCase):
             ]
         )
         result = rr.build_catalyst_calendar(snap)
-        # Past catalyst note must contain "(past)".
-        self.assertIn("old launch (past)", result)
-        # Future catalyst note must NOT contain "(past)".
+        # Past catalyst row is excluded entirely (not merely labeled).
+        self.assertNotIn("old launch", result)
+        self.assertNotIn("product_launch", result)
+        # Future catalyst still renders, unlabeled.
         self.assertIn("upcoming conf", result)
         self.assertNotIn("upcoming conf (past)", result)
 
@@ -1450,6 +1456,57 @@ class TestBuildCatalystCalendar(unittest.TestCase):
         }
         result = rr.build_catalyst_calendar(snap)
         self.assertNotIn("(past)", result)
+
+
+# --------------------------------------------------------------------------- #
+# QC9: build_catalyst_calendar date >= as_of filter (MU 2026-08-08 repro --
+# a dividend ex-date 33 days stale rendered as a live forward catalyst).
+# --------------------------------------------------------------------------- #
+
+class TestQC9PastCatalystExcludedFromCalendar(unittest.TestCase):
+    def _snap(self, as_of_utc, catalysts):
+        return {
+            "meta": {"as_of_utc": as_of_utc},
+            "events": {"next_earnings": {}, "catalysts": catalysts},
+        }
+
+    def test_past_dividend_row_not_rendered(self):
+        snap = self._snap(
+            "2026-08-08T00:00:00Z",
+            catalysts=[{"name": "dividend ex-date", "date": "2026-07-06",
+                        "note": "$0.84/share"}])
+        result = rr.build_catalyst_calendar(snap)
+        self.assertNotIn("2026-07-06", result)
+        self.assertNotIn("dividend ex-date", result)
+
+    def test_future_row_still_rendered_past_row_excluded(self):
+        snap = self._snap(
+            "2026-08-08T00:00:00Z",
+            catalysts=[
+                {"name": "dividend ex-date", "date": "2026-07-06", "note": "past"},
+                {"name": "MU earnings", "date": "2026-09-22", "note": "Q4 print"},
+            ])
+        result = rr.build_catalyst_calendar(snap)
+        self.assertIn("2026-09-22", result)
+        self.assertIn("MU earnings", result)
+        self.assertNotIn("2026-07-06", result)
+
+    def test_same_day_catalyst_still_rendered(self):
+        # The filter is date >= as_of (not strictly >).
+        snap = self._snap(
+            "2026-08-08T00:00:00Z",
+            catalysts=[{"name": "same day", "date": "2026-08-08", "note": "today"}])
+        result = rr.build_catalyst_calendar(snap)
+        self.assertIn("same day", result)
+
+    def test_unparseable_date_kept_not_dropped(self):
+        # A malformed date can't be classified past/future -- QC9 must never
+        # guess, so the row is kept (existing pre-fix behaviour for this case).
+        snap = self._snap(
+            "2026-08-08T00:00:00Z",
+            catalysts=[{"name": "TBD event", "date": "TBD", "note": "x"}])
+        result = rr.build_catalyst_calendar(snap)
+        self.assertIn("TBD event", result)
 
 
 # --------------------------------------------------------------------------- #
@@ -2777,6 +2834,85 @@ class TestNullTechnicalInvalidation(unittest.TestCase):
     def test_present_level_is_unchanged_condition_plus_price(self):
         table = rr.build_tradeplan_table(_tradeplan_doc())
         self.assertIn("| Invalidation (technical) | weekly close below 82 |", table)
+
+
+class TestProfitTakeNullDisclosure(unittest.TestCase):
+    """D7: QC6's repick can null profit_take to
+    ``{"level": None, "type": None, "repick": "...", "note": "..."}``. The dict
+    is KEPT (not replaced by a bare None) specifically so the reason stays
+    visible to the consumer -- but the OLD ``pt.get('type', '')`` default never
+    fired (the key exists, value is None) so the cell rendered the literal
+    string 'None' and the repick/note disclosure never reached the report at
+    all. This locks: no literal None, and the repick reason IS in the cell,
+    mirroring how bull_target's note is already surfaced (render_report.py
+    :514-522 -- the established pattern this fix is modeled on)."""
+
+    def _row(self, table, label):
+        return [ln for ln in table.splitlines() if ln.startswith(f"| {label}")][0]
+
+    def test_untouched_profit_take_unchanged(self):
+        # Baseline regression lock: an untouched profit_take (repick/note both
+        # None) must render exactly as before this fix.
+        table = rr.build_tradeplan_table(_tradeplan_doc())
+        self.assertEqual(self._row(table, "Profit-take"),
+                          "| Profit-take | 112 (swing_high) |")
+
+    def test_nulled_profit_take_no_literal_none(self):
+        tp = _tradeplan_doc()
+        tp["stock_plan"]["exits"]["profit_take"] = {
+            "level": None, "type": None,
+            "repick": "no_candidate_below_bull",
+            "note": ("profit_take 120 (swing_high) >= bull_target 110; no "
+                     "ladder candidate strictly above spot 95 and below "
+                     "bull_target -> nulled"),
+        }
+        table = rr.build_tradeplan_table(tp)
+        row = self._row(table, "Profit-take")
+        self.assertNotIn("None", row)
+
+    def test_nulled_profit_take_reason_reaches_report(self):
+        tp = _tradeplan_doc()
+        tp["stock_plan"]["exits"]["profit_take"] = {
+            "level": None, "type": None,
+            "repick": "no_candidate_below_bull",
+            "note": ("profit_take 120 (swing_high) >= bull_target 110; no "
+                     "ladder candidate strictly above spot 95 and below "
+                     "bull_target -> nulled"),
+        }
+        table = rr.build_tradeplan_table(tp)
+        row = self._row(table, "Profit-take")
+        self.assertEqual(
+            row,
+            "| Profit-take | n/a (n/a) (profit_take 120 (swing_high) >= "
+            "bull_target 110; no ladder candidate strictly above spot 95 "
+            "and below bull_target -> nulled) |")
+
+    def test_repicked_profit_take_no_literal_none(self):
+        tp = _tradeplan_doc()
+        tp["stock_plan"]["exits"]["profit_take"] = {
+            "level": 85.0, "type": "swing_high",
+            "repick": "below_bull_target",
+            "note": ("profit_take 120 (swing_high) >= bull_target 110 -> "
+                     "re-picked to 85 (swing_high)"),
+        }
+        table = rr.build_tradeplan_table(tp)
+        row = self._row(table, "Profit-take")
+        self.assertNotIn("None", row)
+
+    def test_repicked_profit_take_reason_reaches_report(self):
+        tp = _tradeplan_doc()
+        tp["stock_plan"]["exits"]["profit_take"] = {
+            "level": 85.0, "type": "swing_high",
+            "repick": "below_bull_target",
+            "note": ("profit_take 120 (swing_high) >= bull_target 110 -> "
+                     "re-picked to 85 (swing_high)"),
+        }
+        table = rr.build_tradeplan_table(tp)
+        row = self._row(table, "Profit-take")
+        self.assertEqual(
+            row,
+            "| Profit-take | 85 (swing_high) (profit_take 120 (swing_high) "
+            ">= bull_target 110 -> re-picked to 85 (swing_high)) |")
 
 
 class TestFooterApiTierNotesBullets(unittest.TestCase):

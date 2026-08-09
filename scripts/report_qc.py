@@ -963,6 +963,28 @@ def check_sizing_within_cap(docs):
                    f"recommended_pct {rec} <= cap_pct {cap}")
 
 
+def check_exit_ordering(docs):
+    """QC6: profit_take must never sit at/above bull_target (verified on two
+    real runs, n=2 -- AAPL 2026-08-07: 315.20 > 312.41; MU 2026-08-08: 900 >
+    893.24). Modeled on check_sizing_within_cap: SKIP when either level is
+    absent (trade_plan's own joint constraint already handles that case),
+    FAIL on inversion, PASS otherwise."""
+    tp = docs.get("module_tradeplan")
+    if not isinstance(tp, dict):
+        return _result("exit_ordering", None, "SKIP: no module_tradeplan")
+    exits = (tp.get("stock_plan", {}) or {}).get("exits", {}) or {}
+    pt_level = (exits.get("profit_take") or {}).get("level")
+    bt_level = (exits.get("bull_target") or {}).get("level")
+    if pt_level is None or bt_level is None:
+        return _result("exit_ordering", None,
+                       "SKIP: profit_take.level or bull_target.level absent")
+    if pt_level > bt_level + 1e-9:
+        return _result("exit_ordering", False,
+                       f"profit_take.level {pt_level} > bull_target.level {bt_level}")
+    return _result("exit_ordering", True,
+                   f"profit_take.level {pt_level} <= bull_target.level {bt_level}")
+
+
 def check_strikes_in_chain(docs, bundle):
     options = docs.get("module_options")
     if not isinstance(options, dict):
@@ -2077,6 +2099,7 @@ def run_report_qc(bundle, report_path, delta=False, previous=None):
         check_ev_consistency(docs),
         check_invalidation_both_legs(report_text, docs),
         check_sizing_within_cap(docs),
+        check_exit_ordering(docs),
         check_strikes_in_chain(docs, bundle),
         check_pop_method_labeled(report_text, docs),
         check_expression_consistency(report_text, docs),

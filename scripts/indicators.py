@@ -250,6 +250,95 @@ def beta_corr(stock: list[float], bench: list[float]) -> dict | None:
     return {"beta": beta, "corr": corr, "n_days": k - 1}
 
 
+# QC5: street-standard beta window -- 5 years of MONTHLY returns (61 month-end
+# observations -> 60 log-returns), replacing the previous unsliced full-daily-
+# history beta_corr call in build_snapshot.build_benchmark (which could run to
+# ~26 years of daily data on a long-listed name). BETA_MONTHLY_MIN_OBS is the
+# floor below which a monthly beta is withheld rather than reported from an
+# unreliably short window (a beta's standard error scales ~1/sqrt(n); 24
+# monthly returns -- 2 years -- is a conservative floor well under the 60-obs
+# 5y target, chosen so young listings can still get a degraded-but-real
+# estimate rather than being denied one outright).
+BETA_MONTHLY_YEARS = 5
+BETA_MONTHLY_MIN_OBS = 24
+
+
+def month_end_series(rows: list[dict]) -> list[dict]:
+    """Resample ascending, dated rows to one point per CALENDAR month.
+
+    For each row carrying a "date" (a "YYYY-MM-DD"-prefixed string) and a
+    non-null "adjusted_close", keeps the LAST (latest-dated) observation seen
+    for that calendar month. Rows missing either field are skipped (never
+    guessed). Returns an ASCENDING list of
+    ``{"month": "YYYY-MM", "date": <day used>, "adjusted_close": <price>}``.
+    """
+    by_month: dict[str, tuple[str, float]] = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        d = r.get("date")
+        ac = r.get("adjusted_close")
+        if not isinstance(d, str) or len(d) < 7 or ac is None:
+            continue
+        key = d[:7]
+        prev = by_month.get(key)
+        if prev is None or d > prev[0]:
+            by_month[key] = (d, ac)
+    return [{"month": k, "date": v[0], "adjusted_close": v[1]}
+            for k, v in sorted(by_month.items())]
+
+
+def beta_corr_monthly(stock_rows: list[dict], bench_rows: list[dict],
+                       years: int = BETA_MONTHLY_YEARS,
+                       min_obs: int = BETA_MONTHLY_MIN_OBS) -> dict | None:
+    """5-year (or shorter, degraded) MONTHLY beta/corr of dated row series.
+
+    Street-standard window (QC5): month-end (last-observation) adjusted
+    closes joined by CALENDAR MONTH -- not exact date, since the stock's and
+    benchmark's own month-end trading day can differ by a session -- over the
+    trailing ``years`` years (target ``years*12 + 1`` common months -> 60
+    monthly log-returns for the 5y default). Uses the SAME sample cov/var
+    statistics as ``beta_corr`` (kept unchanged; this is a distinct,
+    dated-input sibling for a different sampling frequency).
+
+    Degrades gracefully: with fewer than ``years*12`` common months but at
+    least ``min_obs``, uses whatever is available (``degraded=True``) rather
+    than refusing outright. Returns None when fewer than ``min_obs`` monthly
+    RETURNS are available, or when the rows carry no usable dates at all --
+    callers must disclose the absence, never silently substitute a noisier
+    short window.
+    """
+    stock_m = month_end_series(stock_rows)
+    bench_m = month_end_series(bench_rows)
+    stock_by_month = {r["month"]: r["adjusted_close"] for r in stock_m}
+    bench_by_month = {r["month"]: r["adjusted_close"] for r in bench_m}
+    stock_date_by_month = {r["month"]: r["date"] for r in stock_m}
+
+    common = sorted(set(stock_by_month) & set(bench_by_month))
+    target = years * 12 + 1
+    if len(common) > target:
+        common = common[-target:]
+    n_obs = len(common) - 1
+    if n_obs < min_obs:
+        return None
+
+    prices_s = [stock_by_month[m] for m in common]
+    prices_b = [bench_by_month[m] for m in common]
+    s_r = log_returns(prices_s)
+    b_r = log_returns(prices_b)
+    var_b = statistics.variance(b_r)
+    beta = statistics.covariance(s_r, b_r) / var_b
+    corr = statistics.correlation(s_r, b_r)
+    return {
+        "beta": beta,
+        "corr": corr,
+        "n_obs": n_obs,
+        "window_start": stock_date_by_month[common[0]],
+        "window_end": stock_date_by_month[common[-1]],
+        "degraded": n_obs < years * 12,
+    }
+
+
 def ma_slope(values: list[float], n: int, lookback: int = 20) -> float | None:
     """Slope of the SMA over a lookback window.
 

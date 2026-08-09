@@ -1050,7 +1050,12 @@ class TestCatalystsAssembly(unittest.TestCase):
         comp["as_of"] = "2026-07-25"
         snap = _goog_snapshot_full(earnings_date="2026-07-22")
         c = dc.build_contract(_goog_full_docs(module_composite=comp, snapshot=snap))
-        self.assertEqual(c["catalysts"][0]["days_out"], -3)
+        # QC9: a past earnings date (days_out -3) is no longer a forward
+        # catalyst -- it is filtered OUT of catalysts[] and disclosed in
+        # catalysts_excluded_past instead (loud, not silent). The arithmetic
+        # itself (-3) is still computed and asserted here.
+        earnings = next(x for x in c["catalysts_excluded_past"] if x["type"] == "earnings")
+        self.assertEqual(earnings["days_out"], -3)
 
     def test_days_out_uses_as_of_utc_when_composite_as_of_absent(self):
         comp = _goog_full_composite()
@@ -1061,8 +1066,13 @@ class TestCatalystsAssembly(unittest.TestCase):
         self.assertEqual(c["catalysts"][0]["days_out"], 6)
 
     def test_dividend_catalyst(self):
+        # QC9: the ex-date (2026-06-08) is 44 days before as_of (2026-07-22) --
+        # a past catalyst -- so it is filtered OUT of the forward catalysts[]
+        # array and disclosed instead in catalysts_excluded_past (loud, not
+        # silent; this is the exact shape of the MU dividend-ex-date defect).
         c = dc.build_contract(_goog_full_docs())
-        dividend = next(x for x in c["catalysts"] if x["type"] == "dividend")
+        self.assertNotIn("dividend", [x["type"] for x in c.get("catalysts", [])])
+        dividend = next(x for x in c["catalysts_excluded_past"] if x["type"] == "dividend")
         self.assertEqual(dividend["date_iso"], "2026-06-08")
         self.assertEqual(dividend["label"], "dividend ex-date")
         self.assertIs(dividend["in_thesis"], False)
@@ -1133,6 +1143,66 @@ class TestCatalystsAssembly(unittest.TestCase):
                             "price": {"last": 346.19}}
         c = dc.build_contract(docs)
         self.assertNotIn("catalysts", c)
+
+
+class TestQC9PastCatalystFilter(unittest.TestCase):
+    """QC9 repro: the MU 2026-08-08 run emitted a dividend ex-date 33 days in
+    the past (2026-07-06) as a forward-looking catalyst row on every refresh,
+    because build_catalysts never gated on ``date >= as_of``. Verifies the
+    date >= as_of filter, the >= (not >) boundary at days_out==0, and that the
+    drop is disclosed rather than silent."""
+
+    def _mu_repro_docs(self, *, earnings_date="2026-09-22", ex_date="2026-07-06"):
+        comp = _goog_full_composite()
+        comp["as_of"] = "2026-08-08"
+        snap = _goog_snapshot_full(as_of_utc="2026-08-08T00:00:00Z",
+                                   earnings_date=earnings_date, ex_date=ex_date)
+        return _goog_full_docs(module_composite=comp, snapshot=snap)
+
+    def test_past_dividend_excluded_from_forward_catalysts(self):
+        c = dc.build_contract(self._mu_repro_docs())
+        for cat in c.get("catalysts", []):
+            self.assertGreaterEqual(
+                cat["date_iso"], "2026-08-08",
+                "a past-dated catalyst leaked into the forward catalysts[] array: %r" % cat)
+        self.assertNotIn("dividend", [x["type"] for x in c.get("catalysts", [])])
+
+    def test_future_earnings_survives_with_positive_days_out(self):
+        c = dc.build_contract(self._mu_repro_docs())
+        earnings = next(x for x in c["catalysts"] if x["type"] == "earnings")
+        self.assertEqual(earnings["date_iso"], "2026-09-22")
+        self.assertGreater(earnings["days_out"], 0)
+
+    def test_same_day_catalyst_survives_with_zero_days_out(self):
+        # The filter is date >= as_of (not strictly >) -- a same-day row must
+        # still survive into the forward array.
+        c = dc.build_contract(self._mu_repro_docs(earnings_date="2026-08-08"))
+        earnings = next(x for x in c["catalysts"] if x["type"] == "earnings")
+        self.assertEqual(earnings["days_out"], 0)
+
+    def test_past_dividend_disclosed_not_silently_dropped(self):
+        c = dc.build_contract(self._mu_repro_docs())
+        excluded = c["catalysts_excluded_past"]
+        dividend = next(x for x in excluded if x["type"] == "dividend")
+        self.assertEqual(dividend["date_iso"], "2026-07-06")
+        # 2026-07-06 -> 2026-08-08 == -33 days (the exact MU repro gap).
+        self.assertEqual(dividend["days_out"], -33)
+        self.assertEqual(dividend["label"], "dividend ex-date")
+
+    def test_unparseable_date_never_classified_as_past(self):
+        # A catalyst with a malformed date can't be proven past or future --
+        # QC9 must never guess; it keeps the pre-fix behaviour (kept, days_out
+        # None) for entries it cannot classify.
+        snap = _goog_snapshot_full(as_of_utc="2026-08-08T00:00:00Z",
+                                   earnings_date="2026-09-22", ex_date="2026-07-06")
+        snap["events"]["catalysts"] = [
+            {"label": "TBD event", "date_iso": "TBD", "type": "event"}]
+        comp = _goog_full_composite()
+        comp["as_of"] = "2026-08-08"
+        c = dc.build_contract(_goog_full_docs(module_composite=comp, snapshot=snap))
+        tbd = next(x for x in c["catalysts"] if x.get("label") == "TBD event")
+        self.assertIsNone(tbd["days_out"])
+        self.assertNotIn("TBD event", [x.get("label") for x in c.get("catalysts_excluded_past", [])])
 
 
 class TestThesisIdentity(unittest.TestCase):

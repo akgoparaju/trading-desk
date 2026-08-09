@@ -26,6 +26,37 @@ _PE_TTM_TOL = 0.03          # +-3% pe_ttm vs last/eps_ttm
 _PE_FWD_TOL = 0.05          # +-5% pe_fwd vs last/eps_ntm_consensus
 _NET_CASH_TOL = 1e6         # +-$1M reconciliation
 _PC_TOL = 0.15              # |pc_full_chain - pc_realtime| max spread
+# QC1: pe_fwd (derived from OUR eps_ntm_consensus) vs the vendor's own
+# ForwardPE. This is a genuine cross-vendor counterparty (unlike
+# check_pe_arithmetic's pe_fwd leg, which divides by the SAME eps_ntm it
+# checks and so cannot catch an eps_ntm defect). Measured: 25% is wide enough
+# that it does NOT catch AAPL's shipped NTM-EPS defect (11.1% delta) but DOES
+# catch MU's (125.0% delta) -- see check_forward_pe_crossvendor docstring.
+_PE_FWD_CROSSVENDOR_TOL = 0.25
+
+# QC3 leg A / D1-REGRESSION: three-way TTM EPS reconciliation (vendor
+# eps_ttm vs eps_ttm_computed [sum of 4 reportedEPS] vs eps_ttm_from_ni [net
+# income TTM / latest-quarter shares]) -- DISCLOSURE-ONLY (see check_eps
+# docstring). Measured max pairwise divergence on the two CALIBRATION names
+# is 1.63% (AAPL) / 1.89% (MU), but an 8-ticker out-of-sample survey found
+# vendor eps_ttm (GAAP-diluted) and eps_ttm_computed (often non-GAAP) are
+# genuinely different quantities whose real dispersion routinely exceeds 3%
+# (NVDA 12.05%, TSLA 36.79%, UNH 40.57%, ORCL 23.06%, TSM 22.01%) -- far
+# above this noise floor, which falsifies 3% as a BLOCKING threshold. Kept
+# as the REPORTING threshold: it now selects what gets flagged in the
+# detail, never what fails the gate.
+_EPS_TTM_RECONCILE_TOL = 0.03
+
+# QC3 leg B: per-quarter implied-share-count divergence (implied_shares =
+# netIncome_q / reportedEPS_q vs the SAME quarter's balance-sheet share
+# count). Measured (both real bundles, same-quarter join -- see
+# check_eps_quarterly_shares docstring for the full evidence table): the
+# corrupt AAPL quarter is +5.74%; MU's oldest (legitimate) quarter is -6.09%,
+# LARGER in magnitude. No single threshold catches the former without also
+# flagging the latter. 5% is chosen to catch the known defect on the tighter,
+# more-recent quarters; the disclosed residual false-positive risk on old,
+# fast-share-growth quarters is deferred to the planned 22-ticker survey.
+_EPS_IMPLIED_SHARES_TOL = 0.05
 
 # Top-level snapshot blocks whose presence must be provenance-accounted-for.
 # "macro" is intentionally excluded: it is context (risk-free rate), never a
@@ -325,8 +356,204 @@ def check_pe_arithmetic(s):
     return _result("check_pe_arithmetic", True, detail)
 
 
+def check_forward_pe_crossvendor(s):
+    """valuation.pe_fwd vs valuation.pe_overview_fwd (vendor ForwardPE), +-25%.
+
+    QC1: check_pe_arithmetic's pe_fwd leg divides last by the SAME eps_ntm
+    it is checking pe_fwd against -- it is tautological and cannot catch an
+    eps_ntm defect. This leg compares against overview.ForwardPE, an
+    independently-sourced vendor consensus figure, and so CAN catch a gross
+    eps_ntm error -- but is not reliably sensitive to every magnitude of
+    error: measured against the shipped (pre-fix) NTM-EPS defect, this leg
+    FAILS on MU (pe_fwd 11.9488 vs vendor 5.31: 125.0% delta) but PASSES on
+    AAPL (pe_fwd 35.5019 vs vendor 31.95: 11.1% delta, under tolerance) --
+    the AAPL defect was caught by the eps_ntm blend fix itself, not by this
+    leg. SKIPPED when either P/E is absent or <= 0 (P/E not meaningful).
+    """
+    val = _get(s, "valuation")
+    pe_fwd = _get(val, "pe_fwd")
+    pe_overview_fwd = _get(val, "pe_overview_fwd")
+    if not (_is_num(pe_fwd) and _is_num(pe_overview_fwd)):
+        return _result("check_forward_pe_crossvendor", None,
+                       "SKIP: pe_fwd or pe_overview_fwd absent/non-numeric")
+    if pe_fwd <= 0 or pe_overview_fwd <= 0:
+        return _result("check_forward_pe_crossvendor", None,
+                       "SKIP: pe_fwd or pe_overview_fwd not > 0 (P/E n/m)")
+    diff = abs(pe_fwd - pe_overview_fwd) / abs(pe_overview_fwd)
+    passed = diff <= _PE_FWD_CROSSVENDOR_TOL
+    return _result("check_forward_pe_crossvendor", passed,
+                   f"pe_fwd {pe_fwd:.4g} vs vendor ForwardPE {pe_overview_fwd:.4g}: "
+                   f"{diff:.2%} diff (tol {_PE_FWD_CROSSVENDOR_TOL:.0%})")
+
+
+def check_eps(s):
+    """QC3 leg A / D1-REGRESSION: three-way TTM EPS reconciliation --
+    DISCLOSURE-ONLY (never fails the gate).
+
+    fundamentals.eps_ttm (vendor, a GAAP-diluted TTM figure), eps_ttm_computed
+    (sum of the last 4 reportedEPS, frequently a non-GAAP basis), and
+    eps_ttm_from_ni (net income TTM / latest-quarter shares) are three
+    INDEPENDENTLY-sourced TTM EPS figures that previously coexisted
+    unreconciled. Compares every present pair; the divergence is always
+    NAMED in the detail (so a corrupt figure stays visible in
+    meta.qc.checks), but this leg may only ever return True or None (SKIP),
+    NEVER False. Needs at least 2 of the 3 values present to run at all.
+
+    D1-REGRESSION: this leg was BLOCKING at _EPS_TTM_RECONCILE_TOL (3%) on
+    the theory that eps_ttm/eps_ttm_computed/eps_ttm_from_ni are the same
+    quantity measured three ways. Rebuilding 8 archived out-of-sample
+    bundles and running this leg found that premise false: vendor eps_ttm is
+    a GAAP-diluted TTM figure while eps_ttm_computed sums reportedEPS (often
+    a DIFFERENT, non-GAAP basis) over a possibly different window -- they are
+    related, not identical, quantities, and 3% is far below their real
+    dispersion. Measured max pairwise divergence: NVDA 12.05%, TSLA 36.79%,
+    UNH 40.57%, ORCL 23.06%, PLTR 6.74%, MRVL 6.65%, TSM 22.01% (plus a
+    3705.10% eps_ttm_from_ni leg -- TSM's netIncome is in New Taiwan Dollars
+    while reportedEPS is USD-per-ADS, the same currency-mismatch structural
+    cause documented in check_eps_quarterly_shares) -- 7 of 8 out-of-sample
+    tickers measured exceed tolerance on this leg alone (only GOOG, at 0.50%,
+    stayed under it in this particular snapshot), while the two calibration
+    names sit at AAPL 1.60% / MU 1.93%. skills/market-snapshot/SKILL.md
+    requires exit 0 to proceed and ships no default waiver, so a BLOCKING
+    leg here would halt nearly every analysis run on any name outside the
+    two calibration tickers. It is also internally inconsistent with
+    check_eps_quarterly_shares, whose own docstring documents the same
+    currency-mismatch and near-zero-EPS causes as grounds for making THAT
+    leg non-blocking, while the same netIncome feeds eps_ttm_from_ni here.
+    _EPS_TTM_RECONCILE_TOL is kept -- it now selects what gets flagged in
+    the detail, not what fails the gate.
+
+    This is a coarse, TTM-level sanity check -- it does NOT reliably catch a
+    single corrupted quarter's reportedEPS (that error is diluted across 4
+    quarters in eps_ttm_computed and mostly absent from eps_ttm_from_ni,
+    which does not depend on any individual reportedEPS at all). See
+    check_eps_quarterly_shares (QC3 leg B) for the leg that does.
+    """
+    fund = _get(s, "fundamentals")
+    candidates = (
+        ("vendor", _get(fund, "eps_ttm")),
+        ("computed", _get(fund, "eps_ttm_computed")),
+        ("from_ni", _get(fund, "eps_ttm_from_ni")),
+    )
+    present = [(name, v) for name, v in candidates if _is_num(v)]
+    if len(present) < 2:
+        return _result("check_eps", None,
+                       "SKIP: fewer than 2 of eps_ttm/eps_ttm_computed/"
+                       "eps_ttm_from_ni present/numeric")
+
+    offenders = []
+    max_diff = 0.0
+    pairs_checked = 0
+    for i in range(len(present)):
+        for j in range(i + 1, len(present)):
+            name_a, a = present[i]
+            name_b, b = present[j]
+            base = abs(a) if a != 0 else abs(b)
+            if base == 0:
+                continue
+            diff = abs(a - b) / base
+            pairs_checked += 1
+            max_diff = max(max_diff, diff)
+            if diff > _EPS_TTM_RECONCILE_TOL:
+                offenders.append(f"{name_a}={a:.4g} vs {name_b}={b:.4g}: {diff:.2%} diff")
+
+    if pairs_checked == 0:
+        return _result("check_eps", None, "SKIP: all present EPS values are zero")
+    if offenders:
+        return _result(
+            "check_eps", True,
+            "DISCLOSURE (non-blocking -- see docstring, measured out-of-sample "
+            "dispersion falsifies this as a blocking gate): " +
+            "; ".join(offenders) + f" (report threshold {_EPS_TTM_RECONCILE_TOL:.0%})")
+    return _result("check_eps", True,
+                   f"{pairs_checked} pair(s) within tolerance (max diff "
+                   f"{max_diff:.2%}, tol {_EPS_TTM_RECONCILE_TOL:.0%})")
+
+
+def check_eps_quarterly_shares(s):
+    """QC3 leg B / QC3-REGRESSION: per-quarter implied-share-count divergence
+    -- DISCLOSURE-ONLY (never fails the gate).
+
+    Reads fundamentals.eps_share_reconciliation (build_snapshot.
+    _eps_share_reconciliation): implied_shares = netIncome_q / reportedEPS_q,
+    already joined against the SAME quarter's balance-sheet share count
+    (never a different quarter's, which would produce spurious divergence on
+    a name whose share count changes materially over time).
+
+    QC3-REGRESSION (22-ticker survey, 88 quarters = 22 tickers x 4): this leg
+    was originally BLOCKING at _EPS_IMPLIED_SHARES_TOL (5%) on the theory
+    that it uniquely catches a corrupted single-quarter reportedEPS (leg A's
+    TTM-level check dilutes a bad quarter across a 4-quarter sum and misses
+    it). The survey falsified that as a blocking mechanism. Measured
+    |divergence_pct| distribution: min 0.04%, p50 4.94%, p90 188.5%, p95
+    656.9%, max 3062.9%. Fire rate at the shipped 5% tolerance: 43/88 = 48.9%
+    of ALL quarters -- a coin flip, so it cannot function as a blocking gate.
+    Two STRUCTURAL (not corruption) causes were pinned:
+      1. Currency mismatch on foreign issuers: TSM's INCOME_STATEMENT.
+         netIncome is in New Taiwan Dollars while EARNINGS.reportedEPS is
+         USD-per-ADS -- dividing them inflates implied shares ~31.6x (the FX
+         rate). All four TSM quarters land at +2886%..+3063%. The check is
+         mechanically INAPPLICABLE to such names, not merely noisy.
+      2. Near-zero-EPS amplification: INTC's quarterly EPS is $0.13-$0.30; a
+         few cents of GAAP-vs-reported basis difference produces -820%,
+         -353%, -181%, +290%. Same structural pattern on RUN, BE, OUST, UNH.
+    No threshold separates AAPL's genuine corrupt quarter (+5.74%,
+    reportedEPS 1.91 where GAAP was 2.02) from these structural artifacts --
+    so this leg now only ever returns True or None (SKIP), never False. The
+    divergence detail still NAMES the offending quarter(s) and measured
+    percentage (so AAPL's corrupt row remains visible in meta.qc.checks for
+    a human or LLM reader), it just never blocks the gate over it.
+    _EPS_IMPLIED_SHARES_TOL is kept -- it now selects what gets REPORTED in
+    the detail, not what fails the check.
+    """
+    rows = _get(_get(s, "fundamentals"), "eps_share_reconciliation")
+    if not rows:
+        return _result("check_eps_quarterly_shares", None,
+                       "SKIP: no eps_share_reconciliation rows")
+
+    offenders = []
+    checked = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        div = row.get("divergence_pct")
+        if not _is_num(div):
+            continue
+        checked += 1
+        if abs(div) > _EPS_IMPLIED_SHARES_TOL:
+            offenders.append(
+                f"{row.get('fiscal_date_ending')}: implied vs same-quarter "
+                f"balance shares diverge {div:+.2%}")
+
+    if checked == 0:
+        return _result("check_eps_quarterly_shares", None,
+                       "SKIP: no row carries a numeric divergence_pct")
+    if offenders:
+        return _result(
+            "check_eps_quarterly_shares", True,
+            "DISCLOSURE (non-blocking -- see docstring, 48.9% measured fire "
+            "rate falsifies this as a blocking gate): " + "; ".join(offenders) +
+            f" (report threshold {_EPS_IMPLIED_SHARES_TOL:.0%})")
+    return _result("check_eps_quarterly_shares", True,
+                   f"{checked} quarter(s) within {_EPS_IMPLIED_SHARES_TOL:.0%} "
+                   f"implied-share tolerance")
+
+
 def check_net_cash(s):
-    """net_cash_defined: cash_st + lt_inv - total_debt == net within +-$1M."""
+    """net_cash_defined: arithmetic leg + two component-SOURCING legs.
+
+    QC4: the original leg (cash_st + lt_inv - total_debt == net) is an
+    arithmetic-consistency gate, not a correctness gate -- it passed
+    unchanged on both the shipped-buggy AND the corrected numbers (see
+    check_net_cash_vendor_signature for the vendor-defect disclosure this
+    now routes around). Two SOURCING legs are added now that the components
+    live in the snapshot (build_snapshot._build_net_cash, QC4): cash_st must
+    equal the sum of its disclosed components (cash_and_equivalents +
+    short_term_investments), and total_debt must equal the sum of its
+    disclosed components (short_term_debt + long_term_debt). A leg with no
+    disclosed components (vendor fallback -- every component of that leg
+    absent) is SKIPPED for that leg, not failed.
+    """
     ncd = _get(_get(s, "fundamentals"), "net_cash_defined")
     cash_st = _get(ncd, "cash_st")
     lt_inv = _get(ncd, "lt_inv")
@@ -335,12 +562,196 @@ def check_net_cash(s):
     if not all(_is_num(v) for v in (cash_st, lt_inv, total_debt, net)):
         return _result("check_net_cash", None,
                        "SKIP: net_cash_defined component absent/non-numeric")
+
+    problems = []
+    skips = []
+
     computed = cash_st + lt_inv - total_debt
     delta = abs(computed - net)
-    passed = delta <= _NET_CASH_TOL
-    return _result("check_net_cash", passed,
-                   f"cash_st+lt_inv-total_debt = {computed:.4g} vs net {net:.4g}: "
-                   f"delta {delta:.4g} (tol {_NET_CASH_TOL:.0g})")
+    net_detail = (f"cash_st+lt_inv-total_debt = {computed:.4g} vs net {net:.4g}: "
+                 f"delta {delta:.4g} (tol {_NET_CASH_TOL:.0g})")
+    if delta > _NET_CASH_TOL:
+        problems.append(net_detail)
+
+    cce = _get(ncd, "cash_and_equivalents")
+    sti = _get(ncd, "short_term_investments")
+    if _is_num(cce) or _is_num(sti):
+        cash_sum = (cce if _is_num(cce) else 0.0) + (sti if _is_num(sti) else 0.0)
+        cash_delta = abs(cash_sum - cash_st)
+        if cash_delta > _NET_CASH_TOL:
+            problems.append(
+                f"cash_and_equivalents+short_term_investments = {cash_sum:.4g} "
+                f"vs cash_st {cash_st:.4g}: delta {cash_delta:.4g}")
+    else:
+        skips.append("cash_st sourcing: components absent (vendor fallback)")
+
+    std = _get(ncd, "short_term_debt")
+    ltd = _get(ncd, "long_term_debt")
+    if _is_num(std) and _is_num(ltd):
+        debt_sum = std + ltd
+        debt_delta = abs(debt_sum - total_debt)
+        if debt_delta > _NET_CASH_TOL:
+            problems.append(
+                f"short_term_debt+long_term_debt = {debt_sum:.4g} vs "
+                f"total_debt {total_debt:.4g}: delta {debt_delta:.4g}")
+    elif _is_num(std) or _is_num(ltd):
+        # QC4-REGRESSION: exactly one of shortTermDebt/longTermDebt is absent
+        # -- total_debt may legitimately be vendor-sourced (build_snapshot.
+        # _build_net_cash's incomplete-components fallback), so it will NOT
+        # equal the partial sum by design. A strict sourcing check here would
+        # wrongly FAIL the very fix that corrects XOM/UNH/CAT/JPM-shaped
+        # understatement; skip this leg (disclosed) instead of failing it.
+        #
+        # D4: that "may be vendor-sourced" wording was FALSE for the
+        # sub-case where shortLongTermDebtTotal is ALSO absent --
+        # total_debt then silently collapses to the single visible
+        # component (build_snapshot._build_net_cash's
+        # total_debt_source == "incomplete_no_vendor"), never consulting a
+        # vendor number at all. Disclose that honestly instead.
+        if _get(ncd, "total_debt_source") == "incomplete_no_vendor":
+            skips.append(
+                "total_debt sourcing: components incomplete (one of "
+                "short_term_debt/long_term_debt absent) and no vendor "
+                "shortLongTermDebtTotal to fall back to -- total_debt "
+                "collapsed to the single visible component (UNDERSTATED, "
+                "NOT vendor-sourced)")
+        else:
+            skips.append("total_debt sourcing: components incomplete (one of "
+                         "short_term_debt/long_term_debt absent) -- total_debt "
+                         "may be vendor-sourced, see check_net_cash_vendor_signature")
+    else:
+        skips.append("total_debt sourcing: components absent (vendor fallback)")
+
+    # D5: long_term_investments is disclosed as a first-class component
+    # (build_snapshot._build_net_cash) distinguishing ABSENT from a
+    # genuinely-reported zero. Only disclose when the KEY is present in the
+    # dict (post-D5 snapshot shape) and its value is None -- a pre-D5
+    # snapshot that never carried this key at all gets no note (nothing new
+    # to say), and a present (possibly zero) value needs none either
+    # (nothing is missing).
+    if isinstance(ncd, dict) and "long_term_investments" in ncd \
+            and ncd.get("long_term_investments") is None:
+        skips.append(
+            "lt_inv sourcing: long_term_investments component absent -> "
+            "treated as 0.0 (not a disclosed genuine zero)")
+
+    if problems:
+        return _result("check_net_cash", False, "; ".join(problems + skips))
+    detail = net_detail
+    if skips:
+        detail += "; " + "; ".join(skips)
+    return _result("check_net_cash", True, detail)
+
+
+def check_net_cash_vendor_signature(s):
+    """DISCLOSURE-ONLY (never fails): flags measured vendor aggregate defects.
+
+    QC4 finding (cash leg): vendor cashAndShortTermInvestments is
+    byte-identical to cashAndCashEquivalentsAtCarryingValue alone on BOTH
+    validation names (AAPL, MU) while a non-zero shortTermInvestments sits
+    beside it, silently dropped. net_cash_defined already routes around this
+    via component sums (build_snapshot._build_net_cash) -- this leg exists
+    purely to make the vendor defect VISIBLE in the QC checks[] array.
+
+    QC4-REGRESSION finding (debt leg, 22-ticker survey): shortLongTermDebtTotal
+    reconciles to shortTermDebt+longTermDebt on only 4/22 names ("matches-a":
+    AAPL, INTC, TSM, KO), to longTermDebt+capitalLeaseObligations (OMITTING
+    shortTermDebt) on 4/22 ("matches-b": MU, GOOG, META, OUST), and to
+    NEITHER on 13/22 ("matches-neither" -- e.g. MSFT: std 18.905B + ltd
+    31.067B + leases 16.532B = 66.504B vs a vendor aggregate of 128.808B; our
+    component build of 49.972B is the more defensible number, but the
+    disagreement must never be silent). A further category,
+    "components-incomplete", covers names where shortTermDebt or longTermDebt
+    is itself absent (XOM, UNH, CAT, JPM) -- our own total_debt may be
+    vendor-sourced there (see build_snapshot._build_net_cash's
+    incomplete-components fallback) and so cannot be tested against either
+    vendor convention at all. Note (JPM): a bank's shortLongTermDebtTotal
+    ($1.24 TRILLION) is deposits/trading liabilities bleeding into an
+    industrial-company schema -- net cash is a category error for financials.
+    This leg applies NO sector logic; it just makes JPM's number as loud as
+    everyone else's.
+
+    Both legs are independent and SKIP independently when their inputs are
+    absent/non-numeric; the whole check SKIPs (None) only when BOTH legs
+    skip. It can only ever return True or None; it must never fail the gate
+    over a vendor data characteristic we have already corrected for or
+    merely disclosed.
+    """
+    ncd = _get(_get(s, "fundamentals"), "net_cash_defined")
+    vendor_agg = _get(ncd, "vendor_aggregates")
+
+    # -- cash-signature leg (QC4, unchanged) --------------------------------
+    cce = _get(ncd, "cash_and_equivalents")
+    sti = _get(ncd, "short_term_investments")
+    vendor_cash_st = _get(vendor_agg, "cash_and_short_term_investments")
+    cash_leg_skipped = not (_is_num(cce) and _is_num(sti) and _is_num(vendor_cash_st))
+    if cash_leg_skipped:
+        cash_detail = ("SKIP cash-signature leg: cash_and_equivalents, "
+                       "short_term_investments, or vendor_aggregates."
+                       "cash_and_short_term_investments absent/non-numeric")
+    else:
+        is_defect = sti > 0 and abs(vendor_cash_st - cce) <= max(1.0, abs(cce) * 1e-9)
+        if is_defect:
+            cash_detail = (
+                f"DISCLOSURE: vendor cashAndShortTermInvestments ({vendor_cash_st:.4g}) "
+                f"== cash_and_equivalents alone ({cce:.4g}) while short_term_investments "
+                f"= {sti:.4g} > 0 is silently dropped by the vendor aggregate; "
+                f"net_cash_defined routes around it via the component sum "
+                f"(cash_st = {cce + sti:.4g})")
+        else:
+            cash_detail = (
+                f"no drop-sti signature: vendor cashAndShortTermInvestments "
+                f"({vendor_cash_st:.4g}) != cash_and_equivalents alone ({cce:.4g})")
+
+    # -- debt-aggregate classification leg (QC4-REGRESSION, new) ------------
+    std = _get(ncd, "short_term_debt")
+    ltd = _get(ncd, "long_term_debt")
+    leases = _get(ncd, "capital_lease_obligations")
+    total_debt = _get(ncd, "total_debt")
+    vendor_total_debt = _get(vendor_agg, "short_long_term_debt_total")
+    debt_leg_skipped = not (_is_num(total_debt) and _is_num(vendor_total_debt))
+    if debt_leg_skipped:
+        debt_detail = ("SKIP debt-aggregate leg: total_debt or "
+                       "vendor_aggregates.short_long_term_debt_total "
+                       "absent/non-numeric")
+    elif std is None or ltd is None:
+        debt_detail = (
+            f"DISCLOSURE debt-aggregate classification=components-incomplete: "
+            f"shortTermDebt={std!r}, longTermDebt={ltd!r} -- our total_debt "
+            f"({total_debt:.4g}) could not be built from both components and "
+            f"cannot be tested against either vendor convention; vendor "
+            f"shortLongTermDebtTotal={vendor_total_debt:.4g}")
+    else:
+        tol = max(1.0, abs(vendor_total_debt) * 1e-6)
+        std_ltd_sum = std + ltd
+        ltd_leases_sum = (ltd + leases) if _is_num(leases) else None
+        if abs(vendor_total_debt - std_ltd_sum) <= tol:
+            debt_detail = (
+                f"debt-aggregate classification=matches-(a): vendor "
+                f"shortLongTermDebtTotal ({vendor_total_debt:.4g}) == "
+                f"shortTermDebt+longTermDebt ({std_ltd_sum:.4g})")
+        elif ltd_leases_sum is not None and abs(vendor_total_debt - ltd_leases_sum) <= tol:
+            debt_detail = (
+                f"debt-aggregate classification=matches-(b): vendor "
+                f"shortLongTermDebtTotal ({vendor_total_debt:.4g}) == "
+                f"longTermDebt+capitalLeaseObligations ({ltd_leases_sum:.4g}), "
+                f"OMITTING shortTermDebt ({std:.4g})")
+        else:
+            leases_repr = f"{ltd_leases_sum:.4g}" if ltd_leases_sum is not None else "n/a"
+            debt_detail = (
+                f"DISCLOSURE debt-aggregate classification=matches-neither: "
+                f"vendor shortLongTermDebtTotal ({vendor_total_debt:.4g}) reconciles "
+                f"to neither shortTermDebt+longTermDebt ({std_ltd_sum:.4g}) nor "
+                f"longTermDebt+capitalLeaseObligations ({leases_repr}); our "
+                f"total_debt ({total_debt:.4g}, component-built, ex-lease) is "
+                f"carried as the more defensible figure")
+
+    if cash_leg_skipped and debt_leg_skipped:
+        return _result(
+            "check_net_cash_vendor_signature", None,
+            "SKIP: cash-signature and debt-aggregate inputs both absent/non-numeric")
+    return _result("check_net_cash_vendor_signature", True,
+                   cash_detail + " || " + debt_detail)
 
 
 def check_options_freshness(s):
@@ -587,7 +998,11 @@ ALL_CHECKS = [
     check_ranges,
     check_price_spotcheck,
     check_pe_arithmetic,
+    check_forward_pe_crossvendor,
+    check_eps,
+    check_eps_quarterly_shares,
     check_net_cash,
+    check_net_cash_vendor_signature,
     check_options_freshness,
     check_security_master,
     check_provenance,

@@ -361,6 +361,17 @@ def _days_out(date_iso, as_of_date):
     return (d1 - d0).days
 
 
+def _is_past_catalyst(days_out):
+    """True iff ``days_out`` is a known negative gap -- the catalyst's date
+    precedes ``as_of_date``. ``None`` (a missing/unparseable date, or a missing
+    ``as_of_date``) is NEVER treated as past: QC9 only classifies what it can
+    prove, so an unclassifiable row keeps its pre-fix behaviour (kept, not
+    dropped). ``days_out == 0`` (same-day) is NOT past -- the filter is
+    ``date >= as_of``, not strictly ``>``.
+    """
+    return isinstance(days_out, int) and days_out < 0
+
+
 def build_catalysts(snapshot, tradeplan, as_of_date):
     """Assemble the FR-2 ``catalysts[]`` array from the snapshot events + tradeplan.
 
@@ -373,14 +384,41 @@ def build_catalysts(snapshot, tradeplan, as_of_date):
       earnings  <- snapshot.events.next_earnings (+ implied_move, catalyst_in_thesis)
       dividend  <- snapshot.events.dividends
       (any pre-existing snapshot.events.catalyst elements are appended verbatim)
+
+    QC9 (MU 2026-08-08 defect): a catalyst whose date precedes ``as_of_date``
+    (``days_out < 0``) is a STALE row, not a forward-looking one -- the exact
+    shape of the bug was a dividend ex-date 33 days in the past emitted into
+    this array on every refresh. Such rows are filtered OUT of the returned
+    ``catalysts[]`` and instead collected into a second ``excluded_past`` list
+    so the drop is disclosed, never silent -- ``build_contract`` attaches it as
+    top-level ``catalysts_excluded_past`` when non-empty (see
+    ``docs/decision.schema.json`` -- the contract object declares
+    ``additionalProperties: true``, so this is schema-legal without a pin
+    update). A row whose date is missing/unparseable has ``days_out is None``
+    and can never be classified past, so it is always kept in ``catalysts[]``
+    (never guessed).
+
+    Returns ``(catalysts, excluded_past)``.
     """
     events = _dig(snapshot, "events") or {}
     catalysts = []
+    excluded_past = []
+    # Structured (earnings/dividend) dates, collected regardless of past/future
+    # status, so the narrative-dedup below still fires even when the
+    # structured entry on that date was itself filtered into excluded_past.
+    structured_dates = set()
+
+    def _file(item):
+        if _is_past_catalyst(item.get("days_out")):
+            excluded_past.append(item)
+        else:
+            catalysts.append(item)
 
     # -- earnings ---------------------------------------------------------------
     next_earnings = events.get("next_earnings")
     earnings_date = _dig(events, "next_earnings", "date")
     if isinstance(next_earnings, dict) and earnings_date:
+        structured_dates.add(earnings_date)
         catalyst_in_thesis = _dig(tradeplan, "expression", "catalyst_in_thesis")
         item = {
             "label": "earnings",
@@ -395,12 +433,13 @@ def build_catalysts(snapshot, tradeplan, as_of_date):
         consensus_eps = next_earnings.get("consensus_eps")
         if consensus_eps is not None:
             item["consensus_eps"] = consensus_eps
-        catalysts.append(item)
+        _file(item)
 
     # -- dividend ---------------------------------------------------------------
     dividends = events.get("dividends")
     ex_date = _dig(events, "dividends", "ex_date")
     if isinstance(dividends, dict) and ex_date:
+        structured_dates.add(ex_date)
         item = {
             "label": "dividend ex-date",
             "date_iso": ex_date,
@@ -411,7 +450,7 @@ def build_catalysts(snapshot, tradeplan, as_of_date):
         per_share = dividends.get("per_share")
         if per_share is not None:
             item["per_share"] = per_share
-        catalysts.append(item)
+        _file(item)
 
     # -- any pre-existing catalysts (snapshot.events.catalysts). The snapshot authors
     # these as narrative {date, event, impact} entries (market-snapshot SKILL), which
@@ -420,7 +459,6 @@ def build_catalysts(snapshot, tradeplan, as_of_date):
     # coincides with an already-listed structured earnings/dividend is that same event
     # surfaced twice -> skip it; an entry with no usable date can't satisfy the schema
     # -> skip it. (Two distinct narratives on the same date are both kept.)
-    structured_dates = {c.get("date_iso") for c in catalysts if c.get("date_iso")}
     existing = events.get("catalysts")
     if isinstance(existing, list):
         for c in existing:
@@ -440,9 +478,9 @@ def build_catalysts(snapshot, tradeplan, as_of_date):
             impact = c.get("impact")
             if impact is not None:
                 item["impact"] = impact
-            catalysts.append(item)
+            _file(item)
 
-    return catalysts
+    return catalysts, excluded_past
 
 
 # --------------------------------------------------------------------------- #
@@ -753,9 +791,12 @@ def build_contract(docs):
     if not as_of_date:
         as_of_utc = meta.get("as_of_utc")
         as_of_date = as_of_utc[:10] if isinstance(as_of_utc, str) else None
-    catalysts = build_catalysts(snapshot, tradeplan, as_of_date)
+    catalysts, catalysts_excluded_past = build_catalysts(snapshot, tradeplan, as_of_date)
     if catalysts:
         contract["catalysts"] = catalysts
+    # QC9 disclosure: past-dated catalysts are never silently dropped.
+    if catalysts_excluded_past:
+        contract["catalysts_excluded_past"] = catalysts_excluded_past
 
     # ---- thesis (FR-5 id; omitted whole when coverage_manifest absent) -------
     thesis = build_thesis(

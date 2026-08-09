@@ -195,7 +195,8 @@ def _clean(x):
 # 1. Volatility state (max 20): rv percentile (16) + beta (4)
 # --------------------------------------------------------------------------- #
 
-def score_volatility(tech, beta, beta_n_days=None, ohlcv_rows=None) -> dict:
+def score_volatility(tech, beta, beta_n_days=None, ohlcv_rows=None,
+                     beta_n_obs=None) -> dict:
     """rv30_vs_10yr_pctile band (max 16) + benchmark beta band (max 4).
 
     RE-WEIGHT (risk-v1.1.0): factor max 25->20 (pctile 20->16, beta 5->4) to free
@@ -209,8 +210,14 @@ def score_volatility(tech, beta, beta_n_days=None, ohlcv_rows=None) -> dict:
     Short-history confidence gating (REAL-WORLD BUG: a beta of 3.61 computed from
     100 unadjusted return-days was fed the score as a plain number). A component
     is only trusted with enough history behind it:
-      - beta needs ``beta_n_days`` >= 150 return-days; below -> 0 with an explicit
-        "beta n/a (only {n} return-days; needs >=150 ...)" disclosure.
+      - beta needs ``beta_n_days`` >= 150 CALENDAR DAYS spanned by the
+        estimation window; below -> 0 with an explicit "beta n/a (only {n}
+        calendar days ...; needs >=150 ...)" disclosure. D8: QC5 repointed
+        ``beta_n_days`` from a naive return-days count to the calendar-day span
+        of the 5y-monthly beta window (``build_snapshot.build_benchmark``); the
+        disclosure must name that unit, never "return-days". When the actual
+        observation count (``beta_n_obs``, e.g. 60 monthly returns) is
+        reachable it is also named alongside the day span.
       - the rv30 regime percentile needs ``ohlcv_rows`` >= 500 (~2yr); below -> 0
         with "rv30 percentile n/a ({rows} rows; needs >=500 (~2yr) ...)".
     Gating trips ONLY when the gating count is PRESENT and below threshold; when
@@ -246,8 +253,14 @@ def score_volatility(tech, beta, beta_n_days=None, ohlcv_rows=None) -> dict:
     beta_gated = beta_n_days is not None and beta_n_days < _MIN_BETA_N_DAYS
     if beta is not None and beta_gated:
         beta_pts = 0
-        parts.append(f"beta n/a (only {_fmt(beta_n_days)} return-days; needs "
-                     f">={_MIN_BETA_N_DAYS} for a stable estimate)")
+        # D8: beta_n_days is CALENDAR DAYS spanned by the estimation window
+        # (post-QC5), never "return-days". Name the actual observation count
+        # (beta_n_obs) alongside it when the caller supplies it.
+        obs_clause = (f" ({_fmt(beta_n_obs)} monthly observations)"
+                      if beta_n_obs is not None else "")
+        parts.append(f"beta n/a (only {_fmt(beta_n_days)} calendar days"
+                     f"{obs_clause}; needs >={_MIN_BETA_N_DAYS} calendar "
+                     f"days for a stable estimate)")
     elif beta is not None:
         evaluable += 1
         if beta < 1.2:
@@ -269,7 +282,8 @@ def score_volatility(tech, beta, beta_n_days=None, ohlcv_rows=None) -> dict:
         "arithmetic": "; ".join(parts),
         "inputs": {"pctile_points": pctile_pts, "beta_points": beta_pts,
                    "rv30_vs_10yr_pctile": pctile, "beta": beta,
-                   "beta_n_days": beta_n_days, "ohlcv_rows": ohlcv_rows},
+                   "beta_n_days": beta_n_days, "beta_n_obs": beta_n_obs,
+                   "ohlcv_rows": ohlcv_rows},
         "evaluable": evaluable > 0,
     }
 
@@ -661,11 +675,18 @@ def score_tail_risk(overnight_gap) -> dict:
 
 # Suspect-floor detection thresholds (see valuation_floor). The 0.25 floor/last
 # ratio catches a collapsed floor directly; the [0.2, 5.0] pe_fwd/pe_5yr_median
-# band MIRRORS score_fundamental.score_valuation's sanity band so the SCORING and
-# DISPLAY paths agree on when the approx_current_eps method has broken down.
+# band MIRRORS score_fundamental.score_valuation's SECONDARY sanity band so the
+# SCORING and DISPLAY paths agree on when pe_5yr_median has become unreliable.
 _SUSPECT_FLOOR_RATIO = 0.25          # floor/last below this => suspect
 _SUSPECT_PE_BAND = (0.2, 5.0)        # pe_fwd/pe_5yr_median outside this => suspect
-_SUSPECT_REASON = "approx_current_eps method breakdown"
+# D8: QC12 replaced the pe-median method with rolling_ttm_reported_eps -- this
+# is the SHARED fallback reason for all three suspect triggers below (PRIMARY
+# reason absent, floor/last collapse, pe-ratio band), so it names pe_5yr_median
+# generically rather than a specific trigger. Printed verbatim by
+# render_pdf.py into the detail PDF -- must never claim the retired
+# "approx_current_eps" method broke down.
+_SUSPECT_REASON = ("pe_5yr_median (rolling_ttm_reported_eps) unreliable "
+                    "under EPS regime change")
 
 # Anchored-floor basis label (spec A2). Distinct, self-describing string so a
 # DISPLAY consumer can tell an anchored floor from a pe-median floor at a glance.
@@ -705,7 +726,8 @@ def validate_anchors(anchors) -> list:
     return issues
 
 
-def valuation_floor(pe_5yr_median, eps_ntm, last=None, pe_fwd=None, anchors=None):
+def valuation_floor(pe_5yr_median, eps_ntm, last=None, pe_fwd=None, anchors=None,
+                    pe_evaluable=None, pe_evaluability_reason=None):
     """A valuation-floor level for the downside map, or None.
 
     TWO MODES (spec A2):
@@ -722,26 +744,24 @@ def valuation_floor(pe_5yr_median, eps_ntm, last=None, pe_fwd=None, anchors=None
     In snapshot mode the level is a judgment anchor (where a 5-yr median multiple on
     forward EPS would put the stock), NOT a proven support.
 
-    SUSPECT SUPPRESSION (fix 3, snapshot mode only): the snapshot builds
-    ``pe_5yr_median`` with the
-    "approx_current_eps" method, which back-projects TODAY's EPS across the 5-yr
-    price history. For a name whose EPS regime changed (real MU: the median
-    collapses to 1.82), that baseline is garbage and the floor lands absurdly low
-    (~$134 on a ~$850 stock), yet the DISPLAY paths (football-field anchors,
-    downside ladder) were still drawing it. score_fundamental already GATES the
-    SCORING side on a sanity band; here we mirror that on the DISPLAY side. Rather
-    than DROP the row (which would break downside-map continuity), we RETURN it
-    flagged ``suspect: true`` so consumers can gray it / omit it from anchors while
-    the row still exists for the map.
-
-    The rule (documented, kept simple): the floor is SUSPECT when EITHER
+    SUSPECT SUPPRESSION (fix 3, snapshot mode only), QC12: ``pe_evaluable`` /
+    ``pe_evaluability_reason`` are build_snapshot's PRIMARY input-evaluability
+    verdict for ``pe_5yr_median`` (coverage/plausibility/EPS-series guards --
+    see build_snapshot._pe_evaluability). This is checked FIRST: when
+    ``pe_evaluable is False`` the row is flagged suspect with THAT reason,
+    regardless of what the SECONDARY checks below would say. The two SECONDARY
+    checks (kept byte-identical, absent/None PRIMARY input falls through to
+    them unchanged) are:
       (a) a reference ``last`` is given and floor/last < 0.25 (the floor has
           collapsed to under a quarter of the current price -- an impossible
           "value" anchor), OR
       (b) both ``pe_fwd`` and ``pe_5yr_median`` are given (>0) and their ratio
           pe_fwd/pe_5yr_median falls OUTSIDE [0.2, 5.0] -- the SAME band
-          score_fundamental uses to declare the approx method broken.
+          score_fundamental uses as its own secondary backstop.
     A non-suspect floor is returned exactly as before (``suspect`` absent).
+    Rather than DROP a suspect row (which would break downside-map
+    continuity), it is RETURNED flagged ``suspect: true`` so consumers can
+    gray it / omit it from anchors while the row still exists for the map.
     """
     # ANCHORED mode: the coverage dcf_bear REPLACES the pe-median floor entirely,
     # and is always trusted (no suspect machinery). The caller validated the
@@ -760,17 +780,31 @@ def valuation_floor(pe_5yr_median, eps_ntm, last=None, pe_fwd=None, anchors=None
            "basis": "valuation", "method": "pe_5yr_median x eps_ntm"}
 
     suspect = False
+    suspect_reason = None
+    # PRIMARY (QC12): build_snapshot's input-evaluability verdict, checked
+    # FIRST -- see score_fundamental.py's module docstring for why the ratio
+    # ALONE (checked below as a SECONDARY backstop) missed MU (two errors
+    # cancelled: numerator and denominator both distorted by the same regime).
+    if pe_evaluable is False:
+        suspect = True
+        suspect_reason = pe_evaluability_reason or _SUSPECT_REASON
+    # SECONDARY backstop (byte-identical to pre-QC12): only sets the reason
+    # when the PRIMARY guard didn't already condemn the row.
     if last not in (None, 0) and level is not None:
         if level / last < _SUSPECT_FLOOR_RATIO:
             suspect = True
+            if suspect_reason is None:
+                suspect_reason = _SUSPECT_REASON
     if (pe_fwd is not None and pe_fwd > 0
             and pe_5yr_median is not None and pe_5yr_median > 0):
         ratio = pe_fwd / pe_5yr_median
         if ratio < _SUSPECT_PE_BAND[0] or ratio > _SUSPECT_PE_BAND[1]:
             suspect = True
+            if suspect_reason is None:
+                suspect_reason = _SUSPECT_REASON
     if suspect:
         row["suspect"] = True
-        row["suspect_reason"] = _SUSPECT_REASON
+        row["suspect_reason"] = suspect_reason
     return row
 
 
@@ -858,7 +892,7 @@ def build_vol_profile(tech, bench) -> dict:
 
 def score(tech, beta, ladder, last, adv, net, mktcap,
           beta_n_days=None, ohlcv_rows=None,
-          events=None, overnight_gap=None) -> dict:
+          events=None, overnight_gap=None, beta_n_obs=None) -> dict:
     """Assemble the SIX subscores and the (possibly renormalized) 0-100 score.
 
     A dimension whose ``evaluable`` is False (all its scored inputs null) is
@@ -866,7 +900,10 @@ def score(tech, beta, ladder, last, adv, net, mktcap,
     remaining max, with ``renormalized: true`` recorded.
 
     ``beta_n_days``/``ohlcv_rows`` gate the volatility-state components on
-    sufficient history (see score_volatility).
+    sufficient history (see score_volatility). ``beta_n_obs`` is DISCLOSURE
+    ONLY (D8) -- it names the actual observation count behind the beta_n_days
+    gate's calendar-day span but never changes which branch fires or how many
+    points are awarded, so it is not a scored/guard field.
 
     risk-v1.1.0 adds ``events`` (the snapshot events block -> event_risk) and
     ``overnight_gap`` (technicals.overnight_gap -> tail_risk). event_risk is
@@ -877,7 +914,7 @@ def score(tech, beta, ladder, last, adv, net, mktcap,
     """
     subs = [
         score_volatility(tech, beta, beta_n_days=beta_n_days,
-                         ohlcv_rows=ohlcv_rows),
+                         ohlcv_rows=ohlcv_rows, beta_n_obs=beta_n_obs),
         score_drawdown(tech),
         score_margin(tech, ladder, last),
         score_liquidity(adv, net, mktcap),
@@ -981,6 +1018,10 @@ def build_module(snapshot, ladder, stress_pct, top_risk, anchors=None,
     last = price.get("last")
     beta = bench.get("beta")
     beta_n_days = bench.get("beta_n_days")
+    # D8: the actual observation count behind the beta_n_days calendar-day
+    # span (QC5's 5y-monthly beta) -- disclosure only, named in the gated
+    # "beta n/a" message alongside beta_n_days (see score_volatility).
+    beta_n_obs = bench.get("beta_n_obs")
     ohlcv_rows = tech.get("ohlcv_rows")
     adv = price.get("adv_dollar_3m")
     mktcap = price.get("mktcap") or price.get("mktcap_computed")
@@ -991,12 +1032,15 @@ def build_module(snapshot, ladder, stress_pct, top_risk, anchors=None,
 
     scored = score(tech, beta, ladder, last, adv, net, mktcap,
                    beta_n_days=beta_n_days, ohlcv_rows=ohlcv_rows,
-                   events=events, overnight_gap=overnight_gap)
+                   events=events, overnight_gap=overnight_gap,
+                   beta_n_obs=beta_n_obs)
 
     vf = valuation_floor(val.get("pe_5yr_median"),
                          fund.get("eps_ntm_consensus"),
                          last=last, pe_fwd=val.get("pe_fwd"),
-                         anchors=anchors)
+                         anchors=anchors,
+                         pe_evaluable=val.get("pe_5yr_evaluable"),
+                         pe_evaluability_reason=val.get("pe_5yr_evaluability_reason"))
     downside_map = build_downside_map(ladder, last, vf, stress_pct, top_risk)
     vol_profile = build_vol_profile(tech, bench)
 

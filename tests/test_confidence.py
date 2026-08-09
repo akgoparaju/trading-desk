@@ -317,6 +317,36 @@ class TestStalenessAxis(unittest.TestCase):
             s = C.compute_module(_tech_doc(), _snap(), bundle_dir=d)["staleness"]
             self.assertEqual(s["level"], "LOW")
 
+    def test_friday_stale_print_why_is_static_not_weekday(self):
+        # QC8 (n=2): AAPL 2026-08-07 (a Friday) -- quote one session stale
+        # mid-session. The `why` string must NOT claim to know the weekday; it
+        # must describe the condition that actually fired (a date mismatch).
+        s = C.compute_module(_tech_doc(),
+                             _snap(latest="2026-08-06",
+                                   as_of="2026-08-07T12:00:00Z"))["staleness"]
+        self.assertEqual(s["level"], "MEDIUM")
+        self.assertEqual(s["why"], "stale print (latest_trading_day != as_of)")
+
+    def test_saturday_stale_print_why_matches_friday(self):
+        # QC8 control: MU 2026-08-08 (a Saturday) -- identical code path, same
+        # static condition. The string must be IDENTICAL to the Friday case above
+        # (it no longer asserts a weekday it never computed).
+        s = C.compute_module(_tech_doc(),
+                             _snap(latest="2026-08-07",
+                                   as_of="2026-08-08T09:00:00Z"))["staleness"]
+        self.assertEqual(s["level"], "MEDIUM")
+        self.assertEqual(s["why"], "stale print (latest_trading_day != as_of)")
+
+    def test_unparseable_as_of_date_gets_distinct_why(self):
+        # meta.as_of_utc missing/unparseable -> _as_of_date() returns None, so a
+        # latest_trading_day-vs-as_of MISMATCH can't even be evaluated. This is a
+        # different failure mode than a confirmed mismatch, so it earns its own
+        # digit-free why tag. Level is unchanged (still MEDIUM).
+        s = C.compute_module(_tech_doc(),
+                             _snap(latest="2026-07-20", as_of=None))["staleness"]
+        self.assertEqual(s["level"], "MEDIUM")
+        self.assertEqual(s["why"], "as-of date unparseable")
+
     def test_no_plan_uses_print_freshness(self):
         # bundle_dir with no refresh_plan.json -> staleness from print only.
         with tempfile.TemporaryDirectory() as d:

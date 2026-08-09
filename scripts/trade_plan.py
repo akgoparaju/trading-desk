@@ -332,6 +332,27 @@ def _nearest_resistance_above(last, ladder):
     return min(above, key=lambda e: e["level"])
 
 
+# QC6: joint profit_take/bull_target ordering constraint (verified on two real
+# runs, n=2 -- AAPL 2026-08-07 and MU 2026-08-08 both shipped profit_take ABOVE
+# bull_target). ``last`` and ``bull_target``'s upper bound are independent
+# arguments here purely for testability/clarity of the repick primitive; see
+# the caller below for the joint-constraint wiring.
+_EXIT_ORDER_EPS = 1e-9
+
+
+def _nearest_resistance_below(ladder, last, ceiling):
+    """Lowest-level ladder entry strictly above ``last`` AND strictly below
+    ``ceiling`` (any type), or None. The re-pick candidate pool for profit_take
+    when it lands at/above bull_target."""
+    candidates = [e for e in ladder
+                  if e.get("level") is not None
+                  and e["level"] > last
+                  and e["level"] < ceiling]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda e: e["level"])
+
+
 def build_exits(last, ladder, scenarios, eps_ntm, dcf_bull=None, comps_high=None):
     """profit_take = nearest ladder resistance above last (level + type);
     bull_target = the bull price target, with required_multiple = target /
@@ -351,11 +372,28 @@ def build_exits(last, ladder, scenarios, eps_ntm, dcf_bull=None, comps_high=None
         above spot -- ``min(raw, dcf_bull)`` when ``dcf_bull`` > spot, else ``last`` --
         and ``bull_target.bull_floor`` discloses which ("dcf_bull" | "spot" | null).
     ``required_multiple`` is computed off the (triangulated) ``level``.
+
+    QC6 (verified on two real runs, n=2 -- AAPL 2026-08-07 and MU 2026-08-08): the
+    naive ``profit_take`` (nearest ladder resistance above ``last``) and
+    ``bull_target`` (triangulated independently above) never referenced each
+    other, so profit_take could ship ABOVE its own bull ceiling. AFTER
+    bull_target is finalised, a joint constraint applies: if
+    ``profit_take.level >= bull_target.level``, RE-PICK the lowest ladder entry
+    strictly above ``last`` AND strictly below ``bull_target.level``
+    (``_nearest_resistance_below``). If a candidate exists, profit_take becomes
+    that candidate (``repick`` = "below_bull_target"). If none exists,
+    profit_take.level is nulled (``repick`` = "no_candidate_below_bull") --
+    the dict is KEPT (not replaced with a bare None) so the reason stays
+    visible to the consumer. Either way ``profit_take.note`` names the
+    original level/type, the bull_target level, and the outcome -- mirroring
+    ``bull_target.bull_floor``'s disclosure pattern exactly. Untouched
+    profit_take carries ``repick: None, note: None``.
     """
     res = _nearest_resistance_above(last, ladder)
     profit_take = None
     if res is not None:
-        profit_take = {"level": _clean(res["level"]), "type": res.get("type")}
+        profit_take = {"level": _clean(res["level"]), "type": res.get("type"),
+                       "repick": None, "note": None}
 
     scenario_raw = max((sc["price_target"] for sc in scenarios), default=None)
 
@@ -415,6 +453,35 @@ def build_exits(last, ladder, scenarios, eps_ntm, dcf_bull=None, comps_high=None
         "required_multiple": required_multiple,
         "note": note,
     }
+
+    # QC6 joint constraint: profit_take must never sit at/above bull_target.
+    bull_level = bull_target["level"]
+    if (profit_take is not None and bull_level is not None
+            and profit_take["level"] >= bull_level - _EXIT_ORDER_EPS):
+        orig_level = profit_take["level"]
+        orig_type = profit_take.get("type") or "n/a"
+        repick = _nearest_resistance_below(ladder, last, bull_level)
+        if repick is not None:
+            new_level = _clean(repick["level"])
+            profit_take = {
+                "level": new_level,
+                "type": repick.get("type"),
+                "repick": "below_bull_target",
+                "note": (f"profit_take {_fmt(orig_level)} ({orig_type}) >= "
+                         f"bull_target {_fmt(bull_level)} -> re-picked to "
+                         f"{_fmt(new_level)} ({repick.get('type') or 'n/a'})"),
+            }
+        else:
+            profit_take = {
+                "level": None,
+                "type": None,
+                "repick": "no_candidate_below_bull",
+                "note": (f"profit_take {_fmt(orig_level)} ({orig_type}) >= "
+                         f"bull_target {_fmt(bull_level)}; no ladder candidate "
+                         f"strictly above spot {_fmt(_clean(last))} and below "
+                         f"bull_target -> nulled"),
+            }
+
     return {"profit_take": profit_take, "bull_target": bull_target}
 
 

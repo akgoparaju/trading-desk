@@ -29,6 +29,7 @@ the CLI is thin I/O.
 """
 
 import argparse
+import datetime
 import glob
 import json
 import os
@@ -514,8 +515,16 @@ def build_tradeplan_table(tradeplan, contract=None):
     exits = sp.get("exits", {}) or {}
     pt = exits.get("profit_take") or {}
     if pt:
+        # D7: the key EXISTS with value None when QC6's repick nulls
+        # profit_take (no ladder candidate below bull_target), so
+        # pt.get('type', '') never applied its default -- fixed via `or`.
+        # The repick/note disclosure is surfaced the same way bull_target's
+        # note already is (below), covering both the nulled case and the
+        # re-picked (moved) case.
+        pt_type = pt.get("type") or "n/a"
+        pt_note = f" ({pt.get('note')})" if pt.get("note") else ""
         rows.append(["Profit-take",
-                     f"{_fmt_price(pt.get('level'))} ({pt.get('type', '')})"])
+                     f"{_fmt_price(pt.get('level'))} ({pt_type}){pt_note}"])
     bt = exits.get("bull_target") or {}
     if bt:
         note = f" ({bt.get('note')})" if bt.get("note") else ""
@@ -845,6 +854,23 @@ def build_sr_and_downside(technical, risk):
                       "### Downside Map", "", dm_tbl])
 
 
+def _catalyst_row_is_past(date_str, as_of_date):
+    """True iff ``date_str`` parses as an ISO date strictly before ``as_of_date``.
+
+    QC9: a missing/unparseable date (or a missing ``as_of_date``) can never be
+    proven past, so it is never classified as such -- the row is kept, never
+    guessed. ``date_str == as_of_date`` (same-day) is NOT past.
+    """
+    if not as_of_date or not isinstance(date_str, str) or not date_str:
+        return False
+    try:
+        d = datetime.date.fromisoformat(date_str)
+        a = datetime.date.fromisoformat(as_of_date)
+    except ValueError:
+        return False
+    return d < a
+
+
 def build_catalyst_calendar(snapshot):
     # QF4: compute as_of date from snapshot.meta so we can label past rows.
     meta = snapshot.get("meta", {}) or {}
@@ -853,6 +879,7 @@ def build_catalyst_calendar(snapshot):
 
     events = snapshot.get("events", {}) or {}
     rows = []
+    excluded_past = 0
     ne = events.get("next_earnings") if isinstance(events, dict) else None
     if isinstance(ne, dict) and ne.get("date"):
         cons = ne.get("consensus_eps")
@@ -864,15 +891,28 @@ def build_catalyst_calendar(snapshot):
         rows.append(["next earnings", ne.get("date"), note])
     for c in events.get("catalysts", []) or []:
         if isinstance(c, dict):
+            date = c.get("date", "")
+            # QC9: a catalyst dated before as_of is a stale row, not a forward
+            # catalyst -- drop it from the table entirely (the MU 2026-08-08
+            # defect: a dividend ex-date 33 days stale rendered here as a live
+            # catalyst). The drop is disclosed via the count note below, never
+            # silent. A missing/unparseable date is kept, never guessed.
+            if _catalyst_row_is_past(date, as_of_date):
+                excluded_past += 1
+                continue
             note = c.get("note", "") or "—"
-            if as_of_date and (c.get("date") or "") < as_of_date:
-                note += " (past)"
-            rows.append([c.get("name", "catalyst"), c.get("date", ""), note])
+            rows.append([c.get("name", "catalyst"), date, note])
     if not rows:
         rows.append(["—", "—", "no scheduled catalysts"])
     tbl = _table(["Catalyst", "Date", "Note"], rows)
-    return "\n".join(["### Catalyst Calendar", "", tbl, "",
-                      "<!-- SLOT:catalyst_notes -->"])
+    parts = ["### Catalyst Calendar", "", tbl, ""]
+    if excluded_past:
+        plural = "s" if excluded_past != 1 else ""
+        parts.append(f"_{excluded_past} past catalyst{plural} excluded from the "
+                     f"forward calendar (see snapshot events for detail)._")
+        parts.append("")
+    parts.append("<!-- SLOT:catalyst_notes -->")
+    return "\n".join(parts)
 
 
 def build_scenario_ev(composite):

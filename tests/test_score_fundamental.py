@@ -72,7 +72,10 @@ def _val(**over):
     base = {
         "pe_fwd": 18.0,
         "pe_5yr_median": 20.0,
-        "pe_median_method": "approx_current_eps",
+        # QC12 replaced approx_current_eps with rolling_ttm_reported_eps;
+        # the default here mirrors that so tests that don't override the
+        # label exercise the CURRENT method name (D8).
+        "pe_median_method": "rolling_ttm_reported_eps",
         "peg": 1.2,
         "fcf_yield": 0.04,
     }
@@ -433,16 +436,26 @@ class TestMultipleVsHistory(unittest.TestCase):
         sub = sf.score_valuation(_val(pe_fwd=-10.0, pe_5yr_median=20.0))
         self.assertEqual(sub["inputs"]["pe_ratio_points"], 0)
 
-    # -- pe_5yr_median sanity band [0.2, 5.0] (approx_current_eps breakdown) --
+    # -- pe_5yr_median sanity band [0.2, 5.0] (SECONDARY ratio-band backstop) --
 
     def test_ratio_above_band_is_na(self):
         # real MU regime: pe_fwd 10 / pe_5yr_median 1.82 = 5.4 (> 5.0) -> the
-        # approx_current_eps median is garbage; component scored 0 + n/a and the
-        # sanity-band arithmetic string is emitted.
+        # ratio trips the SECONDARY sanity-band backstop (QC12's PRIMARY
+        # input-evaluability gate is what actually catches this in
+        # production; pe_5yr_evaluable is absent here so this exercises the
+        # backstop directly); component scored 0 + n/a and the sanity-band
+        # arithmetic string is emitted.
+        #
+        # D8: QC12 replaced the pe-median method with rolling_ttm_reported_eps
+        # and demoted this ratio band to a SECONDARY backstop behind the new
+        # PRIMARY input guards -- the message must name the ACTUAL method and
+        # say so accurately, never the retired "approx_current_eps" label.
         sub = sf.score_valuation(_val(pe_fwd=9.828, pe_5yr_median=1.82))
         self.assertEqual(sub["inputs"]["pe_ratio_points"], 0)
         self.assertIn("outside sanity band [0.2,5]", sub["arithmetic"])
-        self.assertIn("approx_current_eps method breakdown", sub["arithmetic"])
+        self.assertIn("method rolling_ttm_reported_eps", sub["arithmetic"])
+        self.assertIn("SECONDARY", sub["arithmetic"])
+        self.assertNotIn("approx_current_eps", sub["arithmetic"])
         self.assertIn("component n/a", sub["arithmetic"])
 
     def test_ratio_normal_09_bands_normally(self):
@@ -483,6 +496,64 @@ class TestMultipleVsHistory(unittest.TestCase):
         self.assertTrue(result["renormalized"])
         maxes = sum(s["max"] for s in result["subscores"])
         self.assertEqual(maxes, 50)
+
+
+# --------------------------------------------------------------------------- #
+# QC12: PRIMARY input-evaluability gate (valuation.pe_5yr_evaluable /
+# pe_5yr_evaluability_reason, keyed on build_snapshot's coverage/plausibility/
+# EPS-series guards) takes precedence over the [0.2,5.0] ratio band, which is
+# kept ONLY as a SECONDARY backstop. A ``val`` block that doesn't carry the
+# new fields (i.e. pe_5yr_evaluable absent/None) falls through to the
+# SECONDARY ratio path unchanged -- exactly the pre-QC12 behavior exercised
+# above by TestMultipleVsHistory's sanity-band tests.
+# --------------------------------------------------------------------------- #
+
+class TestQC12PrimaryEvaluabilityGate(unittest.TestCase):
+    def test_primary_false_overrides_an_in_band_ratio(self):
+        # ratio 18/20 = 0.9 would normally band (0.75,1.0] -> 14, but the
+        # PRIMARY input guard says this pe_5yr_median is untrustworthy -- the
+        # component must go n/a WITHOUT ever reaching the ratio/band logic.
+        sub = sf.score_valuation(_val(
+            pe_fwd=18.0, pe_5yr_median=20.0,
+            pe_5yr_evaluable=False,
+            pe_5yr_evaluability_reason="coverage_below_floor:0.3000<0.6"))
+        self.assertEqual(sub["inputs"]["pe_ratio_points"], 0)
+        self.assertIn("coverage_below_floor", sub["arithmetic"])
+        self.assertNotIn("0.9", sub["arithmetic"])
+
+    def test_primary_true_scores_normally(self):
+        # Explicit True is the same as absent -- falls through to the normal
+        # (now-secondary) ratio band.
+        sub = sf.score_valuation(_val(
+            pe_fwd=18.0, pe_5yr_median=20.0, pe_5yr_evaluable=True))
+        self.assertEqual(sub["inputs"]["pe_ratio_points"], 14)
+
+    def test_primary_absent_falls_through_to_secondary_ratio_band(self):
+        # No pe_5yr_evaluable key at all (legacy val block) -- byte-identical
+        # to pre-QC12 behavior, including the SECONDARY band catching an
+        # extreme ratio.
+        sub = sf.score_valuation(_val(pe_fwd=9.828, pe_5yr_median=1.82))
+        self.assertEqual(sub["inputs"]["pe_ratio_points"], 0)
+        self.assertIn("outside sanity band [0.2,5]", sub["arithmetic"])
+
+    def test_real_mu_corrected_inputs_score_20(self):
+        # QC12 measured scoring impact: MU 5.919185 / 17.8893 = ratio 0.331
+        # -> <=0.75 -> 20/20 (was 11.9488/1.9478 = 6.134 -> outside [0.2,5] -> 0).
+        sub = sf.score_valuation(_val(
+            pe_fwd=5.919185, pe_5yr_median=17.8893,
+            pe_median_method="rolling_ttm_reported_eps",
+            pe_5yr_evaluable=True, pe_5yr_evaluability_reason="ok"))
+        self.assertEqual(sub["inputs"]["pe_ratio_points"], 20)
+        self.assertIn("discount", sub["arithmetic"])
+
+    def test_real_aapl_corrected_inputs_score_8(self):
+        # QC12 measured scoring impact: AAPL 33.192740 / 30.7333 = ratio 1.080
+        # -> (1.0,1.25] -> 8/20 (was 35.5019/21.1986 = 1.675 -> >1.25 -> 3/20).
+        sub = sf.score_valuation(_val(
+            pe_fwd=33.192740, pe_5yr_median=30.7333,
+            pe_median_method="rolling_ttm_reported_eps",
+            pe_5yr_evaluable=True, pe_5yr_evaluability_reason="ok"))
+        self.assertEqual(sub["inputs"]["pe_ratio_points"], 8)
 
 
 # --------------------------------------------------------------------------- #
@@ -840,15 +911,65 @@ class TestAnchoredOwnHistory(unittest.TestCase):
 
     def test_sanity_band_out_is_na(self):
         # 9.828/1.82 = 5.4 > 5.0 -> component n/a, not evaluable.
-        pts, s, ok = sf._own_history_position(9.828, 1.82, "approx_current_eps")
+        pts, s, ok = sf._own_history_position(9.828, 1.82, "rolling_ttm_reported_eps")
         self.assertEqual(pts, 0)
         self.assertFalse(ok)
         self.assertIn("outside sanity band [0.2,5]", s)
+
+    def test_sanity_band_message_names_actual_method_not_stale_one(self):
+        # D8: same correction as score_valuation's SECONDARY backstop above --
+        # the message must name the ACTUAL pe_median_method (post-QC12
+        # rolling_ttm_reported_eps) and describe itself as a SECONDARY
+        # backstop; it must never claim the retired "approx_current_eps"
+        # method broke down.
+        pts, s, ok = sf._own_history_position(9.828, 1.82, "rolling_ttm_reported_eps")
+        self.assertEqual(pts, 0)
+        self.assertFalse(ok)
+        self.assertIn("method rolling_ttm_reported_eps", s)
+        self.assertIn("SECONDARY", s)
+        self.assertNotIn("approx_current_eps", s)
 
     def test_null_is_na(self):
         pts, s, ok = sf._own_history_position(None, 20.0, "approx_current_eps")
         self.assertEqual(pts, 0)
         self.assertFalse(ok)
+
+
+class TestQC12AnchoredOwnHistoryPrimaryGate(unittest.TestCase):
+    """Same PRIMARY-before-SECONDARY gate as TestQC12PrimaryEvaluabilityGate,
+    for the anchored-mode own-history component."""
+
+    def test_primary_false_overrides_an_in_band_ratio(self):
+        pts, s, ok = sf._own_history_position(
+            18.0, 20.0, "rolling_ttm_reported_eps",
+            pe_evaluable=False,
+            pe_evaluability_reason="median_outside_plausible_band:[3.0,150.0]:1.95")
+        self.assertEqual(pts, 0)
+        self.assertFalse(ok)
+        self.assertIn("median_outside_plausible_band", s)
+
+    def test_primary_absent_falls_through_to_secondary_band(self):
+        # Byte-identical to the pre-QC12 sanity-band test above.
+        pts, s, ok = sf._own_history_position(9.828, 1.82, "approx_current_eps")
+        self.assertEqual(pts, 0)
+        self.assertFalse(ok)
+        self.assertIn("outside sanity band [0.2,5]", s)
+
+    def test_real_mu_corrected_inputs_score_8(self):
+        # 5.919185/17.8893 = ratio 0.331 -> <=0.75 -> 8/8.
+        pts, s, ok = sf._own_history_position(
+            5.919185, 17.8893, "rolling_ttm_reported_eps",
+            pe_evaluable=True, pe_evaluability_reason="ok")
+        self.assertEqual(pts, 8)
+        self.assertTrue(ok)
+
+    def test_real_aapl_corrected_inputs_score_32(self):
+        # 33.192740/30.7333 = ratio 1.080 -> (1.0,1.25] -> 3.2/8.
+        pts, s, ok = sf._own_history_position(
+            33.192740, 30.7333, "rolling_ttm_reported_eps",
+            pe_evaluable=True, pe_evaluability_reason="ok")
+        self.assertEqual(pts, 3.2)
+        self.assertTrue(ok)
 
 
 class TestAnchoredFcfYield(unittest.TestCase):
@@ -982,6 +1103,16 @@ class TestScoreValuationAnchored(unittest.TestCase):
     def test_no_scale_justified_band_na(self):
         sub = sf.score_valuation_anchored(_val(), _anchors(), 100.0, None, None)
         self.assertEqual(sub["inputs"]["justified_band_points"], 0)
+
+    def test_qc12_primary_evaluability_threaded_from_val(self):
+        # val.pe_5yr_evaluable=False must reach own-history's PRIMARY gate
+        # even though the ratio (18/20=0.9) would otherwise band in-line.
+        val = _val(pe_fwd=18.0, pe_5yr_median=20.0,
+                   pe_5yr_evaluable=False,
+                   pe_5yr_evaluability_reason="coverage_below_floor:0.10<0.6")
+        sub = sf.score_valuation_anchored(val, _anchors(), 70.0, None, None)
+        self.assertEqual(sub["inputs"]["own_history_points"], 0)
+        self.assertIn("coverage_below_floor", sub["arithmetic"])
 
 
 class TestScoreAnchoredMode(unittest.TestCase):
@@ -1277,15 +1408,20 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
     def test_cli_method_label_in_valuation_arithmetic(self):
-        # the fabricated bundle carries pe_median_method="approx_current_eps"
-        # and a computable pe_fwd/pe_5yr_median, so the label must be disclosed.
+        # QC12: the fabricated bundle now carries
+        # pe_median_method="rolling_ttm_reported_eps" (was "approx_current_eps"
+        # pre-fix) -- the label must be disclosed wherever this scores,
+        # including on the PRIMARY-gate n/a path (this fixture's 4-quarter
+        # earnings history starts after the 320-bar window begins, so
+        # pe_5yr_evaluable is False and the ratio is never even reached).
         proc = self._run()
         self.assertEqual(proc.returncode, 0, proc.stderr)
         out = os.path.join(self.dir, "module_fundamental.json")
         with open(out) as fh:
             doc = json.load(fh)
         val_sub = next(s for s in doc["subscores"] if s["name"] == "valuation")
-        self.assertIn("approx_current_eps", val_sub["arithmetic"])
+        self.assertIn("rolling_ttm_reported_eps", val_sub["arithmetic"])
+        self.assertIn("insufficient_eps_series", val_sub["arithmetic"])
 
     def test_custom_out_path(self):
         out = os.path.join(self.dir, "custom_fundamental.json")

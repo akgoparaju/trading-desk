@@ -1435,3 +1435,74 @@ def test_countable_prose_shallower_heading_ends_a_nested_skip():
     kept = rq._countable_prose(body)
     assert "skipped" not in kept
     assert "counted words here" in kept
+
+
+# --------------------------------------------------------------------------- #
+# QC6: check_exit_ordering -- profit_take must never sit above bull_target.
+#
+# WHY: report_qc had ZERO checks on stock_plan.exits.profit_take. Two verified
+# real runs shipped profit_take ABOVE bull_target (AAPL 2026-08-07: 315.20 >
+# 312.41; MU 2026-08-08: 900 > 893.24) -- the plan instructed taking profit
+# above its own bull ceiling. Modeled exactly on check_sizing_within_cap:
+# passed=None is SKIP (either level absent), FAIL when profit_take.level >
+# bull_target.level (epsilon-guarded), PASS otherwise. Registered in the
+# NON-delta branch of run_report_qc only (exits are not in the delta subset).
+# --------------------------------------------------------------------------- #
+
+def _exit_ordering_docs(profit_take_level, bull_target_level):
+    return {"module_tradeplan": {"stock_plan": {"exits": {
+        "profit_take": {"level": profit_take_level},
+        "bull_target": {"level": bull_target_level},
+    }}}}
+
+
+def test_exit_ordering_fails_on_the_real_mu_inversion():
+    # MU 2026-08-08: profit_take 900 > bull_target 893.24.
+    res = rq.check_exit_ordering(_exit_ordering_docs(900.0, 893.24))
+    assert res["passed"] is False
+    assert "900" in res["detail"]
+    assert "893.24" in res["detail"]
+
+
+def test_exit_ordering_fails_on_the_real_aapl_inversion():
+    # AAPL 2026-08-07: profit_take 315.20 > bull_target 312.41.
+    res = rq.check_exit_ordering(_exit_ordering_docs(315.20, 312.41))
+    assert res["passed"] is False
+
+
+def test_exit_ordering_passes_when_ordered():
+    res = rq.check_exit_ordering(_exit_ordering_docs(112.0, 150.0))
+    assert res["passed"] is True
+
+
+def test_exit_ordering_passes_at_exact_equality_within_epsilon():
+    # Equality is not an inversion; the epsilon guard must not false-positive.
+    res = rq.check_exit_ordering(_exit_ordering_docs(100.0, 100.0))
+    assert res["passed"] is True
+
+
+def test_exit_ordering_skips_when_profit_take_level_absent():
+    res = rq.check_exit_ordering(_exit_ordering_docs(None, 150.0))
+    assert res["passed"] is None
+    assert "SKIP" in res["detail"]
+
+
+def test_exit_ordering_skips_when_bull_target_level_absent():
+    res = rq.check_exit_ordering(_exit_ordering_docs(112.0, None))
+    assert res["passed"] is None
+    assert "SKIP" in res["detail"]
+
+
+def test_exit_ordering_skips_when_module_tradeplan_absent():
+    res = rq.check_exit_ordering({})
+    assert res["passed"] is None
+    assert "SKIP" in res["detail"]
+
+
+def test_exit_ordering_is_registered_in_the_non_delta_check_set_only():
+    """exits are not part of the delta subset -- exit_ordering must be wired
+    into the full/non-delta branch of run_report_qc only (count == 1), unlike
+    e.g. check_footer_integrity which runs in both (count == 2)."""
+    import inspect
+    src = inspect.getsource(rq.run_report_qc)
+    assert src.count("check_exit_ordering(docs)") == 1

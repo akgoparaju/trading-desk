@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from scripts import render_charts as rc
 
@@ -257,7 +258,20 @@ def _module_options(with_chain=True):
     return doc
 
 
-def _mk_bundle(dir_, *, with_options_chain=True, with_daily=True):
+# QC12: 4 quarters, reportedDates all well before the fixture's ~1yr display
+# window (window starts ~2025-02-21 -- see _daily_rows) so TTM_EPS is a
+# constant 4.5 across the WHOLE window (no report event falls inside it),
+# matching the pre-QC12 test's constant eps_ttm=4.5 arithmetic exactly.
+_PE_BAND_EARNINGS_QUARTERS = [
+    {"fiscalDateEnding": "2024-01-31", "reportedDate": "2024-01-15", "reportedEPS": "1.0"},
+    {"fiscalDateEnding": "2023-10-31", "reportedDate": "2023-10-15", "reportedEPS": "1.1"},
+    {"fiscalDateEnding": "2023-07-31", "reportedDate": "2023-07-15", "reportedEPS": "1.2"},
+    {"fiscalDateEnding": "2023-04-30", "reportedDate": "2023-04-15", "reportedEPS": "1.2"},
+]
+
+
+def _mk_bundle(dir_, *, with_options_chain=True, with_daily=True,
+              with_earnings=True, earnings_quarters=None):
     """Write a full fixture bundle to ``dir_`` and return the loaded docs dict."""
     with open(os.path.join(dir_, "snapshot_MU_2026-07-17.json"), "w") as fh:
         json.dump(_snapshot(), fh)
@@ -286,6 +300,13 @@ def _mk_bundle(dir_, *, with_options_chain=True, with_daily=True):
                 "6. volume": str(int(r["volume"]))}
         with open(os.path.join(raw, "daily_adjusted.json"), "w") as fh:
             json.dump({"Time Series (Daily)": ts}, fh)
+    if with_earnings:
+        raw = os.path.join(dir_, "raw")
+        os.makedirs(raw, exist_ok=True)
+        quarters = (earnings_quarters if earnings_quarters is not None
+                   else _PE_BAND_EARNINGS_QUARTERS)
+        with open(os.path.join(raw, "earnings.json"), "w") as fh:
+            json.dump({"symbol": "MU", "quarterlyEarnings": quarters}, fh)
     return rc.load_docs(dir_)
 
 
@@ -460,6 +481,23 @@ class TestExtractRange52w(unittest.TestCase):
             self.assertEqual(data["entry_high"], 90.0)
 
 
+class TestLoadDocsEarnQ(unittest.TestCase):
+    """QC12: load_docs reads raw/earnings.json into docs["earn_q"] (newest-
+    first quarterlyEarnings), the same shape build_snapshot.py's earn_q uses,
+    so extract_pe_band can reuse build_snapshot.rolling_ttm_pe_series."""
+
+    def test_earn_q_populated_from_raw_earnings_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            docs = _mk_bundle(d)
+            self.assertEqual(len(docs["earn_q"]), 4)
+            self.assertEqual(docs["earn_q"][0]["reportedDate"], "2024-01-15")
+
+    def test_earn_q_empty_when_no_earnings_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            docs = _mk_bundle(d, with_earnings=False)
+            self.assertEqual(docs["earn_q"], [])
+
+
 class TestExtractPeBand(unittest.TestCase):
     def test_pe_band_series_and_method(self):
         with tempfile.TemporaryDirectory() as d:
@@ -468,12 +506,87 @@ class TestExtractPeBand(unittest.TestCase):
             # method label from valuation.pe_median_method.
             self.assertEqual(data["method"], "trailing_gaap")
             self.assertEqual(data["median_pe"], 15.0)
-            self.assertEqual(data["eps_ttm"], 4.5)
-            # last P/E = last close / eps_ttm = 100 / 4.5.
+            # QC12: era-correct construction -- last P/E = last RAW close /
+            # rolling-TTM reportedEPS. The fixture's 4 quarters are all
+            # reported before the display window starts (no report event
+            # falls inside it), so TTM_EPS is a constant 4.5 across the whole
+            # series -- same arithmetic as the pre-QC12 close/eps_ttm test.
             self.assertAlmostEqual(data["pe_series"][-1], 100.0 / 4.5, places=4)
-            # series length matches the windowed daily series.
+            # series length matches the windowed daily series (earnings
+            # history covers the whole window here -- no bars skipped).
             self.assertGreater(len(data["pe_series"]), 100)
             self.assertEqual(len(data["pe_series"]), len(data["dates"]))
+            self.assertNotIn("eps_ttm", data)
+
+    def test_pe_band_uses_raw_close_not_adjusted_close(self):
+        # QC12 (load-bearing): a chart built on adjusted_close would silently
+        # disagree with the era-correct median drawn next to it across any
+        # split. Simulate a split baked into adjusted_close (half of raw
+        # close) and assert the series follows RAW close.
+        with tempfile.TemporaryDirectory() as d:
+            docs = _mk_bundle(d)
+            split_rows = [dict(r) for r in docs["daily"]]
+            for r in split_rows:
+                r["adjusted_close"] = r["close"] / 2.0
+            split_rows[-1]["close"] = 100.0
+            split_rows[-1]["adjusted_close"] = 50.0
+            docs["daily"] = split_rows
+            data = rc.extract_pe_band(docs)
+            self.assertAlmostEqual(data["pe_series"][-1], 100.0 / 4.5, places=4)
+
+    def test_pe_band_none_when_no_earnings_history(self):
+        # Disclosed absence, not a fabricated/None-padded series.
+        with tempfile.TemporaryDirectory() as d:
+            docs = _mk_bundle(d, with_earnings=False)
+            data = rc.extract_pe_band(docs)
+            self.assertIsNone(data)
+
+    def test_pe_band_none_when_no_median(self):
+        with tempfile.TemporaryDirectory() as d:
+            docs = _mk_bundle(d)
+            docs["snapshot"]["valuation"]["pe_5yr_median"] = None
+            data = rc.extract_pe_band(docs)
+            self.assertIsNone(data)
+
+    def test_pe_band_evaluable_absent_preserves_old_behavior(self):
+        # D6: pre-QC12 snapshots (or any bundle that doesn't carry the flag)
+        # never set pe_5yr_evaluable -- absent must fall through exactly like
+        # today, the same "absent means fall-through" convention the scorers
+        # use for this field.
+        with tempfile.TemporaryDirectory() as d:
+            docs = _mk_bundle(d)
+            self.assertNotIn("pe_5yr_evaluable", docs["snapshot"]["valuation"])
+            data = rc.extract_pe_band(docs)
+            self.assertIsNone(data.get("median_pe_evaluable"))
+            self.assertEqual(data["median_pe"], 15.0)
+
+    def test_pe_band_evaluable_false_flags_condemned_median(self):
+        # D6: QC12 already condemned this median (PRIMARY gate, same one
+        # score_fundamental/score_risk honour) -- extract must surface that
+        # verdict and the reason instead of silently handing back a bare
+        # number for the drawer to plot as authoritative.
+        with tempfile.TemporaryDirectory() as d:
+            docs = _mk_bundle(d)
+            docs["snapshot"]["valuation"]["pe_5yr_median"] = 365.98
+            docs["snapshot"]["valuation"]["pe_5yr_evaluable"] = False
+            docs["snapshot"]["valuation"]["pe_5yr_evaluability_reason"] = (
+                "median_outside_plausible_band")
+            data = rc.extract_pe_band(docs)
+            self.assertIsNotNone(data)
+            self.assertIs(data["median_pe_evaluable"], False)
+            self.assertEqual(data["evaluability_reason"],
+                              "median_outside_plausible_band")
+            # the P/E series itself is unaffected -- only the median's
+            # authority is in question, not the trailing series.
+            self.assertGreater(len(data["pe_series"]), 100)
+
+    def test_pe_band_evaluable_true_behaves_like_absent(self):
+        with tempfile.TemporaryDirectory() as d:
+            docs = _mk_bundle(d)
+            docs["snapshot"]["valuation"]["pe_5yr_evaluable"] = True
+            data = rc.extract_pe_band(docs)
+            self.assertIs(data["median_pe_evaluable"], True)
+            self.assertNotIn("evaluability_reason", data)
 
 
 class TestExtractRevisions(unittest.TestCase):
@@ -501,6 +614,59 @@ class TestExtractCatalystTimeline(unittest.TestCase):
             sides = [e["side"] for e in data["events"]]
             for a, b in zip(sides, sides[1:]):
                 self.assertNotEqual(a, b)
+
+
+class TestQC9CatalystTimelineExcludesPast(unittest.TestCase):
+    """QC9 regression: extract_catalyst_timeline had no as_of comparison at
+    all -- a stale catalyst (e.g. the MU dividend ex-date, 33 days in the
+    past) rendered on the "forward catalyst" chart. Must now be excluded."""
+
+    def test_fixture_past_catalyst_excluded_future_kept(self):
+        # _snapshot()'s as_of is 2026-07-17; its catalysts list already
+        # carries a one-day-stale row (2026-07-16) alongside the future
+        # 2026-09-29 earnings entry.
+        with tempfile.TemporaryDirectory() as d:
+            docs = _mk_bundle(d)
+            data = rc.extract_catalyst_timeline(docs)
+            dates = [e["date"] for e in data["events"]]
+            self.assertNotIn("2026-07-16", dates)
+            self.assertIn("2026-09-29", dates)
+
+    def test_mu_repro_dividend_33_days_stale_excluded(self):
+        with tempfile.TemporaryDirectory() as d:
+            docs = _mk_bundle(d)
+            docs["snapshot"]["meta"]["as_of_utc"] = "2026-08-08T00:00:00Z"
+            docs["snapshot"]["events"]["catalysts"] = [
+                {"date": "2026-07-06", "event": "Dividend ex-date"},
+                {"date": "2026-09-22", "event": "MU earnings"},
+            ]
+            docs["snapshot"]["events"]["next_earnings"] = {"date": "2026-09-22"}
+            data = rc.extract_catalyst_timeline(docs)
+            dates = [e["date"] for e in data["events"]]
+            self.assertNotIn("2026-07-06", dates)
+            self.assertIn("2026-09-22", dates)
+
+    def test_same_day_event_kept(self):
+        with tempfile.TemporaryDirectory() as d:
+            docs = _mk_bundle(d)
+            docs["snapshot"]["meta"]["as_of_utc"] = "2026-08-08T00:00:00Z"
+            docs["snapshot"]["events"]["catalysts"] = [
+                {"date": "2026-08-08", "event": "Same day event"}]
+            docs["snapshot"]["events"]["next_earnings"] = {}
+            data = rc.extract_catalyst_timeline(docs)
+            dates = [e["date"] for e in data["events"]]
+            self.assertIn("2026-08-08", dates)
+
+    def test_unparseable_date_kept_not_dropped(self):
+        with tempfile.TemporaryDirectory() as d:
+            docs = _mk_bundle(d)
+            docs["snapshot"]["meta"]["as_of_utc"] = "2026-08-08T00:00:00Z"
+            docs["snapshot"]["events"]["catalysts"] = [
+                {"date": "TBD", "event": "Unscheduled event"}]
+            docs["snapshot"]["events"]["next_earnings"] = {}
+            data = rc.extract_catalyst_timeline(docs)
+            dates = [e["date"] for e in data["events"]]
+            self.assertIn("TBD", dates)
 
 
 class TestShortEvent(unittest.TestCase):
@@ -749,6 +915,77 @@ class TestManifestStructure(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 # Draw smoke tests -- guarded behind the matplotlib skip.
 # --------------------------------------------------------------------------- #
+
+@unittest.skipUnless(_HAS_MPL, "matplotlib not installed")
+class TestDrawPeBandEvaluability(unittest.TestCase):
+    """D6: the drawer must not paint a condemned median as an authoritative
+    reference line -- it must suppress the line and surface the reason
+    instead (loud disclosure, not a silent one)."""
+
+    def _draw_and_capture(self, data):
+        captured = {}
+
+        def fake_save(plt, fig, path):
+            captured["fig"] = fig
+            captured["ax"] = fig.axes[0]
+
+        with mock.patch.object(rc, "_save", fake_save):
+            rc.draw_pe_band(data, "unused.png")
+        return captured
+
+    def test_condemned_median_line_suppressed(self):
+        data = {
+            "dates": ["2026-01-0%d" % i for i in range(1, 6)],
+            "pe_series": [30.0, 31.0, 32.5, 33.0, 32.54],
+            "median_pe": 365.98,
+            "method": "rolling_ttm_reported_eps",
+            "median_pe_evaluable": False,
+            "evaluability_reason": "median_outside_plausible_band",
+        }
+        captured = self._draw_and_capture(data)
+        ax = captured["ax"]
+        for line in ax.lines:
+            ydata = list(line.get_ydata())
+            is_flat_at_median = (len(ydata) > 0 and len(set(ydata)) == 1
+                                  and abs(ydata[0] - 365.98) < 1e-6)
+            self.assertFalse(is_flat_at_median,
+                              "condemned median must not be drawn as a "
+                              "reference line")
+
+    def test_condemned_median_reason_surfaced_on_chart(self):
+        data = {
+            "dates": ["2026-01-0%d" % i for i in range(1, 6)],
+            "pe_series": [30.0, 31.0, 32.5, 33.0, 32.54],
+            "median_pe": 365.98,
+            "method": "rolling_ttm_reported_eps",
+            "median_pe_evaluable": False,
+            "evaluability_reason": "median_outside_plausible_band",
+        }
+        captured = self._draw_and_capture(data)
+        fig_texts = [t.get_text() for t in captured["fig"].texts]
+        self.assertTrue(
+            any("not evaluable" in t and "median_outside_plausible_band" in t
+                for t in fig_texts),
+            fig_texts)
+
+    def test_evaluable_median_still_drawn_as_reference_line(self):
+        data = {
+            "dates": ["2026-01-0%d" % i for i in range(1, 6)],
+            "pe_series": [30.0, 31.0, 32.5, 33.0, 32.54],
+            "median_pe": 35.0,
+            "method": "rolling_ttm_reported_eps",
+            "median_pe_evaluable": None,
+        }
+        captured = self._draw_and_capture(data)
+        ax = captured["ax"]
+        drawn = any(
+            len(list(line.get_ydata())) > 0
+            and len(set(line.get_ydata())) == 1
+            and abs(list(line.get_ydata())[0] - 35.0) < 1e-6
+            for line in ax.lines)
+        self.assertTrue(drawn, "evaluable/absent-flag median must still "
+                                "render as a reference line")
+
 
 @unittest.skipUnless(_HAS_MPL, "matplotlib not installed")
 class TestDrawSmoke(unittest.TestCase):

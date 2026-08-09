@@ -1015,9 +1015,11 @@ def _positioning_grid(doc, x, y_top, w, gutter, positioning):
     return min(col_y)
 
 
-def _trade_plan_table(doc, x, y_top, w, tradeplan):
-    """The trade-plan table (don't-chase, entries, exits, invalidation, size,
-    hedge, expression). Returns y after the table."""
+def _trade_plan_rows(tradeplan):
+    """PURE: the (item, rule, ev) rows ``_trade_plan_table`` draws. Split out
+    of the drawer so the profit_take null/repick disclosure text (D7) is
+    unit-testable independent of the PDF column-width truncation the drawer
+    applies at draw time."""
     sp = tradeplan.get("stock_plan", {}) or {}
     expr = tradeplan.get("expression", {}) or {}
     rows = []
@@ -1033,8 +1035,16 @@ def _trade_plan_table(doc, x, y_top, w, tradeplan):
     exits = sp.get("exits", {}) or {}
     pt = exits.get("profit_take") or {}
     if pt:
-        rows.append(("Profit-take", "%s (%s)" % (fmt_price(pt.get("level")),
-                     pt.get("type", "")), ""))
+        # D7: the key EXISTS with value None when QC6's repick nulls
+        # profit_take (no ladder candidate below bull_target), so
+        # ``pt.get('type', '')`` never applied its default -- fixed via `or`.
+        # The repick/note disclosure is surfaced the same way bull_target's
+        # note already is (below), covering both the nulled case and the
+        # re-picked (moved) case.
+        pt_type = pt.get("type") or "n/a"
+        pt_note = " · %s" % pt.get("note") if pt.get("note") else ""
+        rows.append(("Profit-take", "%s (%s)%s" % (
+            fmt_price(pt.get("level")), pt_type, pt_note), ""))
     bt = exits.get("bull_target") or {}
     if bt:
         note = " · %s" % bt.get("note") if bt.get("note") else ""
@@ -1059,6 +1069,13 @@ def _trade_plan_table(doc, x, y_top, w, tradeplan):
     rec = expr.get("recommended_for_profile")
     if rec:
         rows.append(("Expression", rec, ""))
+    return rows
+
+
+def _trade_plan_table(doc, x, y_top, w, tradeplan):
+    """The trade-plan table (don't-chase, entries, exits, invalidation, size,
+    hedge, expression). Returns y after the table."""
+    rows = _trade_plan_rows(tradeplan)
 
     doc.section_head(x, y_top, "TRADE PLAN", w=w)
     tc0, tc1 = x, x + 78

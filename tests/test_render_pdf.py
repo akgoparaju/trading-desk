@@ -484,6 +484,79 @@ class TestFmtMoneyDelta(unittest.TestCase):
 # Display-precision formatters + action short-map (fix 1 + fix 2).
 # --------------------------------------------------------------------------- #
 
+class TestTradePlanRowsProfitTakeDisclosure(unittest.TestCase):
+    """D7: ``_trade_plan_rows`` (PURE, split out of ``_trade_plan_table`` so the
+    profit_take null/repick disclosure text is unit-testable independent of the
+    PDF column-width truncation ``_trade_plan_table`` applies at draw time).
+    Same defect as the md report: the old ``pt.get('type', '')`` default never
+    fired because the key exists with value None (QC6's repick nulls
+    profit_take, kept as a dict so the reason stays visible), so the row
+    rendered the literal string 'None' and the repick/note disclosure never
+    reached the PDF at all. Mirrors how bull_target's note is already
+    surfaced (`` · %s`` suffix) -- the established pattern in this file."""
+
+    def _rule(self, tradeplan, item):
+        rows = rp._trade_plan_rows(tradeplan)
+        return [r for r in rows if r[0] == item][0][1]
+
+    def test_untouched_profit_take_unchanged(self):
+        rule = self._rule(_tradeplan_doc(), "Profit-take")
+        self.assertEqual(rule, "$112.00 (swing_high)")
+
+    def test_nulled_profit_take_no_literal_none(self):
+        tp = _tradeplan_doc()
+        tp["stock_plan"]["exits"]["profit_take"] = {
+            "level": None, "type": None,
+            "repick": "no_candidate_below_bull",
+            "note": ("profit_take 120 (swing_high) >= bull_target 110; no "
+                     "ladder candidate strictly above spot 95 and below "
+                     "bull_target -> nulled"),
+        }
+        rule = self._rule(tp, "Profit-take")
+        self.assertNotIn("None", rule)
+
+    def test_nulled_profit_take_reason_reaches_pdf_row(self):
+        tp = _tradeplan_doc()
+        tp["stock_plan"]["exits"]["profit_take"] = {
+            "level": None, "type": None,
+            "repick": "no_candidate_below_bull",
+            "note": ("profit_take 120 (swing_high) >= bull_target 110; no "
+                     "ladder candidate strictly above spot 95 and below "
+                     "bull_target -> nulled"),
+        }
+        rule = self._rule(tp, "Profit-take")
+        self.assertEqual(
+            rule,
+            "n/a (n/a) · profit_take 120 (swing_high) >= bull_target "
+            "110; no ladder candidate strictly above spot 95 and below "
+            "bull_target -> nulled")
+
+    def test_repicked_profit_take_no_literal_none(self):
+        tp = _tradeplan_doc()
+        tp["stock_plan"]["exits"]["profit_take"] = {
+            "level": 85.0, "type": "swing_high",
+            "repick": "below_bull_target",
+            "note": ("profit_take 120 (swing_high) >= bull_target 110 -> "
+                     "re-picked to 85 (swing_high)"),
+        }
+        rule = self._rule(tp, "Profit-take")
+        self.assertNotIn("None", rule)
+
+    def test_repicked_profit_take_reason_reaches_pdf_row(self):
+        tp = _tradeplan_doc()
+        tp["stock_plan"]["exits"]["profit_take"] = {
+            "level": 85.0, "type": "swing_high",
+            "repick": "below_bull_target",
+            "note": ("profit_take 120 (swing_high) >= bull_target 110 -> "
+                     "re-picked to 85 (swing_high)"),
+        }
+        rule = self._rule(tp, "Profit-take")
+        self.assertEqual(
+            rule,
+            "$85.00 (swing_high) · profit_take 120 (swing_high) >= "
+            "bull_target 110 -> re-picked to 85 (swing_high)")
+
+
 class TestDisplayFormatters(unittest.TestCase):
     def test_fmt_price_2dp_and_separators(self):
         self.assertEqual(rp.fmt_price(853.2), "$853.20")
@@ -1546,6 +1619,52 @@ class TestRenderSmoke(unittest.TestCase):
             self.assertEqual(rc, 0, out + err)
             self.assertTrue(os.path.isfile(
                 os.path.join(new, "MU_Trade_Report_2026-07-16.pdf")))
+
+
+# --------------------------------------------------------------------------- #
+# D7 — profit_take null/repick disclosure reaches the ACTUAL rendered PDF
+# bytes (not just the pure _trade_plan_rows function above). Notes are kept
+# short here so they aren't cut by _trade_plan_table's column-width
+# ``doc.truncate`` -- an orthogonal, pre-existing constraint bull_target's
+# own note already lives with (see render_pdf.py's TRADE PLAN table).
+# --------------------------------------------------------------------------- #
+
+@unittest.skipUnless(_CAN_RENDER, "reportlab+matplotlib required for render smoke")
+class TestProfitTakeDisclosureReachesPdfBytes(unittest.TestCase):
+    def _bundle_with_profit_take(self, d, profit_take):
+        tp = _tradeplan_doc()
+        tp["stock_plan"]["exits"]["profit_take"] = profit_take
+        _mk_bundle(d, tradeplan_override=tp)
+        path = _write_slots(d, _clean_slots())
+        rc, out, err = _qc_slots(d, path)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_nulled_profit_take_no_none_and_reason_in_pdf_bytes(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._bundle_with_profit_take(d, {
+                "level": None, "type": None,
+                "repick": "no_candidate_below_bull",
+                "note": "no candidate below bull target -> nulled",
+            })
+            rc, out, err = _render(d, "detail")
+            self.assertEqual(rc, 0, out + err)
+            text = _pdf_text(os.path.join(d, "MU_Detail_2026-07-16.pdf"))
+            self.assertNotIn(b"(None)", text)
+            self.assertIn(b"no candidate below bull target", text)
+            self.assertIn(b"nulled", text)
+
+    def test_repicked_profit_take_reason_in_pdf_bytes(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._bundle_with_profit_take(d, {
+                "level": 85.0, "type": "swing_high",
+                "repick": "below_bull_target",
+                "note": "re-picked below bull target",
+            })
+            rc, out, err = _render(d, "detail")
+            self.assertEqual(rc, 0, out + err)
+            text = _pdf_text(os.path.join(d, "MU_Detail_2026-07-16.pdf"))
+            self.assertNotIn(b"(None)", text)
+            self.assertIn(b"re-picked below bull target", text)
 
 
 # --------------------------------------------------------------------------- #
