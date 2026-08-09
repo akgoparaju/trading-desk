@@ -353,6 +353,100 @@ class TestExits(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# QC6: joint profit_take / bull_target ordering constraint.
+#
+# WHY: profit_take (nearest ladder resistance above last) and bull_target (an
+# independently-triangulated ceiling) never referenced each other -- ships with
+# profit_take ABOVE its own bull ceiling on two verified real runs (AAPL
+# 2026-08-07: 315.20 > 312.41; MU 2026-08-08: 900 > 893.24). The fix is a joint
+# constraint applied AFTER bull_target is finalised: if profit_take.level >=
+# bull_target.level, re-pick the lowest ladder entry strictly above spot AND
+# strictly below bull_target.level; if none exists, null profit_take.level.
+# Either outcome is disclosed via profit_take.repick + profit_take.note,
+# mirroring bull_target.bull_floor's disclosure pattern exactly.
+# --------------------------------------------------------------------------- #
+
+class TestExitOrdering(unittest.TestCase):
+    def test_profit_take_disclosed_when_it_lands_above_the_floored_bull_target(self):
+        # Reproduces the defect shape already latent in this fixture file: the
+        # bull_target-floored-to-spot case (see
+        # test_bull_target_floored_to_spot_when_no_anchor_above_spot above) floors
+        # bull_target to spot 100.0, while the SAME ladder's nearest resistance
+        # above spot (see test_profit_take_nearest_resistance above) is 112.0 --
+        # i.e. profit_take ships ABOVE its own bull ceiling, exactly the AAPL/MU
+        # defect shape. There is no ladder level strictly between spot (100) and
+        # the floored bull_target (100) -- the interval is empty -- so the joint
+        # constraint must null profit_take rather than ship the inversion, and the
+        # original inputs + outcome must be disclosed.
+        exits = tp.build_exits(_LAST, _technical_doc()["ladder"], _SCENARIOS, 5.5,
+                               dcf_bull=90.0, comps_high=80.0)
+        pt = exits["profit_take"]
+        bt = exits["bull_target"]
+        self.assertEqual(bt["level"], 100.0)
+        # The house invariant this bug violated: never ship profit_take above
+        # bull_target. Either profit_take is re-picked below it, or nulled.
+        self.assertTrue(pt["level"] is None or pt["level"] <= bt["level"])
+        self.assertIsNotNone(pt["repick"])
+        self.assertIsNotNone(pt["note"])
+        self.assertIn("112", pt["note"])   # original (pre-fix) profit_take level
+        self.assertIn("100", pt["note"])   # bull_target level named in the note
+
+    def test_profit_take_repicks_to_the_nearest_candidate_below_bull_target(self):
+        # A ladder resistance (900) sits above a real MU-shaped bull_target
+        # (893.24), but a LOWER candidate (850) also exists between spot (800)
+        # and bull_target. The house-doctrine repick mechanism must find and
+        # select that lower candidate rather than null profit_take.
+        #
+        # NOTE: through build_exits' PUBLIC surface this can only be observed as
+        # an "already valid, untouched" result -- _nearest_resistance_above always
+        # returns the ladder-wide MINIMUM level above spot, so whenever a ladder
+        # entry sits strictly between spot and bull_target, that entry (or a
+        # smaller one) is ALREADY the naive pick, and the >= bull_target trigger
+        # never fires (proof: for any last/bull_target, if the ladder-wide min
+        # above spot is >= bull_target, no entry between spot and bull_target can
+        # exist, since it would itself be <= that min). So the "found a lower
+        # candidate" branch is exercised directly against the repick primitive
+        # below, and separately confirmed end-to-end as the "already ordered,
+        # untouched" case next.
+        candidate = tp._nearest_resistance_below(
+            [{"level": 900.0, "type": "round_number"},
+             {"level": 850.0, "type": "swing_high"}],
+            last=800.0, ceiling=893.24)
+        self.assertEqual(candidate["level"], 850.0)
+        self.assertEqual(candidate["type"], "swing_high")
+
+    def test_profit_take_nulled_with_reason_when_no_candidate_below_bull_target(self):
+        # MU-shaped: bull_target 893.24 (triangulated: scenario bull 1000 clipped
+        # to comps_high 893.24), the ladder's ONLY entry above spot (800) is 900
+        # (no ladder level between 800 and 893.24) -> no valid re-pick candidate
+        # -> profit_take must null with the reason disclosed, not ship the
+        # inversion silently.
+        ladder = [{"level": 900.0, "type": "round_number"}]
+        scenarios = [{"name": "bull", "prob": 1.0, "price_target": 1000.0}]
+        exits = tp.build_exits(800.0, ladder, scenarios, None, comps_high=893.24)
+        pt = exits["profit_take"]
+        bt = exits["bull_target"]
+        self.assertEqual(bt["level"], 893.24)
+        self.assertIsNone(pt["level"])
+        self.assertEqual(pt["repick"], "no_candidate_below_bull")
+        self.assertIsNotNone(pt["note"])
+        self.assertIn("900", pt["note"])
+        self.assertIn("893.24", pt["note"])
+
+    def test_profit_take_untouched_when_already_below_bull_target(self):
+        # No false positives: profit_take already ordered correctly below
+        # bull_target must be left exactly as computed, with repick == None.
+        exits = tp.build_exits(_LAST, _technical_doc()["ladder"], _SCENARIOS, 5.5)
+        pt = exits["profit_take"]
+        bt = exits["bull_target"]
+        self.assertEqual(pt["level"], 112.0)   # unchanged
+        self.assertEqual(bt["level"], 150.0)
+        self.assertLess(pt["level"], bt["level"])
+        self.assertIsNone(pt["repick"])
+        self.assertIsNone(pt["note"])
+
+
+# --------------------------------------------------------------------------- #
 # Valuation-anchor loading (Goal B): sibling coverage dir, optional-existence.
 # --------------------------------------------------------------------------- #
 

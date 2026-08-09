@@ -758,31 +758,34 @@ def score(last, tech, ladder, divergence, justification, benchmark=None) -> dict
     remaining max, with ``renormalized: true`` recorded.
 
     Track O4 / v1.2.0: the sector-relative RS factor (``score_rel_strength``) is a
-    NEW scored factor threaded via the trailing ``benchmark`` param. It JOINS the
-    present_max renormalization ONLY when the snapshot carries
-    ``rel_sector_ret_3m``/``_6m`` (the factor is evaluable). When ``benchmark`` is
-    None or lacks those fields, the factor is COMPLETELY OMITTED (not a zeroed row)
-    and the score is BYTE-FOR-BYTE identical to v1.1.0 -- the graceful-identity
-    contract, pinned in tests.
+    NEW scored factor threaded via the trailing ``benchmark`` param. It is always a
+    MEMBER of the considered dimension set, whether or not it is evaluable, so its
+    absence is disclosed the same way any other dimension's absence is:
+    ``included`` (below) already filters non-evaluable members out of the score
+    arithmetic, so a present-but-unevaluable RS factor changes nothing numeric --
+    the score is BYTE-FOR-BYTE identical to v1.1.0 whether the factor is present,
+    absent, or genuinely missing, pinned in tests.
+
+    QC10: ``renormalized`` keys on ACTUAL EXCLUSION (a considered dimension with no
+    evaluable inputs), never on the denominator merely differing from 100. The
+    bonus RS dimension JOINING the denominator (100 -> 110) is membership growth,
+    not exclusion, and must NOT set ``renormalized``. Only a dimension that was
+    considered and found non-evaluable -- RS genuinely missing, or any other
+    dimension's inputs all null -- sets it, and is always named in the note.
     """
     subs = [
         score_trend(last, tech),
         score_momentum(tech, divergence, justification),
         score_structure(ladder, last),
         score_volume(last, tech),
+        score_rel_strength(benchmark),
     ]
 
-    # Track O4: append the sector-RS factor ONLY when it is evaluable (its benchmark
-    # legs are present). An absent factor is dropped entirely so the published
-    # subscores + max total are unchanged from v1.1.0 (graceful identity).
-    rs = score_rel_strength(benchmark)
-    if rs.get("evaluable"):
-        subs.append(rs)
-
     included = [s for s in subs if s.get("evaluable", True)]
+    excluded = [s["name"] for s in subs if not s.get("evaluable", True)]
     raw_max = sum(s["max"] for s in included)
     raw_pts = sum(s["points"] for s in included)
-    renormalized = raw_max != 100
+    renormalized = bool(excluded)
 
     if raw_max <= 0:
         final = 0
@@ -791,7 +794,6 @@ def score(last, tech, ladder, divergence, justification, benchmark=None) -> dict
 
     note = None
     if renormalized:
-        excluded = [s["name"] for s in subs if not s.get("evaluable", True)]
         note = (f"renormalized over max {raw_max} "
                 f"(excluded dimensions with no evaluable inputs: "
                 f"{', '.join(excluded)})")

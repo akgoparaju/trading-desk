@@ -31,6 +31,7 @@ stdlib-only at import; matplotlib only inside draw_*; >=3.10 guard.
 """
 
 import argparse
+import datetime
 import glob
 import json
 import os
@@ -46,7 +47,8 @@ if _REPO_ROOT not in sys.path:
 
 from scripts import tdstyle
 from scripts._artifact import emit_json
-from scripts.build_snapshot import load_daily_raw, parse_daily_rows
+from scripts.build_snapshot import (load_daily_raw, parse_daily_rows, load_raw,
+                                    load_quarterly_earnings, rolling_ttm_pe_series)
 
 # Charts by set (order = render order = manifest order).
 EXEC_CHARTS = [
@@ -154,14 +156,25 @@ def _find_daily(bundle):
     return None
 
 
+def _find_earnings(bundle):
+    for cand in (os.path.join(bundle, "raw", "earnings.json"),
+                 os.path.join(bundle, "earnings.json")):
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
 def load_docs(bundle):
     """Load a bundle into the ``docs`` dict the extract functions consume.
 
     Keys: ``snapshot`` (dict|None), ``module_<name>`` for each module file found,
-    and ``daily`` (ascending rows list, possibly empty). Missing pieces are
+    ``daily`` (ascending rows list, possibly empty), and ``earn_q`` (QC12:
+    newest-first quarterlyEarnings, possibly empty -- feeds
+    build_snapshot.rolling_ttm_pe_series for the pe_band chart, the SAME
+    construction that builds valuation.pe_5yr_median). Missing pieces are
     tolerated -- individual extracts decide whether they can proceed.
     """
-    docs = {"snapshot": None, "daily": []}
+    docs = {"snapshot": None, "daily": [], "earn_q": []}
     snap_path = _find_snapshot(bundle)
     if snap_path:
         docs["snapshot"] = _load_json(snap_path)
@@ -176,6 +189,14 @@ def load_docs(bundle):
                 docs["daily"] = parse_daily_rows(raw)
             except Exception:  # noqa: BLE001 - a bad daily file just yields no series
                 docs["daily"] = []
+    earn_path = _find_earnings(bundle)
+    if earn_path:
+        raw_earn = load_raw(earn_path)
+        if isinstance(raw_earn, dict):
+            try:
+                docs["earn_q"] = load_quarterly_earnings(raw_earn)
+            except Exception:  # noqa: BLE001 - a bad earnings file yields no history
+                docs["earn_q"] = []
     return docs
 
 
@@ -309,9 +330,10 @@ def extract_football_field(docs):
         rows.append({"label": "Ladder support", "lo": nearest[0],
                      "hi": nearest[0], "kind": "dot", "color": "accent"})
 
-    # Valuation floor from the risk downside_map. SUSPECT floors (the
-    # approx_current_eps method breakdown, e.g. real MU's ~$134 floor) are
-    # OMITTED from the anchors chart -- they are a garbage anchor, kept in the
+    # Valuation floor from the risk downside_map. SUSPECT floors (a failed
+    # QC12 input-evaluability guard, or the [0.2,5.0] ratio backstop -- e.g.
+    # real MU's pre-fix ~$134 floor) are OMITTED from the anchors chart --
+    # they are a garbage anchor, kept in the
     # downside map only for continuity (fix 3).
     risk = docs.get("module_risk") or {}
     dmap = ((risk.get("tables") or {}).get("downside_map") or [])
@@ -387,39 +409,92 @@ def extract_revisions(docs):
 
 
 def extract_pe_band(docs):
-    """Trailing P/E series (daily close / eps_ttm) vs the 5yr median.
+    """Era-correct trailing P/E series (raw close / rolling-TTM reportedEPS,
+    QC12) vs the 5yr median.
+
+    Reuses build_snapshot.rolling_ttm_pe_series -- the SAME construction that
+    builds valuation.pe_5yr_median -- rather than an independently-derived
+    series: shipping a chart built on a different (and formerly broken)
+    construction next to the corrected median would be an internal-
+    consistency failure of exactly the kind QC12 exists to prevent.
 
     Method label from valuation.pe_median_method (disclosed on the chart).
+    Returns None (disclosed absence) when there are fewer than 2 daily bars,
+    no pe_5yr_median, or fewer than 2 usable P/E points (e.g. no earnings
+    history in the bundle) -- never a fabricated or None-padded series.
+
+    D6: honours ``valuation.pe_5yr_evaluable`` the same way score_fundamental
+    / score_risk do -- ``False`` means QC12's PRIMARY input-evaluability gate
+    has already condemned this median, so it is carried through as
+    ``median_pe_evaluable: False`` + ``evaluability_reason`` for the drawer to
+    surface INSTEAD of plotting the number as an authoritative reference
+    line. ``None`` (the field absent -- a pre-QC12 snapshot) falls through
+    unchanged, matching the scorers' "absent means not gated" convention.
     """
     window = _window_daily(docs)
-    fund = _snap(docs).get("fundamentals", {}) or {}
     val = _snap(docs).get("valuation", {}) or {}
-    eps_ttm = fund.get("eps_ttm")
     median_pe = val.get("pe_5yr_median")
-    if len(window) < 2 or not eps_ttm or median_pe is None:
+    if len(window) < 2 or median_pe is None:
         return None
-    dates = [r["date"] for r in window]
-    pe_series = [float(r.get("adjusted_close") or r.get("close")) / float(eps_ttm)
-                 for r in window]
-    return {"dates": dates, "pe_series": pe_series,
-            "median_pe": float(median_pe), "eps_ttm": float(eps_ttm),
-            "method": val.get("pe_median_method")}
+    earn_q = docs.get("earn_q") or []
+    series = rolling_ttm_pe_series(window, earn_q)
+    points = series["points"]
+    if len(points) < 2:
+        return None
+    dates = [d for d, _ in points]
+    pe_series = [pe for _, pe in points]
+    pe_evaluable = val.get("pe_5yr_evaluable")
+    result = {"dates": dates, "pe_series": pe_series,
+              "median_pe": float(median_pe),
+              "method": val.get("pe_median_method"),
+              "median_pe_evaluable": pe_evaluable}
+    if pe_evaluable is False:
+        result["evaluability_reason"] = val.get("pe_5yr_evaluability_reason")
+    return result
+
+
+def _catalyst_event_is_past(date_str, as_of_date):
+    """True iff ``date_str`` parses as an ISO date strictly before ``as_of_date``.
+
+    QC9: a missing/unparseable date (or a missing ``as_of_date``) can never be
+    proven past, so it is never classified as such -- the event is kept, never
+    guessed. ``date_str == as_of_date`` (same-day) is NOT past.
+    """
+    if not as_of_date or not isinstance(date_str, str) or not date_str:
+        return False
+    try:
+        d = datetime.date.fromisoformat(date_str)
+        a = datetime.date.fromisoformat(as_of_date)
+    except ValueError:
+        return False
+    return d < a
 
 
 def extract_catalyst_timeline(docs):
-    """Forward catalyst events; alternate above/below to avoid label collisions."""
+    """Forward catalyst events; alternate above/below to avoid label collisions.
+
+    QC9: a catalyst dated before as_of is a stale row, not a forward-looking
+    one -- the MU 2026-08-08 defect rendered a dividend ex-date 33 days in the
+    past on this "forward catalyst" chart because there was no as_of
+    comparison at all. Such events are excluded here. A missing/unparseable
+    date can't be classified past/future, so it is always kept.
+    """
     events = []
+    meta = _snap(docs).get("meta", {}) or {}
+    as_of_utc = meta.get("as_of_utc") or ""
+    as_of_date = as_of_utc[:10] if isinstance(as_of_utc, str) and len(as_of_utc) >= 10 else ""
     ne = _snap(docs).get("events", {}).get("next_earnings") or {}
     cats = _snap(docs).get("events", {}).get("catalysts") or []
     seen = set()
     # Prefer the catalyst list (richer), then ensure next_earnings is present.
     for cat in cats:
         d = cat.get("date")
-        if not d or d in seen:
+        if not d or d in seen or _catalyst_event_is_past(d, as_of_date):
             continue
         seen.add(d)
         events.append({"date": d, "label": _short_event(cat.get("event", ""))})
-    if ne.get("date") and ne["date"] not in seen:
+    if (ne.get("date") and ne["date"] not in seen
+            and not _catalyst_event_is_past(ne["date"], as_of_date)):
         events.append({"date": ne["date"], "label": "Earnings"})
         seen.add(ne["date"])
     if not events:
@@ -447,9 +522,10 @@ def extract_downside_ladder(docs):
         lvl = r.get("level")
         if lvl is None:
             continue
-        # SUSPECT floors (approx_current_eps method breakdown) are excluded from
-        # the downside ladder extract -- they render grayed in the detail PDF
-        # table instead, never as a ladder rung (fix 3).
+        # SUSPECT floors (a failed QC12 input-evaluability guard, or the
+        # [0.2,5.0] ratio backstop) are excluded from the downside ladder
+        # extract -- they render grayed in the detail PDF table instead,
+        # never as a ladder rung (fix 3).
         if r.get("suspect"):
             continue
         rungs.append({"level": float(lvl), "type": r.get("type", ""),
@@ -888,20 +964,34 @@ def draw_revisions(data, path):
 
 
 def draw_pe_band(data, path):
+    """D6: a median QC12 has flagged ``pe_5yr_evaluable: False`` is NOT drawn
+    as an authoritative dashed reference line -- the P/E series still plots,
+    but the median line/label are suppressed and the evaluability reason is
+    surfaced instead (loud disclosure, not a silent one). ``True`` or the
+    flag being absent (older snapshots) draws the line exactly as before.
+    """
     plt, (fig, ax) = _new_fig(tdstyle.FIG_W * 0.42, 1.7)
     n = len(data["pe_series"])
     x = list(range(n))
     ax.plot(x, data["pe_series"], color=tdstyle.ACCENT, linewidth=1.15, zorder=4)
-    ax.axhline(data["median_pe"], color=tdstyle.GRAY_MID, linewidth=0.8,
-               linestyle=(0, (4, 3)), zorder=2)
-    ax.text(n - 1, data["median_pe"], "  5yr median %.1fx" % data["median_pe"],
-            va="center", ha="left", fontsize=6.2, color=tdstyle.GRAY_TXT)
+    evaluable = data.get("median_pe_evaluable")
+    condemned = evaluable is False
+    if not condemned:
+        ax.axhline(data["median_pe"], color=tdstyle.GRAY_MID, linewidth=0.8,
+                   linestyle=(0, (4, 3)), zorder=2)
+        ax.text(n - 1, data["median_pe"], "  5yr median %.1fx" % data["median_pe"],
+                va="center", ha="left", fontsize=6.2, color=tdstyle.GRAY_TXT)
     tdstyle.bank_axes(ax)
     _month_ticks(ax, data["dates"])
     tdstyle.kicker(ax, "Trailing P/E vs History")
     method = data.get("method")
-    if method:
-        tdstyle.why(fig, "P/E = close / EPS(ttm); median method: %s." % method)
+    if condemned:
+        reason = data.get("evaluability_reason") or "unspecified"
+        tdstyle.why(fig, "5yr median %.1fx not evaluable: %s." %
+                    (data["median_pe"], reason))
+    elif method:
+        tdstyle.why(fig, "P/E = raw close / rolling-TTM reportedEPS; median "
+                   "method: %s." % method)
     fig.subplots_adjust(left=0.10, right=0.97, top=0.86, bottom=0.18)
     _save(plt, fig, path)
 
@@ -1162,7 +1252,7 @@ _REGISTRY = {
     "revisions": (extract_revisions, draw_revisions,
                   "no fundamentals.revisions_90d"),
     "pe_band": (extract_pe_band, draw_pe_band,
-                "missing daily series, eps_ttm, or pe_5yr_median"),
+                "missing daily series, earnings history, or pe_5yr_median"),
     "catalyst_timeline": (extract_catalyst_timeline, draw_catalyst_timeline,
                           "no catalyst events"),
     "downside_ladder": (extract_downside_ladder, draw_downside_ladder,

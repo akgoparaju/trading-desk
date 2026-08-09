@@ -526,8 +526,9 @@ def compute_base_rates(earnings_move_history):
     """Empirical bull/base/bear base rates from a ticker's own earnings-move history.
 
     ``earnings_move_history`` is the snapshot ``events.earnings_move_history`` list of
-    ``{"quarter_end", "move_pct"}`` (move_pct a decimal fraction). Each move is
-    classified via classify_move; the base rate per class is its empirical frequency.
+    ``{"reported_date", "move_pct"}`` (QC7 renamed the key from "quarter_end";
+    move_pct a decimal fraction). Each move is classified via classify_move; the
+    base rate per class is its empirical frequency.
 
     Returns ``(base_rates, n)`` where ``base_rates`` is ``{"bull","base","bear"}`` of
     frequencies (rounded 4dp) and ``n`` is the count of USABLE (numeric move_pct)

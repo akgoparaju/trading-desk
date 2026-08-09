@@ -576,14 +576,18 @@ class TestSensitivity(unittest.TestCase):
 #   classify at +/-5%: bull {.10,.07,.20}=3, base {.02,-.01,.03}=3, bear {-.08,-.06}=2
 #   n=8 -> bull 3/8=.375, base 3/8=.375, bear 2/8=.25.
 _MOVE_HISTORY = [
-    {"quarter_end": "2026-04-30", "move_pct": 0.10},
-    {"quarter_end": "2026-01-30", "move_pct": 0.02},
-    {"quarter_end": "2025-10-30", "move_pct": -0.08},
-    {"quarter_end": "2025-07-30", "move_pct": -0.01},
-    {"quarter_end": "2025-04-30", "move_pct": 0.07},
-    {"quarter_end": "2025-01-30", "move_pct": 0.20},
-    {"quarter_end": "2024-10-30", "move_pct": -0.06},
-    {"quarter_end": "2024-07-30", "move_pct": 0.03},
+    # QC7: field renamed quarter_end -> reported_date in build_snapshot's
+    # events.earnings_move_history (the value was always AV's reportedDate,
+    # never fiscalDateEnding); compute_base_rates only reads move_pct, so this
+    # is a fixture-consistency update, not a behavior change.
+    {"reported_date": "2026-04-30", "move_pct": 0.10},
+    {"reported_date": "2026-01-30", "move_pct": 0.02},
+    {"reported_date": "2025-10-30", "move_pct": -0.08},
+    {"reported_date": "2025-07-30", "move_pct": -0.01},
+    {"reported_date": "2025-04-30", "move_pct": 0.07},
+    {"reported_date": "2025-01-30", "move_pct": 0.20},
+    {"reported_date": "2024-10-30", "move_pct": -0.06},
+    {"reported_date": "2024-07-30", "move_pct": 0.03},
 ]
 
 

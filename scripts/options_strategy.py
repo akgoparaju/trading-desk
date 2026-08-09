@@ -1445,8 +1445,17 @@ def build_module(snapshot, direction, direction_source, mode, tradeplan):
             "IV-crush risk on long premium held through the print")
 
     # -- liquidity verdict -------------------------------------------------
-    if len(recommended) < 2:
+    # QC11: this string must be TRUE of what actually happened. It is a purely
+    # descriptive post-hoc count over `recommended` (finalised above by
+    # select_structures/apply_crush_gate/apply_event_gates) -- it must never
+    # narrate a decline that did not occur. 0 recommended -> a decline genuinely
+    # happened (the original phrasing is accurate). Exactly 1 recommended means a
+    # structure DID survive the real gates -- the verdict may say liquidity was
+    # thin, but must not claim a decline to force structures.
+    if len(recommended) == 0:
         liquidity_verdict = "thin -- declining to force structures"
+    elif len(recommended) == 1:
+        liquidity_verdict = "thin -- only 1 structure cleared liquidity/economics screening"
     else:
         liquidity_verdict = "adequate"
 

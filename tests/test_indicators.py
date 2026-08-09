@@ -1,4 +1,4 @@
-import math, unittest
+import math, statistics, unittest
 from scripts import indicators as I
 
 class TestIndicators(unittest.TestCase):
@@ -32,6 +32,24 @@ class TestIndicators(unittest.TestCase):
         v = [100.0] * 22; v[-1] = 110.0
         self.assertAlmostEqual(I.pct_return(v, 21), 0.10)
         self.assertIsNone(I.pct_return([1.0], 21))
+
+    def test_simple_returns_exact(self):
+        # r_t = P_t / P_{t-1} - 1, arithmetic (not log) returns.
+        r = I.simple_returns([100.0, 110.0, 99.0])
+        self.assertAlmostEqual(r[0], 0.10)
+        self.assertAlmostEqual(r[1], -0.10)
+        self.assertEqual(I.simple_returns([100.0]), [])
+        self.assertEqual(I.simple_returns([]), [])
+
+    def test_simple_returns_differ_from_log_returns(self):
+        # Simple and log returns are numerically different (they only agree
+        # to first order for small moves) -- beta must use simple, vol must
+        # keep log; this pins that the two helpers are NOT interchangeable.
+        v = [100.0, 150.0, 90.0]
+        simple = I.simple_returns(v)
+        log = I.log_returns(v)
+        self.assertNotAlmostEqual(simple[0], log[0], places=3)
+        self.assertNotAlmostEqual(simple[1], log[1], places=3)
 
     def test_realized_vol_zero_for_constant_growth(self):
         v = [100 * (1.001 ** i) for i in range(40)]
@@ -96,15 +114,6 @@ class TestIndicators(unittest.TestCase):
         self.assertIsNone(I.realized_vol_ex_earnings(closes, dates, [], 20))
         self.assertIsNone(I.realized_vol_ex_earnings(closes, dates[:5], [], 5))
         self.assertIsNone(I.realized_vol_ex_earnings(closes, dates, [], 1))
-
-    def test_beta_of_self_is_one(self):
-        import random; random.seed(7)
-        p = [100.0]
-        for _ in range(300): p.append(p[-1] * (1 + random.gauss(0, 0.01)))
-        b = I.beta_corr(p, p)
-        self.assertAlmostEqual(b["beta"], 1.0, places=6)
-        self.assertAlmostEqual(b["corr"], 1.0, places=6)
-        self.assertIsNone(I.beta_corr(p[:50], p[:50]))   # < 60 days -> None
 
     def test_max_drawdown_exact(self):
         self.assertAlmostEqual(I.max_drawdown([100, 120, 60, 90]), -0.5)
@@ -391,6 +400,403 @@ class TestIndicators(unittest.TestCase):
         # Zero total volume -> None.
         zero = [{"date": "2026-01-01", "high": 10, "low": 8, "close": 9, "volume": 0}]
         self.assertIsNone(I.anchored_vwap(zero, "2026-01-01"))
+
+
+
+# --------------------------------------------------------------------------- #
+# QC5: month_end_series + beta_corr_monthly (5y-monthly, street-standard beta).
+# Ground truth is the REAL AAPL (as_of 2026-08-07) / MU (as_of 2026-08-08)
+# daily-adjusted series, resampled to their exact 61 month-end points (see
+# docs/QC_REMEDIATION_TRACKER.md QC5) -- embedding the resampled series (not
+# the ~6700 raw daily bars) keeps this self-contained while pinning the exact
+# measured betas: AAPL 1.078050, MU 2.043713.
+# --------------------------------------------------------------------------- #
+
+class TestMonthEndSeries(unittest.TestCase):
+    def test_keeps_last_observation_per_calendar_month(self):
+        rows = [
+            {"date": "2026-01-05", "adjusted_close": 10.0},
+            {"date": "2026-01-20", "adjusted_close": 11.0},   # later Jan bar wins
+            {"date": "2026-02-02", "adjusted_close": 12.0},
+        ]
+        series = I.month_end_series(rows)
+        self.assertEqual([r["month"] for r in series], ["2026-01", "2026-02"])
+        self.assertAlmostEqual(series[0]["adjusted_close"], 11.0)
+        self.assertEqual(series[0]["date"], "2026-01-20")
+
+    def test_skips_rows_missing_date_or_price(self):
+        rows = [
+            {"date": "2026-01-05", "adjusted_close": 10.0},
+            {"date": "2026-01-20", "adjusted_close": None},   # null price skipped
+            {"adjusted_close": 99.0},                        # no date skipped
+        ]
+        series = I.month_end_series(rows)
+        self.assertEqual(len(series), 1)
+        self.assertAlmostEqual(series[0]["adjusted_close"], 10.0)
+
+    def test_ascending_output_regardless_of_input_order(self):
+        rows = [
+            {"date": "2026-03-01", "adjusted_close": 3.0},
+            {"date": "2026-01-01", "adjusted_close": 1.0},
+            {"date": "2026-02-01", "adjusted_close": 2.0},
+        ]
+        months = [r["month"] for r in I.month_end_series(rows)]
+        self.assertEqual(months, sorted(months))
+
+
+class TestBetaCorrMonthly(unittest.TestCase):
+    _AAPL_STOCK = [
+        {"date": "2021-08-31", "adjusted_close": 148.23251387086415},
+        {"date": "2021-09-30", "adjusted_close": 138.1472746672415},
+        {"date": "2021-10-29", "adjusted_close": 146.25061303994897},
+        {"date": "2021-11-30", "adjusted_close": 161.61804624696094},
+        {"date": "2021-12-31", "adjusted_close": 173.6147396979604},
+        {"date": "2022-01-31", "adjusted_close": 170.8868851968774},
+        {"date": "2022-02-28", "adjusted_close": 161.6480841289091},
+        {"date": "2022-03-31", "adjusted_close": 170.93854148345943},
+        {"date": "2022-04-29", "adjusted_close": 154.33515299735052},
+        {"date": "2022-05-31", "adjusted_close": 145.92347861438262},
+        {"date": "2022-06-30", "adjusted_close": 134.04097014349898},
+        {"date": "2022-07-29", "adjusted_close": 159.3256148187538},
+        {"date": "2022-08-31", "adjusted_close": 154.35367842848234},
+        {"date": "2022-09-30", "adjusted_close": 135.68043734140858},
+        {"date": "2022-10-31", "adjusted_close": 150.54441578821704},
+        {"date": "2022-11-30", "adjusted_close": 145.57277743487376},
+        {"date": "2022-12-30", "adjusted_close": 127.77322821126224},
+        {"date": "2023-01-31", "adjusted_close": 141.89485952900043},
+        {"date": "2023-02-28", "adjusted_close": 145.18385917188593},
+        {"date": "2023-03-31", "adjusted_close": 162.40973053011322},
+        {"date": "2023-04-28", "adjusted_close": 167.11754442904555},
+        {"date": "2023-05-31", "adjusted_close": 174.81601056408908},
+        {"date": "2023-06-30", "adjusted_close": 191.30641223760992},
+        {"date": "2023-07-31", "adjusted_close": 193.75235698344315},
+        {"date": "2023-08-31", "adjusted_close": 185.54030172042133},
+        {"date": "2023-09-29", "adjusted_close": 169.08689549983146},
+        {"date": "2023-10-31", "adjusted_close": 168.6523517581112},
+        {"date": "2023-11-30", "adjusted_close": 187.83604649323868},
+        {"date": "2023-12-29", "adjusted_close": 190.387333673826},
+        {"date": "2024-01-31", "adjusted_close": 182.34781244197535},
+        {"date": "2024-02-29", "adjusted_close": 178.96558300779725},
+        {"date": "2024-03-28", "adjusted_close": 169.78709916557162},
+        {"date": "2024-04-30", "adjusted_close": 168.64845230272812},
+        {"date": "2024-05-31", "adjusted_close": 190.61202439181324},
+        {"date": "2024-06-28", "adjusted_close": 208.82551145593604},
+        {"date": "2024-07-31", "adjusted_close": 220.18787192163268},
+        {"date": "2024-08-30", "adjusted_close": 227.3098530905111},
+        {"date": "2024-09-30", "adjusted_close": 231.28033087375147},
+        {"date": "2024-10-31", "adjusted_close": 224.2426590029579},
+        {"date": "2024-11-29", "adjusted_close": 235.83786634723452},
+        {"date": "2024-12-31", "adjusted_close": 248.84556731418053},
+        {"date": "2025-01-31", "adjusted_close": 234.5162282810742},
+        {"date": "2025-02-28", "adjusted_close": 240.58342458435132},
+        {"date": "2025-03-31", "adjusted_close": 220.9758356885625},
+        {"date": "2025-04-30", "adjusted_close": 211.39587216413602},
+        {"date": "2025-05-30", "adjusted_close": 200.05285657697536},
+        {"date": "2025-06-30", "adjusted_close": 204.35571114711493},
+        {"date": "2025-07-31", "adjusted_close": 206.74618590830357},
+        {"date": "2025-08-29", "adjusted_close": 231.48329340173942},
+        {"date": "2025-09-30", "adjusted_close": 253.90967088345357},
+        {"date": "2025-10-31", "adjusted_close": 269.6051436074278},
+        {"date": "2025-11-28", "adjusted_close": 278.32948339082526},
+        {"date": "2025-12-31", "adjusted_close": 271.35253130582663},
+        {"date": "2026-01-30", "adjusted_close": 258.99564048861873},
+        {"date": "2026-02-27", "adjusted_close": 263.93651612903227},
+        {"date": "2026-03-31", "adjusted_close": 253.55609216589863},
+        {"date": "2026-04-30", "adjusted_close": 271.09990783410143},
+        {"date": "2026-05-29", "adjusted_close": 312.06},
+        {"date": "2026-06-30", "adjusted_close": 289.36},
+        {"date": "2026-07-31", "adjusted_close": 308.91},
+        {"date": "2026-08-06", "adjusted_close": 312.41},
+    ]
+    _AAPL_SPY = [
+        {"date": "2021-08-31", "adjusted_close": 421.9606882536231},
+        {"date": "2021-09-30", "adjusted_close": 402.30773620551156},
+        {"date": "2021-10-29", "adjusted_close": 430.53508843822806},
+        {"date": "2021-11-30", "adjusted_close": 427.0758081413591},
+        {"date": "2021-12-31", "adjusted_close": 446.84440965612845},
+        {"date": "2022-01-31", "adjusted_close": 423.27726197656386},
+        {"date": "2022-02-28", "adjusted_close": 410.78338089134957},
+        {"date": "2022-03-31", "adjusted_close": 426.21058511001667},
+        {"date": "2022-04-29", "adjusted_close": 388.8024999232284},
+        {"date": "2022-05-31", "adjusted_close": 389.68013663422016},
+        {"date": "2022-06-30", "adjusted_close": 357.5434983539781},
+        {"date": "2022-07-29", "adjusted_close": 390.4687763733743},
+        {"date": "2022-08-31", "adjusted_close": 374.53688450503665},
+        {"date": "2022-09-30", "adjusted_close": 339.9235382672619},
+        {"date": "2022-10-31", "adjusted_close": 367.55100989472874},
+        {"date": "2022-11-30", "adjusted_close": 387.9837283184874},
+        {"date": "2022-12-30", "adjusted_close": 365.64525278395905},
+        {"date": "2023-01-31", "adjusted_close": 388.63970491756317},
+        {"date": "2023-02-28", "adjusted_close": 378.8682578986262},
+        {"date": "2023-03-31", "adjusted_close": 392.9337203793846},
+        {"date": "2023-04-28", "adjusted_close": 399.21083152347995},
+        {"date": "2023-05-31", "adjusted_close": 401.0536531437648},
+        {"date": "2023-06-30", "adjusted_close": 427.04762004242684},
+        {"date": "2023-07-31", "adjusted_close": 441.0262813102838},
+        {"date": "2023-08-31", "adjusted_close": 433.8587251536432},
+        {"date": "2023-09-29", "adjusted_close": 413.29673059066033},
+        {"date": "2023-10-31", "adjusted_close": 404.3246297675076},
+        {"date": "2023-11-30", "adjusted_close": 441.2571999662612},
+        {"date": "2023-12-29", "adjusted_close": 461.4061014052035},
+        {"date": "2024-01-31", "adjusted_close": 468.75466168720345},
+        {"date": "2024-02-29", "adjusted_close": 493.21750436968676},
+        {"date": "2024-03-28", "adjusted_close": 509.35750224376},
+        {"date": "2024-04-30", "adjusted_close": 488.8203853715996},
+        {"date": "2024-05-31", "adjusted_close": 513.5447759540629},
+        {"date": "2024-06-28", "adjusted_close": 531.6650443675156},
+        {"date": "2024-07-31", "adjusted_close": 538.103015486515},
+        {"date": "2024-08-30", "adjusted_close": 550.676109310722},
+        {"date": "2024-09-30", "adjusted_close": 562.2453646182726},
+        {"date": "2024-10-31", "adjusted_close": 557.2281165235195},
+        {"date": "2024-11-29", "adjusted_close": 590.4575858385739},
+        {"date": "2024-12-31", "adjusted_close": 576.227700571294},
+        {"date": "2025-01-31", "adjusted_close": 591.7031032586272},
+        {"date": "2025-02-28", "adjusted_close": 584.191535499337},
+        {"date": "2025-03-31", "adjusted_close": 551.639830980865},
+        {"date": "2025-04-30", "adjusted_close": 546.8570261751709},
+        {"date": "2025-05-30", "adjusted_close": 581.2241906037148},
+        {"date": "2025-06-30", "adjusted_close": 611.0954844283586},
+        {"date": "2025-07-31", "adjusted_close": 625.1699179371643},
+        {"date": "2025-08-29", "adjusted_close": 637.9981261317678},
+        {"date": "2025-09-30", "adjusted_close": 660.7149899585509},
+        {"date": "2025-10-31", "adjusted_close": 676.4647183210681},
+        {"date": "2025-11-28", "adjusted_close": 677.7838076612538},
+        {"date": "2025-12-31", "adjusted_close": 678.3067456673831},
+        {"date": "2026-01-30", "adjusted_close": 688.303494250732},
+        {"date": "2026-02-27", "adjusted_close": 682.3551801683016},
+        {"date": "2026-03-31", "adjusted_close": 648.6864324889178},
+        {"date": "2026-04-30", "adjusted_close": 716.8327206883871},
+        {"date": "2026-05-29", "adjusted_close": 754.5565587988076},
+        {"date": "2026-06-30", "adjusted_close": 746.77},
+        {"date": "2026-07-31", "adjusted_close": 747.03},
+        {"date": "2026-08-06", "adjusted_close": 768.56},
+    ]
+
+    _MU_STOCK = [
+        {"date": "2021-08-31", "adjusted_close": 71.85561104790371},
+        {"date": "2021-09-30", "adjusted_close": 69.30117819925367},
+        {"date": "2021-10-29", "adjusted_close": 67.46564403449462},
+        {"date": "2021-11-30", "adjusted_close": 82.01322863817002},
+        {"date": "2021-12-31", "adjusted_close": 91.04444726796851},
+        {"date": "2022-01-31", "adjusted_close": 80.4103776353813},
+        {"date": "2022-02-28", "adjusted_close": 86.85141797350167},
+        {"date": "2022-03-31", "adjusted_close": 76.12938269138021},
+        {"date": "2022-04-29", "adjusted_close": 66.74102837683334},
+        {"date": "2022-05-31", "adjusted_close": 72.27097133517194},
+        {"date": "2022-06-30", "adjusted_close": 54.10535340477119},
+        {"date": "2022-07-29", "adjusted_close": 60.663267877855176},
+        {"date": "2022-08-31", "adjusted_close": 55.436381072343245},
+        {"date": "2022-09-30", "adjusted_close": 49.13077466344236},
+        {"date": "2022-10-31", "adjusted_close": 53.16870306456473},
+        {"date": "2022-11-30", "adjusted_close": 56.65759208266463},
+        {"date": "2022-12-30", "adjusted_close": 49.23264658076469},
+        {"date": "2023-01-31", "adjusted_close": 59.39833110884575},
+        {"date": "2023-02-28", "adjusted_close": 56.955414671865036},
+        {"date": "2023-03-31", "adjusted_close": 59.437732986861576},
+        {"date": "2023-04-28", "adjusted_close": 63.522121838425626},
+        {"date": "2023-05-31", "adjusted_close": 67.31213035084879},
+        {"date": "2023-06-30", "adjusted_close": 62.28839510912121},
+        {"date": "2023-07-31", "adjusted_close": 70.59420309281953},
+        {"date": "2023-08-31", "adjusted_close": 69.16036649827424},
+        {"date": "2023-09-29", "adjusted_close": 67.27165760476976},
+        {"date": "2023-10-31", "adjusted_close": 66.23328369302503},
+        {"date": "2023-11-30", "adjusted_close": 75.39520793648968},
+        {"date": "2023-12-29", "adjusted_close": 84.64132283516454},
+        {"date": "2024-01-31", "adjusted_close": 85.04796617196344},
+        {"date": "2024-02-29", "adjusted_close": 89.86817743255519},
+        {"date": "2024-03-28", "adjusted_close": 117.03889502183725},
+        {"date": "2024-04-30", "adjusted_close": 112.14448707835045},
+        {"date": "2024-05-31", "adjusted_close": 124.09756449003017},
+        {"date": "2024-06-28", "adjusted_close": 130.58042125898933},
+        {"date": "2024-07-31", "adjusted_close": 109.12309414932206},
+        {"date": "2024-08-30", "adjusted_close": 95.62927136159857},
+        {"date": "2024-09-30", "adjusted_close": 103.05186754895456},
+        {"date": "2024-10-31", "adjusted_close": 99.12828222157486},
+        {"date": "2024-11-29", "adjusted_close": 97.43718257504524},
+        {"date": "2024-12-31", "adjusted_close": 83.83223595310808},
+        {"date": "2025-01-31", "adjusted_close": 90.8846626468819},
+        {"date": "2025-02-28", "adjusted_close": 93.26535470876318},
+        {"date": "2025-03-31", "adjusted_close": 86.66615600166548},
+        {"date": "2025-04-30", "adjusted_close": 76.75176319862078},
+        {"date": "2025-05-30", "adjusted_close": 94.21665434362207},
+        {"date": "2025-06-30", "adjusted_close": 122.93248621481496},
+        {"date": "2025-07-31", "adjusted_close": 108.96322871517323},
+        {"date": "2025-08-29", "adjusted_close": 118.81724252696321},
+        {"date": "2025-09-30", "adjusted_close": 167.04899604748746},
+        {"date": "2025-10-31", "adjusted_close": 223.54434798631036},
+        {"date": "2025-11-28", "adjusted_close": 236.2415310890766},
+        {"date": "2025-12-31", "adjusted_close": 285.2335767700604},
+        {"date": "2026-01-30", "adjusted_close": 414.6235462330074},
+        {"date": "2026-02-27", "adjusted_close": 412.11509776346236},
+        {"date": "2026-03-31", "adjusted_close": 337.78854706061526},
+        {"date": "2026-04-30", "adjusted_close": 517.081236673774},
+        {"date": "2026-05-29", "adjusted_close": 970.8521169661896},
+        {"date": "2026-06-30", "adjusted_close": 1154.1142019494366},
+        {"date": "2026-07-31", "adjusted_close": 823.03},
+        {"date": "2026-08-07", "adjusted_close": 877.57},
+    ]
+    _MU_SPY = [
+        {"date": "2021-08-31", "adjusted_close": 421.9606882536231},
+        {"date": "2021-09-30", "adjusted_close": 402.30773620551156},
+        {"date": "2021-10-29", "adjusted_close": 430.53508843822806},
+        {"date": "2021-11-30", "adjusted_close": 427.0758081413591},
+        {"date": "2021-12-31", "adjusted_close": 446.84440965612845},
+        {"date": "2022-01-31", "adjusted_close": 423.27726197656386},
+        {"date": "2022-02-28", "adjusted_close": 410.78338089134957},
+        {"date": "2022-03-31", "adjusted_close": 426.21058511001667},
+        {"date": "2022-04-29", "adjusted_close": 388.8024999232284},
+        {"date": "2022-05-31", "adjusted_close": 389.68013663422016},
+        {"date": "2022-06-30", "adjusted_close": 357.5434983539781},
+        {"date": "2022-07-29", "adjusted_close": 390.4687763733743},
+        {"date": "2022-08-31", "adjusted_close": 374.53688450503665},
+        {"date": "2022-09-30", "adjusted_close": 339.9235382672619},
+        {"date": "2022-10-31", "adjusted_close": 367.55100989472874},
+        {"date": "2022-11-30", "adjusted_close": 387.9837283184874},
+        {"date": "2022-12-30", "adjusted_close": 365.64525278395905},
+        {"date": "2023-01-31", "adjusted_close": 388.63970491756317},
+        {"date": "2023-02-28", "adjusted_close": 378.8682578986262},
+        {"date": "2023-03-31", "adjusted_close": 392.9337203793846},
+        {"date": "2023-04-28", "adjusted_close": 399.21083152347995},
+        {"date": "2023-05-31", "adjusted_close": 401.0536531437648},
+        {"date": "2023-06-30", "adjusted_close": 427.04762004242684},
+        {"date": "2023-07-31", "adjusted_close": 441.0262813102838},
+        {"date": "2023-08-31", "adjusted_close": 433.8587251536432},
+        {"date": "2023-09-29", "adjusted_close": 413.29673059066033},
+        {"date": "2023-10-31", "adjusted_close": 404.3246297675076},
+        {"date": "2023-11-30", "adjusted_close": 441.2571999662612},
+        {"date": "2023-12-29", "adjusted_close": 461.4061014052035},
+        {"date": "2024-01-31", "adjusted_close": 468.75466168720345},
+        {"date": "2024-02-29", "adjusted_close": 493.21750436968676},
+        {"date": "2024-03-28", "adjusted_close": 509.35750224376},
+        {"date": "2024-04-30", "adjusted_close": 488.8203853715996},
+        {"date": "2024-05-31", "adjusted_close": 513.5447759540629},
+        {"date": "2024-06-28", "adjusted_close": 531.6650443675156},
+        {"date": "2024-07-31", "adjusted_close": 538.103015486515},
+        {"date": "2024-08-30", "adjusted_close": 550.676109310722},
+        {"date": "2024-09-30", "adjusted_close": 562.2453646182726},
+        {"date": "2024-10-31", "adjusted_close": 557.2281165235195},
+        {"date": "2024-11-29", "adjusted_close": 590.4575858385739},
+        {"date": "2024-12-31", "adjusted_close": 576.227700571294},
+        {"date": "2025-01-31", "adjusted_close": 591.7031032586272},
+        {"date": "2025-02-28", "adjusted_close": 584.191535499337},
+        {"date": "2025-03-31", "adjusted_close": 551.639830980865},
+        {"date": "2025-04-30", "adjusted_close": 546.8570261751709},
+        {"date": "2025-05-30", "adjusted_close": 581.2241906037148},
+        {"date": "2025-06-30", "adjusted_close": 611.0954844283586},
+        {"date": "2025-07-31", "adjusted_close": 625.1699179371643},
+        {"date": "2025-08-29", "adjusted_close": 637.9981261317678},
+        {"date": "2025-09-30", "adjusted_close": 660.7149899585509},
+        {"date": "2025-10-31", "adjusted_close": 676.4647183210681},
+        {"date": "2025-11-28", "adjusted_close": 677.7838076612538},
+        {"date": "2025-12-31", "adjusted_close": 678.3067456673831},
+        {"date": "2026-01-30", "adjusted_close": 688.303494250732},
+        {"date": "2026-02-27", "adjusted_close": 682.3551801683016},
+        {"date": "2026-03-31", "adjusted_close": 648.6864324889178},
+        {"date": "2026-04-30", "adjusted_close": 716.8327206883871},
+        {"date": "2026-05-29", "adjusted_close": 754.5565587988076},
+        {"date": "2026-06-30", "adjusted_close": 746.77},
+        {"date": "2026-07-31", "adjusted_close": 747.03},
+        {"date": "2026-08-07", "adjusted_close": 773.26},
+    ]
+
+    def test_aapl_matches_measured_ground_truth(self):
+        # Ratified change: beta_corr_monthly uses SIMPLE (not log) returns --
+        # a 24-combination sweep vs Alpha Vantage's overview.Beta found 5y-
+        # monthly/adjusted/simple ranks #1 (median abs error 0.0114) while
+        # the log-return variant (previously pinned here at 1.078050) ranks
+        # #2 (median 0.0183). AV's published AAPL Beta is 1.086.
+        r = I.beta_corr_monthly(self._AAPL_STOCK, self._AAPL_SPY)
+        self.assertIsNotNone(r)
+        self.assertEqual(r["n_obs"], 60)
+        self.assertAlmostEqual(r["beta"], 1.082406991223596, places=6)
+        self.assertAlmostEqual(r["corr"], 0.6885684866620682, places=6)
+        self.assertEqual(r["window_start"], "2021-08-31")
+        self.assertEqual(r["window_end"], "2026-08-06")
+        self.assertFalse(r["degraded"])
+
+    def test_mu_matches_measured_ground_truth(self):
+        # Same ratified simple-return switch. Previously pinned log-return
+        # beta was 2.043713; AV's published MU Beta is 2.213.
+        r = I.beta_corr_monthly(self._MU_STOCK, self._MU_SPY)
+        self.assertIsNotNone(r)
+        self.assertEqual(r["n_obs"], 60)
+        self.assertAlmostEqual(r["beta"], 2.196408838006559, places=6)
+        self.assertAlmostEqual(r["corr"], 0.5144776515380401, places=6)
+        self.assertEqual(r["window_start"], "2021-08-31")
+        self.assertEqual(r["window_end"], "2026-08-07")
+        self.assertFalse(r["degraded"])
+
+    def test_simple_and_log_betas_diverge_on_mu_volatile_series(self):
+        """Guards against beta_corr_monthly silently reverting to log
+        returns. MU's real 5y-monthly series is volatile enough (2026
+        melt-up) that simple- and log-return beta diverge by ~0.153 -- far
+        above the ~0.007 median divergence measured across a 16-ticker
+        study (divergence grows with return magnitude; INTC measured
+        0.271). This independently recomputes the log-return beta over the
+        SAME common months beta_corr_monthly now uses simple returns for,
+        and asserts the two are NOT interchangeable.
+        """
+        simple = I.beta_corr_monthly(self._MU_STOCK, self._MU_SPY)
+        stock_m = I.month_end_series(self._MU_STOCK)
+        bench_m = I.month_end_series(self._MU_SPY)
+        stock_by_month = {r["month"]: r["adjusted_close"] for r in stock_m}
+        bench_by_month = {r["month"]: r["adjusted_close"] for r in bench_m}
+        common = sorted(set(stock_by_month) & set(bench_by_month))
+        prices_s = [stock_by_month[m] for m in common]
+        prices_b = [bench_by_month[m] for m in common]
+        log_s = I.log_returns(prices_s)
+        log_b = I.log_returns(prices_b)
+        log_beta = statistics.covariance(log_s, log_b) / statistics.variance(log_b)
+        self.assertAlmostEqual(log_beta, 2.043713, places=6)
+        self.assertGreater(abs(simple["beta"] - log_beta), 0.1)
+
+    def test_beta_of_self_is_one_monthly(self):
+        r = I.beta_corr_monthly(self._AAPL_SPY, self._AAPL_SPY)
+        self.assertAlmostEqual(r["beta"], 1.0, places=9)
+        self.assertAlmostEqual(r["corr"], 1.0, places=9)
+
+    def test_degrades_with_fewer_than_target_months_but_above_floor(self):
+        # 30 months (>= the 24-obs floor, < the 60-obs 5y target) -> a
+        # non-null, DEGRADED estimate over whatever is available.
+        stock = self._AAPL_STOCK[-31:]
+        spy = self._AAPL_SPY[-31:]
+        r = I.beta_corr_monthly(stock, spy)
+        self.assertIsNotNone(r)
+        self.assertEqual(r["n_obs"], 30)
+        self.assertTrue(r["degraded"])
+
+    def test_none_below_minimum_observation_floor(self):
+        # Only 10 common months (< the 24-obs minimum) -> withheld, not a
+        # noisy short-window estimate.
+        stock = self._AAPL_STOCK[-11:]
+        spy = self._AAPL_SPY[-11:]
+        self.assertIsNone(I.beta_corr_monthly(stock, spy))
+
+    def test_none_when_rows_lack_dates(self):
+        # Dateless rows (e.g. some benchmark-sector fixtures) can never
+        # resample to months -> None, never a crash.
+        rows = [{"adjusted_close": float(100 + i)} for i in range(300)]
+        self.assertIsNone(I.beta_corr_monthly(rows, rows))
+
+    def test_join_is_by_calendar_month_not_exact_date(self):
+        # Stock and bench month-end trading days can differ by a session;
+        # the join must still succeed via the shared "YYYY-MM" key.
+        import random
+        random.seed(11)
+        stock, bench = [], []
+        price_s = price_b = 100.0
+        for y in (2021, 2022, 2023, 2024, 2025, 2026):
+            for m in range(1, 13):
+                if y == 2026 and m > 8:
+                    break
+                price_s *= (1 + random.gauss(0, 0.05))
+                price_b *= (1 + random.gauss(0, 0.03))
+                stock.append({"date": f"{y}-{m:02d}-28", "adjusted_close": price_s})
+                bench.append({"date": f"{y}-{m:02d}-30", "adjusted_close": price_b})
+        r = I.beta_corr_monthly(stock, bench)
+        self.assertIsNotNone(r)
+        self.assertEqual(r["n_obs"], 60)
+
 
 
 if __name__ == "__main__":

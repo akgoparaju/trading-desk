@@ -909,8 +909,11 @@ class TestCLI(unittest.TestCase):
         self.assertNotIn("cash_secured_put", rec_names)
 
     def test_thin_liquidity_verdict(self):
-        # illiquid long put -> bull_put_spread declined ; if CSP also excluded (earnings)
-        # < 2 recommended -> thin verdict.
+        # illiquid long put on the wing -> bull_put_spread snaps to the next liquid
+        # strike and SURVIVES (see TestLiquidityGate.test_illiquid_wing_snaps_...);
+        # CSP is separately excluded by the earnings-within-30d event gate, leaving
+        # exactly ONE recommended structure -> "thin" verdict (QC11: this must NOT
+        # claim a decline that did not happen -- see the QC11 tests below).
         chain = _chain_with_illiquid()
         _write_bundle(self.dir, chain=chain,
                       snapshot=_snapshot(iv_minus_rv=0.05,
@@ -925,6 +928,85 @@ class TestCLI(unittest.TestCase):
         # when zero structures survive (per-structure warnings vanish with them).
         self.assertTrue(any("BINARY EVENT" in w for w in doc["warnings_global"]),
                         doc["warnings_global"])
+
+    # ----------------------------------------------------------------------- #
+    # QC11: liquidity_verdict must be TRUE of what actually happened. It must
+    # never assert a decline that did not occur. The MU 2026-08-08 run shipped
+    # "thin -- declining to force structures" ALONGSIDE a recommended structure
+    # (bull_put_spread survived the real gates; only CSP was declined, and that
+    # was the earnings event gate, not liquidity). recommended_structures itself
+    # must be byte-identical before/after this fix -- this is a wording-only fix
+    # to a descriptive field, never a change to structure selection.
+    # ----------------------------------------------------------------------- #
+
+    def test_liquidity_verdict_one_recommended_no_false_decline_claim(self):
+        # The MU case: exactly ONE structure clears the real gates (bull_put_spread,
+        # wing-snapped to the liquid 80 strike). The verdict must say liquidity was
+        # thin WITHOUT claiming a decline to force structures -- no decline happened.
+        chain = _chain_with_illiquid()
+        _write_bundle(self.dir, chain=chain,
+                      snapshot=_snapshot(iv_minus_rv=0.05,
+                                         earnings_date="2026-07-30"),
+                      composite=_composite_doc(grade="B"),
+                      tradeplan=_tradeplan_doc(days_to_catalyst=14))
+        proc = self._run(extra=["--mode", "pipeline"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        doc = self._read()
+
+        # The contradiction is gone: a structure WAS recommended, and the verdict
+        # does not claim otherwise.
+        self.assertEqual(len(doc["recommended_structures"]), 1)
+        self.assertNotIn("declining", doc["liquidity_verdict"].lower())
+        self.assertEqual(
+            doc["liquidity_verdict"],
+            "thin -- only 1 structure cleared liquidity/economics screening")
+
+        # Pin recommended_structures identical to the pre-fix output (selection
+        # behaviour must not change -- this is a verdict-string-only fix).
+        bps = doc["recommended_structures"][0]
+        self.assertEqual(bps["name"], "bull_put_spread")
+        self.assertEqual(sorted(l["strike"] for l in bps["legs"]), [80.0, 90.0])
+        self.assertEqual(bps["net_credit"], 1.5)
+        self.assertEqual(bps["max_loss"], 8.5)
+        self.assertEqual({d["name"] for d in doc["declined"]}, {"cash_secured_put"})
+
+    def test_liquidity_verdict_zero_recommended_truthfully_declined(self):
+        # Nothing cleared the bar -> a decline genuinely happened. The verdict
+        # keeps its original, accurate language (no false claim to correct here).
+        _write_bundle(self.dir, chain=_chain(),
+                      snapshot=_snapshot(iv_minus_rv=-0.10),   # cheap
+                      composite=_composite_doc(grade="C"),     # neutral
+                      tradeplan=_tradeplan_doc())
+        proc = self._run(extra=["--mode", "pipeline"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        doc = self._read()
+
+        self.assertEqual(doc["recommended_structures"], [])
+        self.assertTrue(doc["declined"])
+        self.assertEqual(doc["liquidity_verdict"], "thin -- declining to force structures")
+
+    def test_liquidity_verdict_adequate_unchanged(self):
+        # >=2 recommended -> "adequate", unchanged.
+        _write_bundle(self.dir, chain=_chain(),
+                      snapshot=_snapshot(iv_minus_rv=0.05),    # rich
+                      composite=_composite_doc(grade="B"),     # bullish
+                      tradeplan=_tradeplan_doc())               # default entry_1=90.0
+        proc = self._run(extra=["--mode", "pipeline"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        doc = self._read()
+
+        rec = doc["recommended_structures"]
+        self.assertEqual(len(rec), 2)
+        self.assertEqual({s["name"] for s in rec},
+                         {"bull_put_spread", "cash_secured_put"})
+        self.assertEqual(doc["liquidity_verdict"], "adequate")
+
+        # Pin recommended_structures identical to the pre-fix output.
+        bps = next(s for s in rec if s["name"] == "bull_put_spread")
+        csp = next(s for s in rec if s["name"] == "cash_secured_put")
+        self.assertEqual(sorted(l["strike"] for l in bps["legs"]), [85.0, 90.0])
+        self.assertEqual(bps["net_credit"], 1.2)
+        self.assertEqual(csp["net_credit"], 3.3)
 
     def test_determinism(self):
         _write_bundle(self.dir, chain=_chain(), snapshot=_snapshot())

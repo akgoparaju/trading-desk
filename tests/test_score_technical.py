@@ -571,7 +571,7 @@ class TestTechnicalGracefulIdentity(unittest.TestCase):
 
     def test_score_identical_benchmark_without_rel_fields(self):
         # A benchmark block that has SPY returns but NO rel_sector fields -> the
-        # RS factor stays absent -> identical to the no-benchmark score.
+        # RS factor stays non-evaluable -> identical to the no-benchmark score.
         tech, ladder = self._fixture()
         baseline = st.score(last=110.0, tech=tech, ladder=ladder,
                             divergence="none", justification=None)
@@ -580,9 +580,15 @@ class TestTechnicalGracefulIdentity(unittest.TestCase):
                             benchmark={"spy_ret_3m": 0.05, "spy_ret_12m": 0.10})
         self.assertEqual(json.dumps(baseline, sort_keys=True),
                          json.dumps(spy_only, sort_keys=True))
-        # sanity: max total still 100 (RS factor NOT included).
+        # sanity: max total still 100 (RS factor excluded from the arithmetic,
+        # zeroed in its published row).
         self.assertEqual(sum(s["max"] for s in baseline["subscores"]), 100)
-        self.assertFalse(baseline["renormalized"])
+        # QC10: the sector-RS dimension being genuinely missing IS an exclusion
+        # and must be disclosed -- renormalized flips True, naming it. Before the
+        # fix this asserted assertFalse here, pinning the defect (the one case
+        # that genuinely needed disclosure was silent).
+        self.assertTrue(baseline["renormalized"])
+        self.assertIn("rel_strength_sector", baseline["renormalization_note"])
 
     def test_score_with_rel_fields_adds_factor(self):
         # When rel_sector fields ARE present, the RS factor is included: the score
@@ -647,13 +653,86 @@ class TestRenormalization(unittest.TestCase):
         self.assertGreaterEqual(result["score"], 0)
 
     def test_no_renormalization_when_all_dimensions_have_inputs(self):
+        # QC10: the sector-RS dimension is now always a considered member, so
+        # "all dimensions have inputs" must include it -- pass a benchmark with
+        # both rel-sector legs to genuinely satisfy the test's own name. Before
+        # the fix this test omitted the RS dimension entirely (it wasn't yet a
+        # considered member when non-evaluable) and asserted no-renormalization
+        # anyway; that omission is exactly the defect QC10 corrects.
         tech = _tech()
         ladder = _ladder([(97.0, "ma50"), (110.0, "swing_high")])
         result = st.score(last=110.0, tech=tech, ladder=ladder,
-                          divergence="none", justification=None)
+                          divergence="none", justification=None,
+                          benchmark={"rel_sector_ret_3m": 0.15,
+                                     "rel_sector_ret_6m": 0.15})
         self.assertFalse(result["renormalized"])
         maxes = sum(s["max"] for s in result["subscores"])
-        self.assertEqual(maxes, 100)
+        self.assertEqual(maxes, 100 + st._RS_MAX)
+
+
+# --------------------------------------------------------------------------- #
+# QC10: `renormalized` must key on ACTUAL EXCLUSION of a considered dimension,
+# not on `raw_max != 100`. The bonus sector-RS dimension (max _RS_MAX) growing
+# the denominator to 110 is NOT an exclusion; the bonus dimension being
+# genuinely absent (no rel_sector_ret_3m/6m in the benchmark) IS an exclusion
+# and must be disclosed by name -- never as an empty list.
+# --------------------------------------------------------------------------- #
+
+class TestQC10SectorRSExclusionDisclosure(unittest.TestCase):
+    def _fixture(self):
+        tech = _tech()
+        ladder = _ladder([(97.0, "ma50"), (110.0, "swing_high")])
+        return tech, ladder
+
+    def test_mu_shaped_rs_present_nothing_excluded_no_disclosure(self):
+        # MU-shaped: benchmark carries rel_sector_ret_3m/_6m -- the sector-RS
+        # dimension is evaluable and joins the denominator (100 -> 110). No
+        # dimension was excluded, so renormalized must be False and the note
+        # None -- membership GROWTH is not exclusion.
+        tech, ladder = self._fixture()
+        result = st.score(last=110.0, tech=tech, ladder=ladder,
+                          divergence="none", justification=None,
+                          benchmark={"rel_sector_ret_3m": 0.15,
+                                     "rel_sector_ret_6m": 0.15})
+        self.assertFalse(result["renormalized"])
+        self.assertIsNone(result["renormalization_note"])
+        if result["renormalization_note"]:
+            self.assertNotIn("inputs: )", result["renormalization_note"])
+        # numeric score/denominator pinned to today's (pre- and post-fix
+        # identical) values -- this is a disclosure fix, not a scoring change.
+        self.assertEqual(result["score"], 76.8014)
+        self.assertEqual(sum(s["max"] for s in result["subscores"]), 110)
+
+    def test_aapl_shaped_rs_absent_is_excluded_and_disclosed(self):
+        # AAPL-shaped: benchmark lacks BOTH rel-sector fields -- the sector-RS
+        # dimension is genuinely not evaluable. This IS an exclusion and must
+        # be disclosed by name; today it is silently dropped instead.
+        tech, ladder = self._fixture()
+        result = st.score(last=110.0, tech=tech, ladder=ladder,
+                          divergence="none", justification=None,
+                          benchmark={"spy_ret_3m": 0.05, "spy_ret_12m": 0.10})
+        self.assertTrue(result["renormalized"])
+        self.assertIsNotNone(result["renormalization_note"])
+        self.assertIn("rel_strength_sector", result["renormalization_note"])
+        self.assertNotIn("inputs: )", result["renormalization_note"])
+        # numeric score/denominator pinned to today's (pre- and post-fix
+        # identical) values -- out of 100, RS row excluded/zeroed.
+        self.assertEqual(result["score"], 74.4815)
+        self.assertEqual(sum(s["max"] for s in result["subscores"]), 100)
+
+    def test_momentum_still_excluded_and_disclosed_when_genuinely_null(self):
+        # Regression guard: a genuine exclusion of an always-present dimension
+        # (momentum, all inputs null) must still renormalize and be named --
+        # this is the path TestRenormalization.test_momentum_dimension_null_
+        # renormalizes already covers; pinned again here alongside the sector-
+        # RS cases so the three exclusion scenarios read together.
+        tech = _tech(rsi14=None, macd=None, macd_signal=None)
+        ladder = _ladder([(97.0, "ma50"), (110.0, "swing_high")])
+        result = st.score(last=110.0, tech=tech, ladder=ladder,
+                          divergence="none", justification=None)
+        self.assertTrue(result["renormalized"])
+        self.assertIn("momentum", result["renormalization_note"])
+        self.assertNotIn("inputs: )", result["renormalization_note"])
 
 
 # --------------------------------------------------------------------------- #
@@ -700,7 +779,10 @@ class TestCLI(unittest.TestCase):
         self.assertLessEqual(doc["score"], 100)
         self.assertIn(doc["trend_claim"], ("uptrend", "downtrend", "sideways"))
         self.assertIsInstance(doc["subscores"], list)
-        self.assertEqual(len(doc["subscores"]), 4)
+        # QC10: the sector-RS dimension is now always a considered member (the
+        # standard build_full fixture carries no sector_daily_adjusted, so RS is
+        # not evaluable here and is published as a 5th, zeroed/excluded row).
+        self.assertEqual(len(doc["subscores"]), 5)
         self.assertIsInstance(doc["ladder"], list)
         self.assertIn("divergence", doc["flags"])
         # signal is ALWAYS null in the JSON (the LLM writes it in prose)

@@ -381,10 +381,20 @@ def _staleness_axis(module_doc, snapshot, refresh_plan):
             return {"level": MEDIUM, "why": "reused in-window"}
 
     # No reuse (or no plan): freshness from the print itself.
-    if as_of_date is not None and latest[:10] == as_of_date:
+    if as_of_date is None:
+        # meta.as_of_utc missing/unparseable -- a mismatch can't even be
+        # evaluated, so this is a distinct failure mode from a confirmed
+        # latest-vs-as-of mismatch below.
+        return {"level": MEDIUM, "why": "as-of date unparseable"}
+    if latest[:10] == as_of_date:
         return {"level": HIGH, "why": "fresh print"}
-    # stale / weekend print.
-    return {"level": MEDIUM, "why": "weekend print"}
+    # QC8: this label is a STATIC string describing the condition that fired
+    # (latest_trading_day != as_of). There is no weekday computation anywhere
+    # in this module, so it must never claim to know *why* the dates differ
+    # (e.g. "weekend") -- that claim is right by luck on some prints (a
+    # Saturday as_of) and wrong by luck on others (an ordinary stale weekday
+    # print, e.g. a quote one session behind mid-session).
+    return {"level": MEDIUM, "why": "stale print (latest_trading_day != as_of)"}
 
 
 # --------------------------------------------------------------------------- #

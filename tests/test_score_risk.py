@@ -106,11 +106,57 @@ class TestVolatilityState(unittest.TestCase):
         self.assertFalse(sub["evaluable"])
 
 
+class TestQC5MonthlyBetaScoringImpact(unittest.TestCase):
+    """QC5: the corrected 5y-monthly beta shifts AAPL/MU by DIFFERENT amounts
+    relative to the shipped (unsliced full-daily-history) beta -- pin both
+    outcomes so a rubric/beta regression is caught either way. Band edges
+    themselves (<1.2 / 1.2-1.8 / >1.8) are UNCHANGED and out of scope here.
+    """
+
+    def test_aapl_shipped_and_corrected_beta_both_in_under_1_2_band(self):
+        # AAPL: shipped 1.1298768780951407 -> corrected 1.078050. Both < 1.2
+        # -> the SAME +4 points; the QC5 beta fix does NOT move AAPL's score.
+        shipped = sr.score_volatility(_tech(rv30_vs_10yr_pctile=None),
+                                      beta=1.1298768780951407)
+        corrected = sr.score_volatility(_tech(rv30_vs_10yr_pctile=None),
+                                        beta=1.078050)
+        self.assertEqual(shipped["inputs"]["beta_points"], 4)
+        self.assertEqual(corrected["inputs"]["beta_points"], 4)
+
+    def test_mu_shipped_and_corrected_beta_cross_a_band_boundary(self):
+        # MU: shipped 1.6615882925160785 (in the 1.2-1.8 band -> +2) ->
+        # corrected 2.043713 (crosses into the >1.8 band -> +0). A real -2
+        # point risk-score change from the beta fix ALONE.
+        shipped = sr.score_volatility(_tech(rv30_vs_10yr_pctile=None),
+                                      beta=1.6615882925160785)
+        corrected = sr.score_volatility(_tech(rv30_vs_10yr_pctile=None),
+                                        beta=2.043713)
+        self.assertEqual(shipped["inputs"]["beta_points"], 2)
+        self.assertEqual(corrected["inputs"]["beta_points"], 0)
+        self.assertEqual(shipped["inputs"]["beta_points"]
+                         - corrected["inputs"]["beta_points"], 2)
+
+    def test_real_beta_n_days_from_5y_monthly_window_does_not_trip_the_gate(self):
+        # QC5: benchmark.beta_n_days keeps its CALENDAR-DAYS-SPANNED meaning
+        # (not the 60-observation count) specifically so the real ~1801-1826
+        # day window measured off AAPL/MU stays far above
+        # score_risk._MIN_BETA_N_DAYS=150 -- confirms the confidence gate
+        # still passes with the QC5 beta's real beta_n_days value.
+        self.assertGreater(1801, sr._MIN_BETA_N_DAYS)
+        sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=None),
+                                  beta=2.043713, beta_n_days=1801,
+                                  ohlcv_rows=2520)
+        self.assertNotIn("beta n/a", sub["arithmetic"])
+        self.assertEqual(sub["inputs"]["beta_points"], 0)  # >1.8 band, ungated
+
+
 # --------------------------------------------------------------------------- #
 # 1b. Short-history confidence gating (REAL-WORLD BUG: a beta of 3.61 computed
 # from 100 unadjusted days fed the score as a plain number). A beta needs
-# >=150 return-days for a stable estimate; an rv30 regime percentile needs
-# >=500 (~2yr) ohlcv rows to be a percentile at all. Below threshold the
+# >=150 calendar days spanned by the estimation window for a stable estimate
+# (D8: this WAS "return-days" pre-QC5; QC5 repointed beta_n_days to mean
+# calendar days spanned by the 5y monthly window); an rv30 regime percentile
+# needs >=500 (~2yr) ohlcv rows to be a percentile at all. Below threshold the
 # component scores 0 with an explicit "n/a" arithmetic disclosure. When the
 # gating input is ABSENT (None) the gate does not trip -- the pure-function
 # branch tests that never pass n_days/rows keep their existing behavior.
@@ -118,13 +164,41 @@ class TestVolatilityState(unittest.TestCase):
 
 class TestShortHistoryGating(unittest.TestCase):
     def test_beta_ndays_99_gates_component_to_0(self):
-        # 99 return-days < 150 -> beta component 0 regardless of the beta value.
+        # 99 calendar days < 150 -> beta component 0 regardless of the beta value.
         sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=None), beta=1.0,
                                   beta_n_days=99, ohlcv_rows=2520)
         self.assertEqual(sub["inputs"]["beta_points"], 0)
         self.assertIn("beta n/a", sub["arithmetic"])
         self.assertIn("99", sub["arithmetic"])
         self.assertIn("150", sub["arithmetic"])
+
+    def test_beta_gate_message_names_calendar_days_not_return_days(self):
+        # D8: QC5 changed beta_n_days to mean CALENDAR DAYS SPANNED by the 5y
+        # monthly window (~1801 for a real bundle), not return-days -- the
+        # disclosure must never call this unit "return-days" again.
+        sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=None), beta=1.0,
+                                  beta_n_days=99, ohlcv_rows=2520)
+        self.assertNotIn("return-days", sub["arithmetic"])
+        self.assertIn("calendar days", sub["arithmetic"])
+
+    def test_beta_gate_message_names_observation_count_when_reachable(self):
+        # D8: benchmark.beta_n_obs (the actual observation count behind the 5y
+        # monthly beta, e.g. 60) is reachable at build_module's call site --
+        # prefer naming it alongside the calendar-day span.
+        sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=None), beta=1.0,
+                                  beta_n_days=99, ohlcv_rows=2520,
+                                  beta_n_obs=13)
+        self.assertIn("13", sub["arithmetic"])
+        self.assertIn("monthly observations", sub["arithmetic"])
+        self.assertEqual(sub["inputs"]["beta_n_obs"], 13)
+
+    def test_beta_gate_message_omits_observation_clause_when_unreachable(self):
+        # beta_n_obs not passed (older caller / pure-branch test shape) ->
+        # the message still stays correct on units, just without the count.
+        sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=None), beta=1.0,
+                                  beta_n_days=99, ohlcv_rows=2520)
+        self.assertNotIn("monthly observations", sub["arithmetic"])
+        self.assertIsNone(sub["inputs"]["beta_n_obs"])
 
     def test_beta_ndays_200_bands_normally(self):
         # 200 >= 150 -> normal banding; beta 1.0 -> +4 (v1.1.0 re-weight).
@@ -148,7 +222,7 @@ class TestShortHistoryGating(unittest.TestCase):
         self.assertEqual(sub["inputs"]["pctile_points"], 16)
 
     def test_gate_at_exact_threshold_passes(self):
-        # boundaries are inclusive: 150 return-days and 500 rows both pass.
+        # boundaries are inclusive: 150 calendar days and 500 rows both pass.
         sub = sr.score_volatility(_tech(rv30_vs_10yr_pctile=25.0), beta=1.0,
                                   beta_n_days=150, ohlcv_rows=500)
         self.assertEqual(sub["inputs"]["beta_points"], 4)
@@ -637,11 +711,19 @@ class TestDownsideMap(unittest.TestCase):
 
     def test_valuation_floor_suspect_when_floor_collapses_vs_last(self):
         # Real-MU shape: median collapses (1.82) so floor 1.82*74 ~= 134 on a
-        # ~850 stock -> floor/last < 0.25 -> suspect (approx_current_eps breakdown).
+        # ~850 stock -> floor/last < 0.25 -> suspect.
+        #
+        # D8: the reason must name the ACTUAL pe_median_method
+        # (rolling_ttm_reported_eps, post-QC12), never the retired
+        # "approx_current_eps" label render_pdf.py prints verbatim into the
+        # detail PDF.
         vf = sr.valuation_floor(pe_5yr_median=1.82, eps_ntm=74.0, last=853.2)
         self.assertTrue(vf.get("suspect"))
-        self.assertEqual(vf["suspect_reason"],
-                         "approx_current_eps method breakdown")
+        self.assertEqual(
+            vf["suspect_reason"],
+            "pe_5yr_median (rolling_ttm_reported_eps) unreliable under "
+            "EPS regime change")
+        self.assertNotIn("approx_current_eps", vf["suspect_reason"])
         # the level is still emitted (not dropped) for downside-map continuity.
         self.assertIsNotNone(vf["level"])
 
@@ -651,8 +733,10 @@ class TestDownsideMap(unittest.TestCase):
         vf = sr.valuation_floor(pe_5yr_median=1.0, eps_ntm=50.0,
                                 last=80.0, pe_fwd=12.0)  # ratio 12 > 5
         self.assertTrue(vf.get("suspect"))
-        self.assertEqual(vf["suspect_reason"],
-                         "approx_current_eps method breakdown")
+        self.assertEqual(
+            vf["suspect_reason"],
+            "pe_5yr_median (rolling_ttm_reported_eps) unreliable under "
+            "EPS regime change")
 
     def test_suspect_row_carried_into_downside_map(self):
         # build_downside_map propagates the suspect flag + reason onto the row so
@@ -664,8 +748,10 @@ class TestDownsideMap(unittest.TestCase):
                                      stress_pct=None, top_risk=None)
         vfr = [r for r in rows if r["type"] == "valuation_floor"][0]
         self.assertTrue(vfr.get("suspect"))
-        self.assertEqual(vfr["suspect_reason"],
-                         "approx_current_eps method breakdown")
+        self.assertEqual(
+            vfr["suspect_reason"],
+            "pe_5yr_median (rolling_ttm_reported_eps) unreliable under "
+            "EPS regime change")
         # a normal ladder row carries no suspect flag.
         normal = [r for r in rows if r["type"] == "swing_low"][0]
         self.assertNotIn("suspect", normal)
@@ -679,6 +765,62 @@ class TestDownsideMap(unittest.TestCase):
         self.assertEqual(len(srows), 1)
         self.assertEqual(srows[0]["level"], 70.0)
         self.assertEqual(srows[0]["risk"], "HBM miss")
+
+
+# --------------------------------------------------------------------------- #
+# QC12: PRIMARY input-evaluability gate (pe_evaluable/pe_evaluability_reason,
+# build_snapshot's coverage/plausibility/EPS-series verdict) is checked FIRST,
+# before the pre-QC12 SECONDARY suspect checks (floor/last collapse, pe ratio
+# out of [0.2,5.0]) -- which are kept byte-identical as a fallback. Calls that
+# don't pass the new kwargs (all the tests above) are unaffected: None is
+# "not gated", falling through to the secondary checks unchanged.
+# --------------------------------------------------------------------------- #
+
+class TestQC12ValuationFloorPrimaryGate(unittest.TestCase):
+    def test_primary_false_flags_suspect_with_its_own_reason(self):
+        # Healthy-looking ratio/floor (would NOT trip either secondary check),
+        # but the PRIMARY input guard says this median is untrustworthy.
+        vf = sr.valuation_floor(
+            pe_5yr_median=20.0, eps_ntm=6.0, last=200.0, pe_fwd=18.0,
+            pe_evaluable=False,
+            pe_evaluability_reason="coverage_below_floor:0.3000<0.6")
+        self.assertTrue(vf.get("suspect"))
+        self.assertEqual(vf["suspect_reason"], "coverage_below_floor:0.3000<0.6")
+
+    def test_primary_false_reason_falls_back_to_generic_when_absent(self):
+        vf = sr.valuation_floor(pe_5yr_median=20.0, eps_ntm=6.0, last=200.0,
+                                pe_fwd=18.0, pe_evaluable=False)
+        self.assertTrue(vf.get("suspect"))
+        self.assertEqual(
+            vf["suspect_reason"],
+            "pe_5yr_median (rolling_ttm_reported_eps) unreliable under "
+            "EPS regime change")
+
+    def test_primary_true_does_not_override_a_healthy_floor(self):
+        vf = sr.valuation_floor(pe_5yr_median=12.0, eps_ntm=6.0, last=100.0,
+                                pe_fwd=10.0, pe_evaluable=True,
+                                pe_evaluability_reason="ok")
+        self.assertNotIn("suspect", vf)
+
+    def test_primary_absent_falls_through_to_secondary_unchanged(self):
+        # Byte-identical to test_valuation_floor_suspect_when_floor_collapses_vs_last.
+        vf = sr.valuation_floor(pe_5yr_median=1.82, eps_ntm=74.0, last=853.2)
+        self.assertTrue(vf.get("suspect"))
+        self.assertEqual(
+            vf["suspect_reason"],
+            "pe_5yr_median (rolling_ttm_reported_eps) unreliable under "
+            "EPS regime change")
+
+    def test_primary_reason_wins_over_secondary_when_both_trigger(self):
+        # Both the primary guard AND the secondary floor/last collapse would
+        # fire here -- the PRIMARY reason takes precedence in suspect_reason.
+        vf = sr.valuation_floor(
+            pe_5yr_median=1.82, eps_ntm=74.0, last=853.2,
+            pe_evaluable=False,
+            pe_evaluability_reason="median_outside_plausible_band:[3.0,150.0]:1.82")
+        self.assertTrue(vf.get("suspect"))
+        self.assertEqual(vf["suspect_reason"],
+                         "median_outside_plausible_band:[3.0,150.0]:1.82")
 
 
 # --------------------------------------------------------------------------- #
@@ -953,9 +1095,12 @@ class TestEventContext(unittest.TestCase):
             "days_to_event": 12,
             "implied_move": 0.082,
             "implied_move_vs_own_history_pctile": 74.0,
+            # QC7: field renamed quarter_end -> reported_date; build_event_context
+            # passes the list through verbatim (no key-name dependency), so this
+            # is a fixture-consistency update, not a behavior change.
             "earnings_move_history": [
-                {"quarter_end": "2026-03-31", "move_pct": 0.07},
-                {"quarter_end": "2025-12-31", "move_pct": -0.11},
+                {"reported_date": "2026-03-31", "move_pct": 0.07},
+                {"reported_date": "2025-12-31", "move_pct": -0.11},
             ],
             "next_earnings": {"date": "2026-08-01"},
             "dividends": {},
@@ -1066,7 +1211,7 @@ class TestValuationFloorRelabel(unittest.TestCase):
         self.assertEqual(vfr[0]["level"], 70.0)
 
     def test_suspect_floor_relabeled_as_long_horizon(self):
-        # A suspect snapshot floor (approx_current_eps breakdown — floor/last < 0.25)
+        # A suspect snapshot floor (pe_5yr_median unreliable — floor/last < 0.25)
         # is also relabeled in the map.
         vf = sr.valuation_floor(pe_5yr_median=1.82, eps_ntm=20.0, last=200.0)
         self.assertTrue(vf.get("suspect"))
@@ -1200,6 +1345,23 @@ class TestFullModuleV110(unittest.TestCase):
         doc = sr.build_module(snap, ladder, stress_pct=None, top_risk=None)
         self.assertTrue(doc["renormalized"])
         self.assertEqual(sum(s["max"] for s in doc["subscores"]), 92)
+
+    def test_qc12_pe_evaluability_threaded_into_downside_map(self):
+        # snapshot.valuation.pe_5yr_evaluable=False must reach the downside
+        # map's valuation_floor row as a suspect flag citing THAT reason, even
+        # though pe_5yr_median(12)/eps_ntm(6)=72 and pe_fwd(10)/pe_5yr_median(12)
+        # = 0.833 (inside [0.2,5]) would look perfectly healthy to the
+        # SECONDARY checks alone.
+        snap = self._full_snap()
+        snap["valuation"]["pe_5yr_evaluable"] = False
+        snap["valuation"]["pe_5yr_evaluability_reason"] = (
+            "coverage_below_floor:0.4000<0.6")
+        ladder = _ladder([(96.0, "ma50"), (110.0, "swing_high")])
+        doc = sr.build_module(snap, ladder, stress_pct=None, top_risk=None)
+        vf_row = next(r for r in doc["tables"]["downside_map"]
+                      if r["type"] == "valuation_floor")
+        self.assertTrue(vf_row.get("suspect"))
+        self.assertEqual(vf_row["suspect_reason"], "coverage_below_floor:0.4000<0.6")
 
 
 # --------------------------------------------------------------------------- #

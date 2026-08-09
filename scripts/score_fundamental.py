@@ -471,12 +471,14 @@ def score_valuation(val, adjusted=None, last=None) -> dict:
     """Fwd P/E vs own 5-yr median (20) + PEG (15) + FCF yield (15).
 
     multiple vs history: ratio = pe_fwd / pe_5yr_median (both > 0 required, else
-        the component is 0 "n/a"): a ratio OUTSIDE the sanity band [0.2, 5.0] is
-        scored 0 and treated as n/a (approx_current_eps method breakdown under an
+        the component is 0 "n/a"): QC12's PRIMARY input-evaluability gate
+        (pe_5yr_evaluable) is checked FIRST; this [0.2, 5.0] sanity band is only
+        the SECONDARY backstop behind it. A ratio OUTSIDE the band is scored 0
+        and treated as n/a (the pe_median_method's estimate broke down under an
         EPS regime change) -- not counted toward ``evaluable``; else <=0.75 -> 20
         (discount to own history); (0.75,1.0] -> 14; (1.0,1.25] -> 8; >1.25 -> 3.
         The arithmetic string carries the ``pe_median_method`` label so the
-        approximation is disclosed.
+        method actually used is disclosed.
     O14: when adjusted.core_eps_fwd is present and last is available, pe_fwd_core
         = last / core_eps_fwd is used instead of the snapshot pe_fwd. Both GAAP
         and core are disclosed in the arithmetic string.
@@ -490,6 +492,12 @@ def score_valuation(val, adjusted=None, last=None) -> dict:
     pe_method = val.get("pe_median_method")
     peg = val.get("peg")
     fcf_yield = val.get("fcf_yield")
+    # QC12: the PRIMARY input-evaluability gate build_snapshot computes off
+    # coverage/plausibility/EPS-series inputs (never the ratio below). Absent
+    # (None, a pre-QC12 snapshot) is treated as "not gated" -- falls through
+    # to the SECONDARY ratio band unchanged.
+    pe_evaluable = val.get("pe_5yr_evaluable")
+    pe_evaluability_reason = val.get("pe_5yr_evaluability_reason")
 
     # O14: compute core pe_fwd when adjusted present.
     adj = adjusted if isinstance(adjusted, dict) else {}
@@ -512,25 +520,42 @@ def score_valuation(val, adjusted=None, last=None) -> dict:
     evaluable = 0
 
     # -- multiple vs own 5-yr history --------------------------------------
-    # The ratio only means something when pe_5yr_median is a real earnings-history
-    # baseline. The snapshot builds that median with the "approx_current_eps"
-    # method, which back-projects TODAY's EPS across the 5-yr price history -- for a
-    # name whose EPS exploded (real MU: pe_5yr_median 1.82) the baseline is garbage,
-    # producing a huge ratio that would band as a "rich premium" on noise. So we
-    # gate on a SANITY BAND [0.2, 5.0]: a ratio outside it means the approx method
-    # broke down under an EPS regime change, and the component is scored 0 and
-    # treated as n/a (NOT counted toward ``evaluable``, exactly like a null input),
-    # so the dimension renormalizes over the remaining components instead of banding
-    # on a bogus number.
-    if (effective_pe_fwd is not None and effective_pe_fwd > 0
+    # QC12 PRIMARY gate: build_snapshot's input-based evaluability verdict
+    # (coverage floor / median plausibility / EPS-series validity) is checked
+    # FIRST and, when it says the median is untrustworthy, the component goes
+    # n/a WITHOUT ever computing the ratio -- the ratio alone missed MU
+    # (numerator and denominator were BOTH distorted by the same EPS regime
+    # and cancelled back inside the band).
+    if pe_evaluable is False:
+        pe_pts = 0
+        parts.append(
+            f"pe_vs_history: n/a (pe_5yr_median failed PRIMARY input-"
+            f"evaluability guard: {pe_evaluability_reason or 'unspecified'}; "
+            f"method {pe_method}; ratio not evaluated)")
+    # SECONDARY backstop (byte-identical to pre-QC12): the ratio only means
+    # something when pe_5yr_median is a real earnings-history baseline. Kept
+    # as a fallback for unforeseen cases (or a val block that doesn't carry
+    # the PRIMARY fields at all) -- a ratio outside [0.2, 5.0] means the
+    # method broke down under an EPS regime change, and the component is
+    # scored 0 and treated as n/a (NOT counted toward ``evaluable``, exactly
+    # like a null input), so the dimension renormalizes over the remaining
+    # components instead of banding on a bogus number.
+    elif (effective_pe_fwd is not None and effective_pe_fwd > 0
             and pe_median is not None and pe_median > 0):
         ratio = effective_pe_fwd / pe_median
         if ratio < 0.2 or ratio > 5.0:
             pe_pts = 0
+            # D8: QC12 replaced the pe-median method with
+            # rolling_ttm_reported_eps and demoted this [0.2,5] band to a
+            # SECONDARY backstop behind the new PRIMARY input-evaluability
+            # guard above -- name the ACTUAL method (disclosed dynamically,
+            # never hardcoded) and say accurately that this is the
+            # secondary path, not the retired "approx_current_eps" method.
             parts.append(
                 f"pe_fwd/pe_5yr_median ratio {_fmt(_clean(ratio))} outside "
-                f"sanity band [0.2,5] -- approx_current_eps method breakdown "
-                f"under EPS regime change; component n/a")
+                f"sanity band [0.2,5] (method {pe_method}) -- SECONDARY "
+                f"ratio-band backstop breakdown under EPS regime change; "
+                f"component n/a")
         else:
             evaluable += 1
             if ratio <= 0.75:
@@ -760,7 +785,8 @@ def _comps_range_position(last, anchors):
 def _own_history_position(pe_fwd, pe_median, pe_method,
                           pe_fwd_core=None, pe_fwd_gaap=None,
                           core_eps_fwd=None, consensus_eps_fwd=None,
-                          last=None):
+                          last=None, pe_evaluable=None,
+                          pe_evaluability_reason=None):
     """Own-history multiple component (max 8). The v1.1 pe_fwd/pe_5yr_median band
     rescaled from 20 to 8, keeping the [0.2,5.0] sanity band (outside -> n/a).
 
@@ -771,7 +797,19 @@ def _own_history_position(pe_fwd, pe_median, pe_method,
     O14: when pe_fwd_core is provided (last / core_eps_fwd), it is used as the
     pe_fwd for the own-history ratio instead of the snapshot pe_fwd. Both GAAP and
     core are disclosed in the arithmetic string.
+
+    QC12: ``pe_evaluable`` / ``pe_evaluability_reason`` are build_snapshot's
+    PRIMARY input-evaluability verdict (coverage/plausibility/EPS-series
+    guards). When ``pe_evaluable is False`` the component goes n/a WITHOUT
+    ever computing the ratio -- this gate is checked BEFORE the [0.2,5.0]
+    ratio band below, which is kept only as a SECONDARY backstop (absent/None
+    falls through to it unchanged, e.g. a pre-QC12 val block).
     """
+    if pe_evaluable is False:
+        return 0, (
+            f"own_history: n/a (pe_5yr_median failed PRIMARY input-"
+            f"evaluability guard: {pe_evaluability_reason or 'unspecified'}; "
+            f"method {pe_method}; ratio not evaluated)"), False
     # Use core pe_fwd when available; fall back to snapshot pe_fwd.
     effective_pe_fwd = pe_fwd_core if (pe_fwd_core is not None
                                         and pe_fwd_core > 0) else pe_fwd
@@ -779,12 +817,16 @@ def _own_history_position(pe_fwd, pe_median, pe_method,
             and pe_median is not None and pe_median > 0):
         return 0, (f"own_history: n/a (pe_fwd or pe_5yr_median null/non-positive; "
                    f"method {pe_method}) (+0)"), False
+    # SECONDARY backstop (byte-identical to pre-QC12 other than the D8
+    # message correction below: this is now a SECONDARY guard behind the
+    # PRIMARY pe_evaluable check above, and the method is the ACTUAL
+    # post-QC12 one, not the retired "approx_current_eps" label).
     ratio = effective_pe_fwd / pe_median
     if ratio < 0.2 or ratio > 5.0:
         return 0, (
             f"own_history: pe_fwd/pe_5yr_median ratio {_fmt(_clean(ratio))} outside "
-            f"sanity band [0.2,5] -- approx_current_eps method breakdown under EPS "
-            f"regime change; component n/a"), False
+            f"sanity band [0.2,5] (method {pe_method}) -- SECONDARY ratio-band "
+            f"backstop breakdown under EPS regime change; component n/a"), False
     if ratio <= 0.75:
         pts = 8
         band = "discount to own history"
@@ -913,6 +955,9 @@ def score_valuation_anchored(val, anchors, last, scale=None,
     pe_median = val.get("pe_5yr_median")
     pe_method = val.get("pe_median_method")
     fcf_yield = val.get("fcf_yield")
+    # QC12: PRIMARY input-evaluability gate, threaded to own-history below.
+    pe_evaluable = val.get("pe_5yr_evaluable")
+    pe_evaluability_reason = val.get("pe_5yr_evaluability_reason")
 
     # O14: compute core pe_fwd for own-history when adjusted present.
     adj = adjusted if isinstance(adjusted, dict) else {}
@@ -944,7 +989,8 @@ def score_valuation_anchored(val, anchors, last, scale=None,
         pe_fwd, pe_median, pe_method,
         pe_fwd_core=pe_fwd_core, pe_fwd_gaap=pe_fwd_gaap,
         core_eps_fwd=core_eps_fwd, consensus_eps_fwd=consensus_eps_fwd,
-        last=last)
+        last=last, pe_evaluable=pe_evaluable,
+        pe_evaluability_reason=pe_evaluability_reason)
     if own_ok:
         evaluable += 1
     parts.append(own_str)

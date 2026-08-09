@@ -19,6 +19,7 @@ stdlib-only. Reuses scripts.indicators and scripts.chain for all math.
 """
 
 import argparse
+import bisect
 import csv
 import io
 import json
@@ -39,7 +40,7 @@ if _REPO_ROOT not in sys.path:
 
 from scripts import chain, indicators
 
-SCHEMA_VERSION = "0.4.0"
+SCHEMA_VERSION = "0.5.0"
 
 # Files that MUST be present; their absence aborts the build.
 REQUIRED = ("global_quote", "overview", "daily_adjusted", "spy_daily_adjusted")
@@ -280,6 +281,14 @@ def _parse_stooq_csv_rows(csv_text):
             "close": close,
             "adjusted_close": close,  # stooq close IS split-adjusted
             "volume": num(row.get("volume")),
+            # D2/D3: stooq carries no per-bar split-coefficient column at
+            # all. Its close is ALREADY split-adjusted (the comment above),
+            # so a constant 1.0 (no FURTHER adjustment) is correct BY
+            # CONSTRUCTION -- unlike the "av_missing" degradation below, this
+            # is not a data gap, but the provenance is still disclosed
+            # distinctly so a reader never confuses the two.
+            "split_coefficient": 1.0,
+            "split_coefficient_source": "stooq",
         })
     if not rows:
         raise BuildError("stooq CSV daily series parsed to zero rows")
@@ -302,7 +311,24 @@ def parse_daily_rows(payload):
         first line is ``Date,Open,...`` -> parsed with adjusted_close == close.
 
     Returns a list of dicts with keys date/open/high/low/close/adjusted_close/
-    volume. Raises BuildError if neither shape yields rows.
+    volume/split_coefficient/split_coefficient_source. Raises BuildError if
+    neither shape yields rows.
+
+    D2/D3: each row also carries ``split_coefficient`` (the vendor's
+    "8. split coefficient" for that bar, default 1.0 -- "no split") and
+    ``split_coefficient_source`` disclosing WHERE that value came from:
+      "av"         -- the AV JSON bar carried a parseable coefficient.
+      "av_missing" -- the AV JSON bar existed but the "8. split coefficient"
+                      key was absent/unparseable. Measured real finding: some
+                      archived daily_adjusted.json fetches (e.g. a GOOG
+                      bundle) carry only 6 OHLCV keys, no dividend/split
+                      columns at all -- a DIFFERENT vendor response shape,
+                      NOT "no split happened". Defaulting to 1.0 is the only
+                      safe arithmetic choice (never fabricate a coefficient),
+                      but downstream construction disclosed this bar as
+                      degraded rather than silently trusting the default.
+      "stooq"      -- see _parse_stooq_csv_rows (already split-adjusted by
+                      construction, not a degradation).
     """
     csv_text = _extract_daily_csv_text(payload)
     if csv_text is not None:
@@ -316,6 +342,11 @@ def parse_daily_rows(payload):
     rows = []
     for d in sorted(ts):  # ascending
         bar = ts[d]
+        sc = num(bar.get("8. split coefficient"))
+        if sc is not None and sc > 0:
+            split_coefficient, split_source = sc, "av"
+        else:
+            split_coefficient, split_source = 1.0, "av_missing"
         rows.append({
             "date": d,
             "open": num(bar.get("1. open")),
@@ -324,6 +355,8 @@ def parse_daily_rows(payload):
             "close": num(bar.get("4. close")),
             "adjusted_close": num(bar.get("5. adjusted close")),
             "volume": num(bar.get("6. volume")),
+            "split_coefficient": split_coefficient,
+            "split_coefficient_source": split_source,
         })
     return rows
 
@@ -426,6 +459,213 @@ def reconcile_mktcap(mktcap_overview, mktcap_computed, last, prev_close,
     return (mktcap_computed, "computed_anomaly_retained")
 
 
+# --------------------------------------------------------------------------- #
+# D2/D3: split-only price adjustment (NEVER dividend-adjustment). Shared by
+# rolling_ttm_pe_series (era-correct P/E) and _derive_52wk_range (wk52 hi/lo).
+#
+# The pre-fix premise -- "reportedEPS is never retroactively split-adjusted
+# while adjusted_close IS, so pairing RAW close with reportedEPS is
+# era-correct by construction" -- is FALSE. AV's quarterlyEarnings.reportedEPS
+# IS retroactively restated onto the CURRENT share-count basis: AAPL's FQ
+# ending 2014-03-31 carries reportedEPS 0.415, which is the as-filed
+# $11.62 EPS divided by 28 -- the cumulative 7:1 (2014-06-09) x 4:1
+# (2020-08-31) split factor between that filing and today. Pairing that
+# current-basis EPS with a RAW (un-adjusted) historical close inflates every
+# pre-split bar's P/E by the split ratio (measured: AAPL's 10yr P/E series
+# stepped 151.28 -> 39.10 across 2020-08-28 -> 2020-08-31, a ~3.9x "P/E
+# change" that was pure share-count arithmetic, not a valuation move).
+#
+# The fix is NOT to switch to adjusted_close: AV's adjusted_close is BOTH
+# split- AND dividend-adjusted, and the dividend drag materially depresses
+# historical P/E on high-yield names (KO/PG/T-shaped names over a 10yr
+# window). Instead, each bar's close/high/low is rebased onto the CURRENT
+# share-count basis using ONLY the vendor's own per-bar "8. split
+# coefficient" (see parse_daily_rows) -- split-only, no dividend component.
+# --------------------------------------------------------------------------- #
+
+def _split_factors(rows):
+    """Cumulative split-adjustment factor per row (ascending ``rows``, each
+    optionally carrying ``split_coefficient`` -- treated as 1.0 i.e. "no
+    split" when absent/non-numeric/non-positive).
+
+    ``factors[i]`` is the product of ``split_coefficient`` over every row
+    STRICTLY AFTER ``rows[i]`` (never rows[i]'s own coefficient), so
+    ``price_at_i / factors[i]`` rebases bar i onto the share-count basis of
+    the LAST row in ``rows`` -- whatever that happens to be (the caller's own
+    window, not necessarily "today"; both real call sites -- rolling_ttm_
+    pe_series's window and _derive_52wk_range's 364-day window -- end on the
+    series' actual most recent bar, so this coincides with "today" there).
+
+    Verified against real AAPL data (D2/D3): the 2020-08-31 bar carries
+    split_coefficient 4.0 (a 4:1 split effective that day) and no AAPL split
+    has occurred since. factor(2020-08-28) == 4.0 (the 08-31 coefficient is
+    strictly after it) so its raw close 499.23 maps to 499.23/4.0 == 124.8075
+    (split-adjusted). factor(2020-08-31) == 1.0 (its own coefficient is
+    excluded, nothing strictly-after it here) so the split day's own close is
+    UNCHANGED by the adjustment -- exactly the vendor's own convention.
+
+    O(n): single backward pass accumulating the running product.
+    """
+    n = len(rows)
+    factors = [1.0] * n
+    running = 1.0
+    for i in range(n - 1, -1, -1):
+        factors[i] = running
+        sc = rows[i].get("split_coefficient")
+        if not isinstance(sc, (int, float)) or isinstance(sc, bool) or sc <= 0:
+            sc = 1.0
+        running *= sc
+    return factors
+
+
+def _split_events_in_rows(rows):
+    """Ascending [{"date", "coefficient"}, ...] for every row carrying a
+    GENUINE known split (coefficient != 1.0 from a real "av"/"stooq" source
+    -- never from an "av_missing" degraded default, since we have no basis
+    to claim a split occurred there)."""
+    events = []
+    for r in rows:
+        sc = r.get("split_coefficient")
+        src = r.get("split_coefficient_source")
+        if (src in ("av", "stooq") and isinstance(sc, (int, float))
+                and not isinstance(sc, bool) and sc != 1.0):
+            events.append({"date": r.get("date"), "coefficient": sc})
+    return events
+
+
+def _split_degraded_count(rows):
+    """Count of rows whose split_coefficient defaulted from a degraded
+    source (the vendor payload structurally lacked the column -- see
+    parse_daily_rows's "av_missing"), never a genuine "no split" fact."""
+    return sum(1 for r in rows if r.get("split_coefficient_source") == "av_missing")
+
+
+# 52-week (364-day) high/low derivation window (QC2). Anchored on the LAST
+# COMPLETED session (rows[-1]["date"]), never on ``as_of`` -- as_of can land
+# on a non-trading day (MU's run is a Saturday). Requires at least _W6M (126
+# bars, roughly half a trading year) inside the window to trust the derived
+# range; a sparser window makes the "52-week" label misleading, so it falls
+# back to the vendor overview figures instead -- LOUDLY disclosed via
+# hi_lo_basis.method, never a silent fallback.
+_WK52_WINDOW_DAYS = 364
+_WK52_MIN_BARS = _W6M
+
+_HI_LO_PRICE_BASIS_NOTE = (
+    "high/low are SPLIT-adjusted (never dividend-adjusted) before deriving "
+    "wk52_high/low -- see build_snapshot._split_factors / _PE_PRICE_BASIS_NOTE "
+    "for the full D2/D3 rationale (raw intraday high/low would otherwise mix "
+    "two share-count bases within one 364-day window whenever a split falls "
+    "inside it, e.g. AAPL anchored 2021-01-04 shipped wk52_high 515.14 "
+    "(pre-4:1-split raw print) beside wk52_low 103.10 (post-split))."
+)
+
+
+def _derive_52wk_range(rows, vendor_high, vendor_low):
+    """Derive wk52_high/low from ``rows`` intraday high/low over a 364-day
+    window anchored on the last bar. Returns (high, low, hi_lo_basis).
+
+    QC2: the vendor overview.52WeekHigh/52WeekLow were trusted BLINDLY by the
+    old code and can drift off every window of the bundle's own bars (AAPL
+    2026-08-07: vendor low 223.15 vs derived 216.58 -- matches no window of
+    the bundle's own bars). Vendor values are NEVER silently overwritten --
+    they are kept as a reconciliation counterparty in the returned basis
+    dict, complete with signed % deltas vs the derived values.
+
+    D2/D3: high/low are SPLIT-adjusted (via _split_factors) before taking
+    max/min, so a split falling inside the 364-day window can never mix two
+    share-count bases into one "range" (the regression this guards against:
+    raw high/low anchored 2021-01-04 derived AAPL wk52_high 515.14 -- a
+    pre-4:1-split print -- beside wk52_low 103.10 -- post-split -- with
+    hi_lo_basis.method truthfully claiming "derived" while disclosing
+    nothing about the mixed basis). Splits found inside the window are
+    disclosed via splits_in_window/n_splits_in_window; bars whose
+    split_coefficient came from a degraded/missing vendor column (never a
+    genuine "no split" fact) are counted in split_degraded_bars.
+    """
+    def _fallback(method, anchor_str, window_start_str, source, bars_in_window):
+        basis = {
+            "method": method,
+            "window_days": _WK52_WINDOW_DAYS,
+            "anchor_date": anchor_str,
+            "window_start": window_start_str,
+            "source": source,
+            "bars_in_window": bars_in_window,
+            "vendor_high": vendor_high,
+            "vendor_low": vendor_low,
+            "high_delta_pct_vs_vendor": None,
+            "low_delta_pct_vs_vendor": None,
+            "price_basis": "split-adjusted high/low (never dividend-adjusted)",
+            "price_basis_note": _HI_LO_PRICE_BASIS_NOTE,
+            "splits_in_window": [],
+            "n_splits_in_window": 0,
+            "split_degraded_bars": 0,
+        }
+        return vendor_high, vendor_low, basis
+
+    if not rows:
+        return _fallback(
+            "fallback_vendor_no_bars", None, None,
+            "overview 52WeekHigh/52WeekLow (fallback: no daily bars available)", 0)
+
+    anchor = _parse_date(rows[-1].get("date"))
+    if anchor is None:
+        return _fallback(
+            "fallback_vendor_no_bars", None, None,
+            "overview 52WeekHigh/52WeekLow (fallback: last bar date unparseable)", 0)
+
+    window_start = anchor - timedelta(days=_WK52_WINDOW_DAYS)
+    windowed = []
+    for r in rows:
+        d = _parse_date(r.get("date"))
+        if d is not None and window_start <= d <= anchor:
+            windowed.append(r)
+
+    # D2/D3: split-adjust BEFORE taking max/min. factors[] is computed over
+    # ``windowed`` alone -- its last row IS the anchor bar (same as rows[-1]),
+    # so this rebases every bar in-window onto the SAME current-share basis
+    # as computing over the full ``rows`` would (no split after the anchor
+    # exists to miss).
+    factors = _split_factors(windowed)
+    highs = [r["high"] / factors[i] for i, r in enumerate(windowed)
+             if r.get("high") is not None]
+    lows = [r["low"] / factors[i] for i, r in enumerate(windowed)
+            if r.get("low") is not None]
+
+    if len(windowed) < _WK52_MIN_BARS or not highs or not lows:
+        return _fallback(
+            "fallback_vendor_insufficient_bars", anchor.isoformat(), window_start.isoformat(),
+            (f"overview 52WeekHigh/52WeekLow (fallback: only {len(windowed)} "
+             f"bar(s) in the {_WK52_WINDOW_DAYS}-day window, need >= {_WK52_MIN_BARS})"),
+            len(windowed))
+
+    derived_high = max(highs)
+    derived_low = min(lows)
+
+    def _delta(derived, vendor):
+        if not isinstance(vendor, (int, float)) or vendor == 0:
+            return None
+        return (derived - vendor) / vendor
+
+    basis = {
+        "method": "derived_intraday_high_low",
+        "window_days": _WK52_WINDOW_DAYS,
+        "anchor_date": anchor.isoformat(),
+        "window_start": window_start.isoformat(),
+        "source": "daily_adjusted intraday high/low",
+        "bars_in_window": len(windowed),
+        "vendor_high": vendor_high,
+        "vendor_low": vendor_low,
+        "high_delta_pct_vs_vendor": _delta(derived_high, vendor_high),
+        "low_delta_pct_vs_vendor": _delta(derived_low, vendor_low),
+        "price_basis": "split-adjusted high/low (never dividend-adjusted)",
+        "price_basis_note": _HI_LO_PRICE_BASIS_NOTE,
+        "splits_in_window": _split_events_in_rows(windowed),
+        "n_splits_in_window": len(_split_events_in_rows(windowed)),
+        "split_degraded_bars": _split_degraded_count(windowed),
+    }
+    return derived_high, derived_low, basis
+
+
 def build_price(quote, overview, rows, web_spot):
     """Price block: quote, 52wk range, share count, market caps, ADV."""
     gq = quote.get("Global Quote", {}) if isinstance(quote, dict) else {}
@@ -450,8 +690,9 @@ def build_price(quote, overview, rows, web_spot):
         mktcap_overview, mktcap_computed, last, prev_close, shares_m,
     )
 
-    wk_high = num(overview.get("52WeekHigh")) if isinstance(overview, dict) else None
-    wk_low = num(overview.get("52WeekLow")) if isinstance(overview, dict) else None
+    wk_high_vendor = num(overview.get("52WeekHigh")) if isinstance(overview, dict) else None
+    wk_low_vendor = num(overview.get("52WeekLow")) if isinstance(overview, dict) else None
+    wk_high, wk_low, hi_lo_basis = _derive_52wk_range(rows, wk_high_vendor, wk_low_vendor)
 
     # Average dollar volume over last ~63 trading days (raw close * volume), AND a
     # direct average SHARE volume over the same window. The share ADV is the correct
@@ -474,6 +715,7 @@ def build_price(quote, overview, rows, web_spot):
         "intraday_range": [low, high],
         "wk52_high": wk_high,
         "wk52_low": wk_low,
+        "hi_lo_basis": hi_lo_basis,
         "shares_diluted_m": shares_m,
         "shares_float_m": float_m,
         "mktcap_overview": mktcap_overview,
@@ -802,8 +1044,39 @@ def build_technicals(rows, series_source=None, next_earnings_date=None,
     return block
 
 
-def build_benchmark(stock_rows, spy_rows, sector_rows=None, sector_etf=None):
-    """Benchmark block: SPY returns + beta/corr of stock vs SPY.
+# QC5: beta_basis.note wording -- states plainly that this is the ONE scored
+# beta, and that coverage's independently-authored WACC beta is NOT
+# reconciled against it anywhere in code (verified: no CAPM formula exists in
+# scripts/; coverage/valuation.md's WACC beta is hand-authored prose copied
+# into scenario_drivers.json.dcf_reverse_inputs.wacc and read only as an
+# opaque number by valuation_reconcile.py / coverage_qc.py).
+#
+# Return-basis change: a 24-combination sweep (6 windows x log/simple x
+# adjusted/unadjusted close, 16 tickers) against Alpha Vantage's published
+# overview.Beta found (a) 5y-monthly is the right window and (b) SIMPLE
+# returns fit best (median abs error 0.0114 vs 0.0183 for the log-return
+# variant this used to compute). The same sweep found AV's beta is a RAW
+# (non-Blume-adjusted) 5y-monthly simple-return estimate (OLS of AV on our
+# raw beta: slope 0.9725, intercept 0.0415, R^2 0.9957) -- which is why
+# beta_vendor now agrees closely with this value on most names. beta_vendor
+# remains an unreconciled counterparty: it is never blended into, or used as
+# a fallback for, the scored beta.
+_BETA_BASIS_NOTE = (
+    "This is the single SCORED beta (5y monthly SIMPLE returns vs SPY, "
+    "feeding score_risk's volatility-state banding). Alpha Vantage's "
+    "overview.Beta was measured (16-ticker study) to be a RAW, non-Blume-"
+    "adjusted 5y-monthly simple-return beta, which is why beta_vendor now "
+    "agrees closely with this value on most names -- it remains an "
+    "unreconciled counterparty, never a fallback or blend input. Coverage's "
+    "WACC beta (coverage/valuation.md, "
+    "scenario_drivers.json.dcf_reverse_inputs.wacc) is authored independently "
+    "by the analyst and is NOT reconciled against this value anywhere in code."
+)
+
+
+def build_benchmark(stock_rows, spy_rows, sector_rows=None, sector_etf=None,
+                    overview=None):
+    """Benchmark block: SPY returns + 5y-MONTHLY beta/corr of stock vs SPY.
 
     Track O4: when ``sector_rows`` is provided (the ticker's GICS-sector SPDR
     ETF daily series), ALSO emit ``sector_etf``, ``sector_ret_{1m,3m,6m,12m}``
@@ -813,18 +1086,85 @@ def build_benchmark(stock_rows, spy_rows, sector_rows=None, sector_etf=None):
     off ``stock_rows``). When ``sector_rows`` is None, NONE of these keys are
     emitted -- the block is byte-identical to the pre-O4 benchmark (disclosed
     absence: missing sector data drops the sector benchmark, never fails).
+
+    QC5: beta/corr are a STREET-STANDARD 5-year MONTHLY estimate (60 monthly
+    SIMPLE returns vs SPY, ``indicators.beta_corr_monthly``), replacing the
+    prior unsliced full-daily-history beta (~26y of daily returns on a
+    long-listed name -- see docs/QC_REMEDIATION_TRACKER.md QC5). ``beta_basis``
+    discloses the method, observation count, window, benchmark symbol, and
+    return basis (``return_basis: "simple"`` -- a 24-combination sweep found
+    simple returns fit AV's published beta better than the log-return
+    variant this used to compute; see ``indicators.beta_corr_monthly``).
+    ``beta_n_days`` KEEPS its pre-existing meaning of CALENDAR DAYS spanned by
+    the estimation window (NOT the observation count) -- score_risk.py's
+    ``_MIN_BETA_N_DAYS`` confidence gate reads it and must keep passing.
+    ``beta_vendor`` carries overview.Beta as an unreconciled counterparty.
     """
     spy_adj = [r["adjusted_close"] for r in spy_rows if r["adjusted_close"] is not None]
     stock_adj = [r["adjusted_close"] for r in stock_rows if r["adjusted_close"] is not None]
-    bc = indicators.beta_corr(stock_adj, spy_adj)
+
+    monthly = indicators.beta_corr_monthly(stock_rows, spy_rows)
+    beta = corr = beta_n_obs = beta_n_days = None
+    if monthly is not None:
+        beta = monthly["beta"]
+        corr = monthly["corr"]
+        beta_n_obs = monthly["n_obs"]
+        w_start = _parse_date(monthly["window_start"])
+        w_end = _parse_date(monthly["window_end"])
+        beta_n_days = (w_end - w_start).days if (w_start and w_end) else None
+        beta_basis = {
+            "method": "5y_monthly",
+            "n_obs": monthly["n_obs"],
+            "window_start": monthly["window_start"],
+            "window_end": monthly["window_end"],
+            "benchmark_symbol": "SPY",
+            "frequency": "monthly",
+            "return_basis": "simple",
+            "degraded": monthly["degraded"],
+            "note": _BETA_BASIS_NOTE,
+        }
+        if monthly["degraded"]:
+            beta_basis["degraded_reason"] = (
+                f"only {monthly['n_obs']} monthly observations available "
+                f"(target {indicators.BETA_MONTHLY_YEARS * 12}); reporting "
+                f"the shorter window rather than withholding beta entirely"
+            )
+    else:
+        stock_months = indicators.month_end_series(stock_rows)
+        bench_months = indicators.month_end_series(spy_rows)
+        common_n = len({r["month"] for r in stock_months}
+                       & {r["month"] for r in bench_months})
+        beta_basis = {
+            "method": "5y_monthly",
+            "n_obs": 0,
+            "window_start": None,
+            "window_end": None,
+            "benchmark_symbol": "SPY",
+            "frequency": "monthly",
+            "return_basis": "simple",
+            "degraded": True,
+            "degraded_reason": (
+                f"only {max(common_n - 1, 0)} common monthly observations "
+                f"available between stock and SPY (need >= "
+                f"{indicators.BETA_MONTHLY_MIN_OBS}); beta/corr withheld "
+                f"rather than reported from an unreliably short window"
+            ),
+            "note": _BETA_BASIS_NOTE,
+        }
+
+    beta_vendor = num(overview.get("Beta")) if isinstance(overview, dict) else None
+
     block = {
         "spy_ret_1m": indicators.pct_return(spy_adj, _W1M),
         "spy_ret_3m": indicators.pct_return(spy_adj, _W3M),
         "spy_ret_6m": indicators.pct_return(spy_adj, _W6M),
         "spy_ret_12m": indicators.pct_return(spy_adj, _W12M),
-        "beta": bc["beta"] if bc else None,
-        "corr": bc["corr"] if bc else None,
-        "beta_n_days": bc["n_days"] if bc else None,
+        "beta": beta,
+        "corr": corr,
+        "beta_n_days": beta_n_days,
+        "beta_n_obs": beta_n_obs,
+        "beta_basis": beta_basis,
+        "beta_vendor": beta_vendor,
     }
 
     if sector_rows is not None:
@@ -881,9 +1221,155 @@ def _estimate_partitions(estimates, as_of_date):
     return [r for _, r in fq], [r for _, r in fy]
 
 
+# QC1: NTM EPS below 95% NTM-window coverage is disclosed as a shortfall
+# rather than silently presented as a full trailing-365-day estimate.
+_EPS_NTM_COVERAGE_FULL = 0.95
+
+
+def _fy_span(end_date):
+    """~1-year (start, end) span ENDING at ``end_date`` (both inclusive).
+
+    start = end_date - 1 year + 1 day, using a fixed 365-day year (QC1
+    ground-truth replication -- see docs/QC_REMEDIATION_TRACKER.md QC1).
+    """
+    return end_date - timedelta(days=364), end_date
+
+
+def _fy_overlap_weight(end_date, window_start, window_end):
+    """Overlap of an FY's ~1yr span (ending ``end_date``) with the NTM window.
+
+    Weight = overlap_days / 365. The overlap-day count is NOT +1 inclusive
+    (deliberately -- this exact convention is what reproduces the measured
+    AAPL/MU ground truth; see docs/QC_REMEDIATION_TRACKER.md QC1).
+    """
+    span_start, span_end = _fy_span(end_date)
+    ov_start = max(window_start, span_start)
+    ov_end = min(window_end, span_end)
+    return max(0, (ov_end - ov_start).days) / 365.0
+
+
+def _time_weighted_ntm_eps(fy_rows, as_of_date):
+    """Time-weighted NTM EPS blend across future fiscal-YEAR estimate rows.
+
+    QC1: Alpha Vantage commonly carries fewer than 4 future fiscal QUARTERS,
+    forcing a fallback that (pre-fix) picked a single, often nearly-expired,
+    fiscal-year row. Blending by each FY's calendar overlap with the forward
+    365-day NTM window is a much closer approximation to a true NTM figure.
+
+    Returns (eps_ntm, coverage, detail, fy_weights) or None if fewer than 2
+    rows carry a parseable date AND EPS estimate. ``fy_weights`` is the
+    per-record data the blend actually consumed -- [{"fiscal_date_ending",
+    "eps_estimate_average", "weight"}, ...] -- carried into
+    fundamentals.eps_ntm_alternatives (QC1-REGRESSION) so a reader can
+    reconstruct the blend's inputs without re-fetching anything.
+    """
+    window_start = as_of_date
+    window_end = as_of_date + timedelta(days=365)
+    parts = []
+    for row in fy_rows:
+        d = _parse_date(row.get("date"))
+        v = num(row.get("eps_estimate_average"))
+        if d is None or v is None:
+            continue
+        weight = _fy_overlap_weight(d, window_start, window_end)
+        parts.append((d, v, weight, row.get("date")))
+    if len(parts) < 2:
+        return None
+    eps_ntm = sum(v * w for _, v, w, _ in parts)
+    coverage = sum(w for _, _, w, _ in parts)
+    detail = "; ".join(f"FY{d.isoformat()} w={w:.6f}" for d, _, w, _ in parts)
+    fy_weights = [
+        {"fiscal_date_ending": raw_date, "eps_estimate_average": v, "weight": w}
+        for _, v, w, raw_date in parts
+    ]
+    return eps_ntm, coverage, detail, fy_weights
+
+
+def _current_and_next_fy(fy_rows, as_of_date):
+    """Return (current_row, next_row) from ascending future-FY ``fy_rows``.
+
+    QC1: the CURRENT fiscal year is the row whose ~1yr span (see ``_fy_span``)
+    CONTAINS ``as_of_date``; ``next_row`` is the row immediately after it.
+    Pre-fix, ``next_fy_consensus`` used ``fy_rows[0]`` unconditionally, which
+    is frequently the CURRENT (nearly-expired) fiscal year mislabeled "next".
+    When no row's span contains ``as_of_date`` (or it is unparseable), there
+    is no "current" row to skip past -- the nearest future row IS next.
+    """
+    idx_current = None
+    if as_of_date is not None:
+        for i, row in enumerate(fy_rows):
+            d = _parse_date(row.get("date"))
+            if d is None:
+                continue
+            span_start, span_end = _fy_span(d)
+            if span_start <= as_of_date <= span_end:
+                idx_current = i
+                break
+    if idx_current is not None:
+        current_row = fy_rows[idx_current]
+        next_row = fy_rows[idx_current + 1] if idx_current + 1 < len(fy_rows) else None
+    else:
+        current_row = None
+        next_row = fy_rows[0] if fy_rows else None
+    return current_row, next_row
+
+
+def _eps_share_reconciliation(inc_q, earn_q, bal_q):
+    """Per-quarter implied-share-count reconciliation (QC3 leg B).
+
+    For each of the last 4 reported quarters (by ``earn_q``), computes
+    implied_shares = netIncome_q / reportedEPS_q and compares it against
+    commonStockSharesOutstanding from the SAME quarter's balance-sheet report
+    (joined on fiscalDateEnding). This is deliberate: comparing every quarter
+    against a single (e.g. latest) share count produces spurious, growing
+    divergence on a name whose share count is changing materially over time
+    (measured on MU -- see docs/QC_REMEDIATION_TRACKER.md QC3) that has
+    nothing to do with any actual data defect. A quarter with no same-quarter
+    balance-sheet match, or a non-computable EPS/NI/shares, is OMITTED --
+    never guessed by borrowing a different quarter's share count.
+    """
+    bal_by_date = {}
+    for b in bal_q:
+        d = b.get("fiscalDateEnding") if isinstance(b, dict) else None
+        if d:
+            bal_by_date[d] = num(b.get("commonStockSharesOutstanding"))
+    ni_by_date = {}
+    for r in inc_q:
+        d = r.get("fiscalDateEnding") if isinstance(r, dict) else None
+        if d:
+            ni_by_date[d] = num(r.get("netIncome"))
+
+    out = []
+    for row in earn_q[:4]:
+        if not isinstance(row, dict):
+            continue
+        d = row.get("fiscalDateEnding")
+        eps = num(row.get("reportedEPS"))
+        ni = ni_by_date.get(d)
+        shares = bal_by_date.get(d)
+        if not d or not eps or ni is None or not shares:
+            continue
+        implied = ni / eps
+        out.append({
+            "fiscal_date_ending": d,
+            "net_income": ni,
+            "reported_eps": eps,
+            "implied_shares": implied,
+            "balance_shares_same_quarter": shares,
+            "divergence_pct": (implied - shares) / shares,
+        })
+    return out
+
+
 def build_fundamentals(income, balance, cashflow, earnings, estimates,
-                       overview, as_of_date):
-    """Fundamentals block: TTM sums, growth, margins, EPS, revisions, net cash."""
+                       overview, as_of_date, price=None):
+    """Fundamentals block: TTM sums, growth, margins, EPS, revisions, net cash.
+
+    ``price`` (optional) is the already-built price block -- read ONLY for
+    ``price.last``, needed to compute the vendor ForwardPE-implied EPS
+    disclosure in ``eps_ntm_alternatives`` (QC1-REGRESSION). Absent/None is
+    fine; that one field just degrades to null.
+    """
     inc_q = _quarterly(income)
     bal_q = _quarterly(balance)
     cf_q = _quarterly(cashflow)
@@ -914,27 +1400,123 @@ def build_fundamentals(income, balance, cashflow, earnings, estimates,
     if eps_vals:
         eps_computed = sum(eps_vals)
 
+    # QC3 leg A: a THIRD, independent TTM EPS -- net income TTM divided by the
+    # latest quarterly balance sheet's share count. Independent of both the
+    # vendor's own eps_ttm AND the sum-of-reportedEPS eps_ttm_computed (which
+    # inherits any corrupt individual-quarter reportedEPS).
+    eps_ttm_from_ni = None
+    eps_ttm_from_ni_shares = None
+    eps_ttm_from_ni_basis = None
+    if bal_q:
+        eps_ttm_from_ni_shares = num(bal_q[0].get("commonStockSharesOutstanding"))
+    if ni_ttm is not None and eps_ttm_from_ni_shares:
+        eps_ttm_from_ni = ni_ttm / eps_ttm_from_ni_shares
+        eps_ttm_from_ni_basis = (
+            "netIncome TTM / commonStockSharesOutstanding (latest quarterly "
+            "balance sheet) -- a POINT-IN-TIME BASIC share count, NOT a "
+            "weighted-average diluted count: Alpha Vantage carries no "
+            "diluted-share field anywhere"
+        )
+
+    # QC3 leg B: per-quarter implied-share-count reconciliation, joined on the
+    # SAME quarter's balance sheet (see _eps_share_reconciliation).
+    eps_share_reconciliation = _eps_share_reconciliation(inc_q, earn_q, bal_q)
+
     # NTM EPS consensus.
     fq, fy = _estimate_partitions(estimates or [], as_of_date)
+    as_of_parsed = _parse_date(as_of_date)
     eps_ntm = None
     eps_ntm_method = None
+    eps_ntm_coverage = None
+    eps_ntm_basis = None
+    # QC1-REGRESSION: populated ONLY for the blend path (time_weighted_
+    # fiscal_years) -- that is where an NTM degradation actually happens (AV
+    # rarely carries >=4 future fiscal quarters: 22/22 surveyed tickers hit
+    # this path, most with exactly 2 future FY rows). Kept null for the other
+    # two methods: sum_next_4_fiscal_quarters is the FULL, undegraded method
+    # (nothing to disclose an alternative for), and the single-FY degraded
+    # proxy already discloses its own degradation via eps_ntm_basis.
+    eps_ntm_alternatives = None
     if len(fq) >= 4:
         vals = [num(r.get("eps_estimate_average")) for r in fq[:4]]
         vals = [v for v in vals if v is not None]
         if len(vals) == 4:
             eps_ntm = sum(vals)
             eps_ntm_method = "sum_next_4_fiscal_quarters"
+            eps_ntm_basis = "sum of the next 4 reported fiscal-quarter EPS estimates"
+    if eps_ntm is None and len(fy) >= 2 and as_of_parsed is not None:
+        # QC1: AV commonly carries <4 future fiscal QUARTERS -- blend across
+        # future fiscal YEARS by NTM-window overlap rather than falling back
+        # to a single (often nearly-expired) FY row.
+        blend = _time_weighted_ntm_eps(fy, as_of_parsed)
+        if blend is not None:
+            eps_ntm, eps_ntm_coverage, detail, fy_weights = blend
+            eps_ntm_method = "time_weighted_fiscal_years"
+            eps_ntm_basis = (
+                f"time-weighted blend of {len(fy)} future fiscal-year estimates "
+                f"by NTM-window overlap (coverage={eps_ntm_coverage:.4f}): {detail}"
+            )
+            if eps_ntm_coverage < _EPS_NTM_COVERAGE_FULL:
+                eps_ntm_basis += (
+                    f" -- LOW COVERAGE (<{_EPS_NTM_COVERAGE_FULL:.0%}): the "
+                    f"forward 365-day window is not fully spanned by the "
+                    f"available fiscal-year estimates; the blended figure "
+                    f"understates the true forward-365-day EPS proportionally"
+                )
+
+            # QC1-REGRESSION: the blend must NEVER degrade silently. Survey
+            # finding: the blend agrees BETTER with vendor OVERVIEW.ForwardPE
+            # than the old dying-FY method on both calibration names (AAPL
+            # 4.2% vs 11.4%; MU 10.2% vs 125.1%) but WORSE on 12/17 other
+            # testable names, and exceeds check_forward_pe_crossvendor's 25%
+            # threshold on INTC/BE -- that is the cross-vendor leg working as
+            # designed (a LOUD catch), NOT proof the blend is wrong (the
+            # vendor ForwardPE is a reconciliation counterparty, not ground
+            # truth). The blend is KEPT; what must never happen again is a
+            # SILENT alternative. This block always carries (whenever the
+            # blend path fires): the blended value+method, the value the
+            # single-nearest-future-FY proxy WOULD have produced (the pre-QC1
+            # method), the vendor ForwardPE-implied EPS when available, and
+            # the per-FY-record weights actually used -- enough for a reader
+            # to reconstruct and judge the alternative without re-fetching.
+            single_fy_row = fy[0]
+            single_fy_value = num(single_fy_row.get("eps_estimate_average"))
+            price_last = (num(price.get("last"))
+                          if isinstance(price, dict) else None)
+            vendor_fwd_pe = (num(overview.get("ForwardPE"))
+                             if isinstance(overview, dict) else None)
+            vendor_fwd_pe_implied_eps = (
+                price_last / vendor_fwd_pe
+                if price_last is not None and vendor_fwd_pe else None)
+            eps_ntm_alternatives = {
+                "blended_value": eps_ntm,
+                "blended_method": eps_ntm_method,
+                "single_fy_proxy_value": single_fy_value,
+                "single_fy_proxy_fiscal_date_ending": single_fy_row.get("date"),
+                "vendor_forward_pe": vendor_fwd_pe,
+                "vendor_forward_pe_implied_eps": vendor_fwd_pe_implied_eps,
+                "fy_weights": fy_weights,
+            }
     if eps_ntm is None and fy:
         v = num(fy[0].get("eps_estimate_average"))
         if v is not None:
             eps_ntm = v
-            eps_ntm_method = "nearest_future_fiscal_year"
+            eps_ntm_method = "single_future_fiscal_year_degraded_proxy"
+            eps_ntm_basis = (
+                f"DEGRADED: only one future fiscal-year estimate available "
+                f"(FY ending {fy[0].get('date')}); used as a single-year NTM "
+                f"proxy -- may include an already-substantially-elapsed fiscal "
+                f"year and does not reflect a true trailing-365-day forward "
+                f"estimate"
+            )
 
-    # Revisions + next-FY consensus from nearest FUTURE fiscal-year row.
+    # Revisions from nearest FUTURE fiscal-year row; next-FY consensus (QC1)
+    # from the row AFTER the one whose span contains as_of.
     # QF5: trace WHY revisions_90d is null so silence is replaced by disclosure.
     revisions = None
     revisions_null_reason = None
     next_fy = None
+    next_fy_basis = None
     if not fy:
         # No future fiscal-year estimates row exists in the payload.
         revisions_null_reason = "no_future_fy_row"
@@ -969,8 +1551,23 @@ def build_fundamentals(income, balance, cashflow, earnings, estimates,
                     "future_fy_row_present_but_fields_absent: "
                     + ", ".join(absent_fields)
                 )
-        next_fy = {"rev": num(row.get("revenue_estimate_average")),
-                   "eps": num(row.get("eps_estimate_average"))}
+
+        # QC1: next_fy_consensus is the FY row AFTER the CURRENT one (the row
+        # whose ~1yr span contains as_of), not fy[0] unconditionally -- fy[0]
+        # is frequently the CURRENT fiscal year, not "next".
+        current_row, next_row = _current_and_next_fy(fy, as_of_parsed)
+        if next_row is not None:
+            next_fy = {"rev": num(next_row.get("revenue_estimate_average")),
+                       "eps": num(next_row.get("eps_estimate_average"))}
+        next_fy_basis = {
+            "current_fy_end": current_row.get("date") if current_row else None,
+            "next_fy_end": next_row.get("date") if next_row else None,
+            "note": (
+                "next_fy_consensus is the fiscal-year estimate AFTER the row "
+                "whose ~1yr span contains as_of; a row containing as_of is "
+                "the CURRENT fiscal year, not next (QC1)."
+            ),
+        }
 
     # FCF TTM = sum4q (operatingCashflow - capitalExpenditures).
     fcf_ttm = None
@@ -998,11 +1595,19 @@ def build_fundamentals(income, balance, cashflow, earnings, estimates,
         "nm_ttm": _margin(ni_ttm),
         "eps_ttm": eps_ttm,
         "eps_ttm_computed": eps_computed,
+        "eps_ttm_from_ni": eps_ttm_from_ni,               # QC3 leg A
+        "eps_ttm_from_ni_shares": eps_ttm_from_ni_shares, # QC3: share count used (disclosed basic)
+        "eps_ttm_from_ni_basis": eps_ttm_from_ni_basis,   # QC3: basic-vs-diluted disclosure
+        "eps_share_reconciliation": eps_share_reconciliation,  # QC3 leg B
         "eps_ntm_consensus": eps_ntm,
         "eps_ntm_method": eps_ntm_method,
+        "eps_ntm_coverage": eps_ntm_coverage,   # QC1: only set for time_weighted_fiscal_years
+        "eps_ntm_basis": eps_ntm_basis,         # QC1: human-readable method/coverage disclosure
+        "eps_ntm_alternatives": eps_ntm_alternatives,  # QC1-REGRESSION: blend inputs + alternative, never silent
         "revisions_90d": revisions,
         "revisions_null_reason": revisions_null_reason,  # QF5: null when revisions populated
         "next_fy_consensus": next_fy,
+        "next_fy_basis": next_fy_basis,         # QC1: current/next FY-end disclosure
         "fcf_ttm": fcf_ttm,
         "net_cash_defined": net_cash,
         "roe": roe,
@@ -1046,33 +1651,479 @@ def apply_web_fundamentals(fundamentals, web):
 
 
 def _build_net_cash(bal):
-    """Net-cash reconciliation from the latest quarterly balance sheet."""
-    cash_st = num(bal.get("cashAndShortTermInvestments"))
-    if cash_st is None:
-        cc = num(bal.get("cashAndCashEquivalentsAtCarryingValue"))
-        sti = num(bal.get("shortTermInvestments"))
-        if cc is not None or sti is not None:
-            cash_st = (cc or 0.0) + (sti or 0.0)
-    lt_inv = num(bal.get("longTermInvestments")) or 0.0
+    """Net-cash reconciliation from the latest quarterly balance sheet.
 
-    total_debt = num(bal.get("shortLongTermDebtTotal"))
-    if total_debt is None:
-        std = num(bal.get("shortTermDebt"))
-        ltd = num(bal.get("longTermDebt"))
-        if std is not None or ltd is not None:
-            total_debt = (std or 0.0) + (ltd or 0.0)
-        else:
-            total_debt = 0.0
+    QC4: built from COMPONENTS, not the vendor's cashAndShortTermInvestments /
+    shortLongTermDebtTotal aggregates -- both are measured-broken. Vendor
+    cashAndShortTermInvestments is byte-identical to
+    cashAndCashEquivalentsAtCarryingValue alone on both validation names
+    (AAPL, MU) while a non-zero shortTermInvestments sits beside it, silently
+    dropped. Vendor shortLongTermDebtTotal is internally incoherent: on MU it
+    equals longTermDebt + capitalLeaseObligations, OMITTING shortTermDebt (it
+    happens to equal shortTermDebt + longTermDebt on AAPL, which is why the
+    defect hid there). total_debt here is FINANCIAL DEBT ONLY (shortTermDebt +
+    longTermDebt), excluding capital/finance leases -- lease treatment is
+    surfaced separately (capital_lease_obligations, net_incl_leases) rather
+    than folded silently into the headline (ex-lease) net.
 
-    if cash_st is None:
-        cash_st = 0.0
+    Each leg falls back to its vendor aggregate ONLY when every component of
+    that leg is absent (never when the aggregate merely looks wrong), and the
+    fallback is disclosed loudly in ``basis``. The raw vendor aggregates are
+    always preserved verbatim in ``vendor_aggregates`` for reconciliation.
+
+    QC4-REGRESSION (22-ticker survey): the rule above -- "fall back ONLY when
+    EVERY component is absent" -- left a gap on the debt leg. Several large
+    names (XOM, UNH, CAT, JPM) carry a populated shortTermDebt with
+    longTermDebt == None; with no fallback, total_debt silently collapsed to
+    shortTermDebt ALONE, understating debt by tens of billions (XOM: vendor
+    42.368B vs a component build of just 10.139B) which OVERSTATES net cash.
+    The fix distinguishes "components INCOMPLETE" (exactly one of
+    shortTermDebt/longTermDebt absent) from "vendor uses a DIFFERENT
+    DEFINITION" (both present, but shortLongTermDebtTotal still disagrees --
+    see check_net_cash_vendor_signature's debt-aggregate classification):
+    only the former falls back, and only when shortLongTermDebtTotal is
+    present AND materially exceeds the visible partial sum (the vendor is
+    plainly capturing debt the missing component would have added). Falling
+    back in the conservative direction (bigger debt, smaller net cash) beats
+    silently understating debt; when both components are present, they are
+    ALWAYS used regardless of vendor disagreement (this is what keeps MU's
+    3.634B ex-lease and AAPL's 84.307B correct).
+    """
+    cce = num(bal.get("cashAndCashEquivalentsAtCarryingValue"))
+    sti = num(bal.get("shortTermInvestments"))
+    vendor_cash_st = num(bal.get("cashAndShortTermInvestments"))
+    cash_fallback = cce is None and sti is None
+    if cash_fallback:
+        cash_st = vendor_cash_st if vendor_cash_st is not None else 0.0
+    else:
+        cash_st = (cce or 0.0) + (sti or 0.0)
+
+    # D5: longTermInvestments was the ONE net-cash component with no raw key
+    # recorded and no basis note -- ``or 0.0`` cannot distinguish a genuinely
+    # ABSENT figure from a genuinely-reported zero, so an absent value
+    # silently became a fabricated zero (measured real UNH shape: net =
+    # -41.86B with its long-term investment portfolio zeroed). The raw value
+    # is now preserved (None when absent) for disclosure; the ARITHMETIC
+    # value used in net still defaults to 0.0 when absent (a real figure
+    # cannot be fabricated), but that default is now visible via
+    # long_term_investments=None + a basis note, never silent.
+    long_term_investments = num(bal.get("longTermInvestments"))
+    lt_inv = long_term_investments if long_term_investments is not None else 0.0
+
+    std = num(bal.get("shortTermDebt"))
+    ltd = num(bal.get("longTermDebt"))
+    vendor_total_debt = num(bal.get("shortLongTermDebtTotal"))
+    debt_component_sum = (std or 0.0) + (ltd or 0.0)
+    debt_fallback = std is None and ltd is None            # EVERY component absent
+    # QC4-REGRESSION: EXACTLY ONE component absent, and the vendor aggregate
+    # materially exceeds what the visible component alone can see -- the
+    # components are INCOMPLETE (missing information), not merely disagreeing
+    # with the vendor's definition. A tiny absolute guard (not a % tolerance)
+    # is enough: every measured incomplete-components case diverges by orders
+    # of magnitude, so this only suppresses float noise, never a genuine
+    # near-tie.
+    debt_incomplete_fallback = (
+        not debt_fallback
+        and (std is None or ltd is None)
+        and vendor_total_debt is not None
+        and vendor_total_debt > debt_component_sum + 1.0
+    )
+    # D4: exactly one of shortTermDebt/longTermDebt absent AND there is no
+    # vendor shortLongTermDebtTotal to fall back to either -- total_debt
+    # collapses to the single visible component, UNDERSTATING debt with NO
+    # fallback note (the reviewer-flagged sub-case). Distinguished from
+    # debt_incomplete_fallback (same "one absent" shape, but a vendor number
+    # WAS available and adopted).
+    debt_incomplete_no_vendor = (
+        not debt_fallback
+        and (std is None or ltd is None)
+        and vendor_total_debt is None
+    )
+
+    leases = num(bal.get("capitalLeaseObligations"))
+
+    if debt_fallback:
+        total_debt = vendor_total_debt if vendor_total_debt is not None else 0.0
+        total_debt_source = "vendor_both_absent"
+    elif debt_incomplete_fallback:
+        total_debt = vendor_total_debt
+        total_debt_source = "vendor_incomplete"
+    elif debt_incomplete_no_vendor:
+        total_debt = debt_component_sum
+        total_debt_source = "incomplete_no_vendor"
+    else:
+        total_debt = debt_component_sum
+        total_debt_source = "components"
+
+    # D4: a FALLBACK-adopted vendor aggregate (vendor_both_absent /
+    # vendor_incomplete) may already BAKE IN capital_lease_obligations under
+    # one of the vendor conventions measured in check_net_cash_vendor_
+    # signature's debt-aggregate classification: long_term_debt + leases
+    # ("matches-(b)", GOOG-shaped: shortTermDebt absent, longTermDebt
+    # present), leases ALONE (the "both absent" degenerate case, PLTR-shaped:
+    # the company carries no financial debt besides leases), or (defensively)
+    # the full three-component sum. When it does, total_debt is NOT ex-lease
+    # financial debt despite the generic basis text below -- and
+    # net_incl_leases must not subtract those same leases a SECOND time.
+    total_debt_includes_leases = False
+    if (debt_fallback or debt_incomplete_fallback) and vendor_total_debt is not None \
+            and leases is not None:
+        _tol = max(1.0, abs(vendor_total_debt) * 1e-6)
+        if std is not None and ltd is not None \
+                and abs(vendor_total_debt - (std + ltd + leases)) <= _tol:
+            total_debt_includes_leases = True
+        elif ltd is not None and abs(vendor_total_debt - (ltd + leases)) <= _tol:
+            total_debt_includes_leases = True
+        elif std is None and ltd is None \
+                and abs(vendor_total_debt - leases) <= _tol:
+            total_debt_includes_leases = True
+
     net = cash_st + lt_inv - total_debt
-    return {"cash_st": cash_st, "lt_inv": lt_inv,
-            "total_debt": total_debt, "net": net}
+    # D4: never subtract capital_lease_obligations a second time when it is
+    # already baked into the adopted total_debt.
+    net_incl_leases = net if total_debt_includes_leases else net - (leases or 0.0)
+
+    basis = ("cash_st = cash_and_equivalents + short_term_investments; "
+             "total_debt = short_term_debt + long_term_debt (financial debt, "
+             "excludes capital/finance leases); net = cash_st + lt_inv - "
+             "total_debt (ex-lease); net_incl_leases = net - "
+             "capital_lease_obligations")
+    fallback_notes = []
+    if cash_fallback:
+        fallback_notes.append(
+            "cash_st components (cashAndCashEquivalentsAtCarryingValue, "
+            "shortTermInvestments) both absent -> fell back to vendor "
+            "cashAndShortTermInvestments")
+    if debt_fallback:
+        fallback_notes.append(
+            "total_debt components (shortTermDebt, longTermDebt) both "
+            "absent -> fell back to vendor shortLongTermDebtTotal")
+    if debt_incomplete_fallback:
+        fallback_notes.append(
+            f"total_debt components INCOMPLETE (shortTermDebt={std!r}, "
+            f"longTermDebt={ltd!r}; visible partial sum={debt_component_sum:.6g}) "
+            f"and vendor shortLongTermDebtTotal={vendor_total_debt:.6g} "
+            f"materially exceeds that partial sum -> fell back to the vendor "
+            f"aggregate (conservative: understating debt overstates net cash)")
+    if debt_incomplete_no_vendor:
+        fallback_notes.append(
+            f"total_debt components INCOMPLETE (shortTermDebt={std!r}, "
+            f"longTermDebt={ltd!r}) and no vendor shortLongTermDebtTotal to "
+            f"fall back to -> total_debt collapses to the single visible "
+            f"component ({debt_component_sum:.6g}), UNDERSTATED (NOT "
+            f"vendor-sourced)")
+    if total_debt_includes_leases:
+        fallback_notes.append(
+            f"the adopted vendor total_debt ({total_debt:.6g}) already "
+            f"INCLUDES capital_lease_obligations ({leases:.6g}) -- despite "
+            f"the ex-lease basis text above, this total_debt is NOT "
+            f"ex-lease financial debt; net_incl_leases is therefore NOT "
+            f"computed by subtracting leases a second time (net_incl_leases "
+            f"== net here)")
+    if long_term_investments is None:
+        fallback_notes.append(
+            "long_term_investments component absent -> treated as 0.0 in "
+            "lt_inv/net (a genuine zero cannot be distinguished from a "
+            "missing figure by the vendor; disclosed here rather than "
+            "silently assumed)")
+    if fallback_notes:
+        basis += "; FALLBACK: " + "; ".join(fallback_notes)
+
+    return {
+        "cash_and_equivalents": cce,
+        "short_term_investments": sti,
+        "cash_st": cash_st,
+        "lt_inv": lt_inv,
+        "long_term_investments": long_term_investments,
+        "short_term_debt": std,
+        "long_term_debt": ltd,
+        "total_debt": total_debt,
+        "total_debt_source": total_debt_source,
+        "total_debt_includes_leases": total_debt_includes_leases,
+        "capital_lease_obligations": leases,
+        "net": net,
+        "net_incl_leases": net_incl_leases,
+        "vendor_aggregates": {
+            "cash_and_short_term_investments": vendor_cash_st,
+            "short_long_term_debt_total": vendor_total_debt,
+        },
+        "basis": basis,
+    }
 
 
-def build_valuation(price, fundamentals, overview, rows):
-    """Valuation block: P/E ttm/fwd, EV/EBITDA, PEG, historical P/E medians."""
+# --------------------------------------------------------------------------- #
+# QC12: era-correct rolling-TTM P/E median. Pre-fix, pe_5yr_median /
+# pe_10yr_median divided EVERY historical bar's adjusted_close by TODAY's
+# single eps_ttm ("approx_current_eps") -- a rescaled PRICE median, not an
+# earnings-history multiple (shipped: AAPL 5yr 21.198563518380485, MU 5yr
+# 1.947830096821801 -- garbage on a name whose EPS regime shifted). The fix:
+# for each bar d, TTM_EPS(d) = sum of the 4 most recent quarterlyEarnings
+# reportedEPS with reportedDate <= d (skip the bar if fewer than 4 such
+# quarters exist, or TTM_EPS(d) <= 0); P/E(d) = SPLIT-ADJUSTED close /
+# TTM_EPS(d). See docs/QC_REMEDIATION_TRACKER.md QC12.
+#
+# D2/D3 CORRECTION: the original QC12 fix above paired RAW (un-adjusted)
+# close with reportedEPS on the premise that "reportedEPS is never
+# retroactively split-adjusted while adjusted_close IS". That premise is
+# FALSE: AV's reportedEPS IS retroactively restated onto the CURRENT
+# share-count basis (AAPL's FQ ending 2014-03-31 carries reportedEPS 0.415,
+# the as-filed $11.62 divided by the cumulative 7:1 x 4:1 = 28x split factor
+# between that filing and today) -- pairing it with RAW close inflated every
+# pre-split bar's P/E by the split ratio (measured: AAPL's 10yr P/E series
+# stepped 151.28 -> 39.10 across 2020-08-28 -> 2020-08-31). The corrected
+# construction rebases close onto the CURRENT share basis using ONLY the
+# vendor's per-bar "8. split coefficient" (_split_factors) -- split-only,
+# NEVER adjusted_close, which is ALSO dividend-adjusted and would depress
+# historical P/E on high-yield names. See _PE_PRICE_BASIS_NOTE.
+# --------------------------------------------------------------------------- #
+
+# Guard 1: minimum fraction of a window's bars that must yield a usable P/E
+# point for the median to be trusted.
+_PE_COVERAGE_FLOOR = 0.60
+# Guard 2: a trusted median must be finite, > 0, and land in this range.
+_PE_MEDIAN_PLAUSIBLE_LO = 3.0
+_PE_MEDIAN_PLAUSIBLE_HI = 150.0
+# Guard 3: minimum quarterlyEarnings records with a parseable reportedDate +
+# numeric reportedEPS.
+_PE_MIN_EPS_RECORDS = 4
+
+_PE_PRICE_BASIS_NOTE = (
+    "close is SPLIT-adjusted (via build_snapshot._split_factors -- the "
+    "vendor's own per-bar '8. split coefficient', compounded forward to the "
+    "window's last bar) before pairing with as-filed quarterlyEarnings."
+    "reportedEPS. D2/D3 CORRECTION: the original construction paired RAW "
+    "close with reportedEPS on the premise that reportedEPS is a "
+    "split-invariant, as-filed figure -- that premise is FALSE (AV DOES "
+    "restate reportedEPS onto the CURRENT share-count basis; AAPL's "
+    "FQ2014-03-31 reportedEPS=0.415 is the as-filed $11.62 divided by the "
+    "cumulative 7:1 x 4:1 = 28x split factor since that filing), so pairing "
+    "it with an un-adjusted historical close inflated every pre-split bar's "
+    "P/E by the split ratio. adjusted_close is deliberately NOT used "
+    "instead: it is ALSO dividend-adjusted, which would depress historical "
+    "P/E on high-dividend-yield names. This construction is split-only."
+)
+
+
+def _sorted_eps_quarters(earn_q):
+    """Ascending (date, reportedEPS) pairs from a quarterlyEarnings list.
+
+    Skips entries with an unparseable reportedDate or non-numeric reportedEPS.
+    """
+    out = []
+    for row in earn_q or []:
+        if not isinstance(row, dict):
+            continue
+        d = _parse_date(row.get("reportedDate"))
+        eps = num(row.get("reportedEPS"))
+        if d is None or eps is None:
+            continue
+        out.append((d, eps))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _median_sorted(sorted_vals):
+    """Median of an already-sorted sequence, or None if empty."""
+    n = len(sorted_vals)
+    if n == 0:
+        return None
+    mid = n // 2
+    return sorted_vals[mid] if n % 2 else (sorted_vals[mid - 1] + sorted_vals[mid]) / 2
+
+
+def _percentile_linear(sorted_vals, q):
+    """Linear-interpolation percentile on an already-sorted sequence.
+
+    This is numpy's default ``'linear'`` method (== Excel PERCENTILE.INC, aka
+    quantile type 7) -- the method that reproduces the QC12 ground truth
+    (AAPL/MU p25/p75) exactly. None if empty.
+    """
+    n = len(sorted_vals)
+    if n == 0:
+        return None
+    if n == 1:
+        return sorted_vals[0]
+    h = (n - 1) * q
+    lo = int(h)
+    frac = h - lo
+    if lo + 1 < n:
+        return sorted_vals[lo] + frac * (sorted_vals[lo + 1] - sorted_vals[lo])
+    return sorted_vals[lo]
+
+
+def rolling_ttm_pe_series(rows, earn_q):
+    """Era-correct rolling-TTM P/E series over every bar in ``rows`` (QC12).
+
+    For each bar: TTM_EPS = sum of the 4 most recent quarterlyEarnings
+    reportedEPS whose reportedDate <= the bar's date. The bar is SKIPPED (not
+    null-padded) when fewer than 4 such quarters exist, or when TTM_EPS <= 0.
+    P/E = SPLIT-ADJUSTED close / TTM_EPS -- never raw close, never
+    ``adjusted_close`` (see ``_PE_PRICE_BASIS_NOTE``).
+
+    PUBLIC and reused by both ``build_valuation`` (the 5yr/10yr median) and
+    ``render_charts.extract_pe_band`` (the chart series) -- ONE construction,
+    so the chart can never disagree with the median drawn next to it (D2).
+
+    ``rows`` is a caller-sliced window (ascending, oldest-first); this
+    function does not window internally -- split-adjustment (_split_factors)
+    is computed relative to THIS window's own last row, so it is safe to
+    call on any caller-sliced sub-window (both real callers end their window
+    on the series' actual most recent bar). Returns a dict:
+      points          ascending [(date_str, pe), ...] for USABLE bars only.
+      n_bars          len(rows) (bars actually considered).
+      n_skipped       bars with no computable TTM_EPS (or a missing
+                      date/close).
+      n_eps_records   count of valid (date, eps) quarters found in earn_q.
+      splits          [{"date", "coefficient"}, ...] genuine splits found in
+                      ``rows`` (D2/D3 disclosure).
+      n_splits        len(splits).
+      split_degraded_bars  count of bars whose split_coefficient defaulted
+                      from a degraded/missing vendor column (D2/D3
+                      disclosure -- never a genuine "no split" fact).
+    """
+    quarters = _sorted_eps_quarters(earn_q)
+    dates = [d for d, _ in quarters]
+    epss = [e for _, e in quarters]
+    factors = _split_factors(rows)
+    points = []
+    n_skipped = 0
+    for i, r in enumerate(rows):
+        bar_date = _parse_date(r.get("date"))
+        close = r.get("close")
+        if bar_date is None or close is None:
+            n_skipped += 1
+            continue
+        idx = bisect.bisect_right(dates, bar_date)
+        if idx < 4:
+            n_skipped += 1
+            continue
+        ttm_eps = sum(epss[idx - 4:idx])
+        if ttm_eps is None or ttm_eps <= 0:
+            n_skipped += 1
+            continue
+        split_adjusted_close = close / factors[i]
+        points.append((r["date"], split_adjusted_close / ttm_eps))
+    return {
+        "points": points,
+        "n_bars": len(rows),
+        "n_skipped": n_skipped,
+        "n_eps_records": len(quarters),
+        "splits": _split_events_in_rows(rows),
+        "n_splits": len(_split_events_in_rows(rows)),
+        "split_degraded_bars": _split_degraded_count(rows),
+    }
+
+
+def load_quarterly_earnings(payload):
+    """Public wrapper: newest-first quarterlyEarnings list from a parsed
+    earnings.json payload, or []. Exposed for render_charts.py reuse (QC12)."""
+    return _quarterly(payload, "quarterlyEarnings")
+
+
+def _pe_evaluability(median, n_points, window_bars, n_eps_records,
+                     usable_at_window_start):
+    """QC12 PRIMARY evaluability gate for a pe_*_median value -- keyed on
+    INPUTS, never the pe_fwd/pe_median RATIO the scorers use as a SECONDARY
+    backstop. The ratio alone missed MU: numerator (pe_fwd) and denominator
+    (pe_5yr_median) were BOTH distorted by the same EPS regime and their
+    ratio landed back inside [0.2, 5.0] while neither absolute number was
+    right.
+
+    Checked in order (first failure wins):
+      3. EPS series validity  -- >= 4 usable quarterlyEarnings records
+         overall, AND at least one reportedDate <= the window's first bar
+         (otherwise the window is EPS-blind from day one, independent of
+         coverage%).
+      1. Coverage floor       -- n_points / window_bars >= 0.60.
+      2. Median plausibility  -- median finite, > 0, in [3.0, 150.0].
+
+    Returns (evaluable: bool, reason: str); reason is "ok" iff all guards
+    pass.
+    """
+    if n_eps_records < _PE_MIN_EPS_RECORDS:
+        return False, (f"insufficient_eps_series:too_few_records:"
+                       f"{n_eps_records}<{_PE_MIN_EPS_RECORDS}")
+    if not usable_at_window_start:
+        return False, "insufficient_eps_series:none_usable_at_window_start"
+    if not window_bars:
+        return False, "insufficient_eps_series:no_window_bars"
+    coverage = n_points / window_bars
+    if coverage < _PE_COVERAGE_FLOOR:
+        return False, f"coverage_below_floor:{coverage:.4f}<{_PE_COVERAGE_FLOOR}"
+    if (median is None or isinstance(median, bool)
+            or not isinstance(median, (int, float))):
+        return False, "median_missing_or_non_numeric"
+    if not (_PE_MEDIAN_PLAUSIBLE_LO <= median <= _PE_MEDIAN_PLAUSIBLE_HI):
+        return False, (f"median_outside_plausible_band:"
+                       f"[{_PE_MEDIAN_PLAUSIBLE_LO},{_PE_MEDIAN_PLAUSIBLE_HI}]:"
+                       f"{median}")
+    return True, "ok"
+
+
+def _pe_window_stats(rows, earn_q, window):
+    """Full QC12 disclosure block for one P/E window (5yr or 10yr): the
+    era-correct rolling-TTM series over the trailing ``window`` bars, its
+    median/p25/p75/min/max, coverage, and the PRIMARY evaluability verdict.
+    """
+    rows = rows or []
+    window_rows = rows[-window:] if window else list(rows)
+    series = rolling_ttm_pe_series(window_rows, earn_q)
+    points = series["points"]
+    pe_vals = sorted(p for _, p in points)
+    window_bars = len(window_rows)
+    n_points = len(pe_vals)
+    coverage = (n_points / window_bars) if window_bars else 0.0
+    median = _median_sorted(pe_vals)
+    p25 = _percentile_linear(pe_vals, 0.25)
+    p75 = _percentile_linear(pe_vals, 0.75)
+
+    window_start_date = (_parse_date(window_rows[0].get("date"))
+                         if window_rows else None)
+    quarters_dates = [d for d, _ in _sorted_eps_quarters(earn_q)]
+    usable_at_start = (window_start_date is not None
+                       and bisect.bisect_right(quarters_dates, window_start_date) >= 1)
+    evaluable, reason = _pe_evaluability(
+        median, n_points, window_bars, series["n_eps_records"], usable_at_start)
+
+    return {
+        "window_bars": window_bars,
+        "n_points": n_points,
+        "n_skipped": series["n_skipped"],
+        "coverage": coverage,
+        "median": median,
+        "p25": p25,
+        "p75": p75,
+        "min": pe_vals[0] if pe_vals else None,
+        "max": pe_vals[-1] if pe_vals else None,
+        "first_date": points[0][0] if points else None,
+        "last_date": points[-1][0] if points else None,
+        "n_eps_records": series["n_eps_records"],
+        "evaluable": evaluable,
+        "evaluability_reason": reason,
+        # D2/D3 disclosure: genuine splits found inside THIS window, and
+        # bars whose split_coefficient defaulted from a degraded/missing
+        # vendor column (never a genuine "no split" fact).
+        "splits_in_window": series["splits"],
+        "n_splits_in_window": series["n_splits"],
+        "split_degraded_bars": series["split_degraded_bars"],
+    }
+
+
+def build_valuation(price, fundamentals, overview, rows, earn_q=None):
+    """Valuation block: P/E ttm/fwd, EV/EBITDA, PEG, historical P/E medians.
+
+    QC12: ``pe_5yr_median`` / ``pe_10yr_median`` are an ERA-CORRECT rolling-TTM
+    P/E (see ``rolling_ttm_pe_series``), NOT the pre-fix "approx_current_eps"
+    back-projection. ``earn_q`` (the caller's already-parsed newest-first
+    quarterlyEarnings, reused from other blocks) threads the earnings history
+    into this construction; absent/empty yields null medians (disclosed via
+    the evaluability reason), never a crash.
+
+    ``pe_5yr_evaluable`` / ``pe_5yr_evaluability_reason`` (and the ``10yr``
+    equivalents) are the PRIMARY evaluability gate for downstream scorers,
+    keyed on INPUTS rather than the pe_fwd/pe_median ratio those scorers keep
+    as a SECONDARY backstop -- see ``_pe_evaluability``.
+    """
     last = price.get("last")
     eps_ttm = fundamentals.get("eps_ttm")
     eps_ntm = fundamentals.get("eps_ntm_consensus")
@@ -1084,31 +2135,42 @@ def build_valuation(price, fundamentals, overview, rows):
 
     ov = overview if isinstance(overview, dict) else {}
     pe_overview = num(ov.get("PERatio"))
+    # QC1: vendor ForwardPE, ingested as a cross-vendor counterparty for
+    # check_forward_pe_crossvendor (qc.py). Previously never read anywhere.
+    pe_overview_fwd = num(ov.get("ForwardPE"))
     ev_ebitda = num(ov.get("EVToEBITDA"))
     peg = num(ov.get("PEGRatio"))
 
-    def _pe_median(window):
-        if not (eps_ttm and eps_ttm > 0):
-            return None
-        adj = [r["adjusted_close"] for r in rows[-window:] if r["adjusted_close"] is not None]
-        if not adj:
-            return None
-        pes = sorted(c / eps_ttm for c in adj)
-        n = len(pes)
-        mid = n // 2
-        return pes[mid] if n % 2 else (pes[mid - 1] + pes[mid]) / 2
+    stats_5yr = _pe_window_stats(rows, earn_q, _FIVE_YR_ROWS)
+    stats_10yr = _pe_window_stats(rows, earn_q, _TEN_YR_ROWS)
 
     fcf_yield = (fcf_ttm / mktcap) if (fcf_ttm is not None and mktcap) else None
+
+    pe_median_basis = {
+        "method": "rolling_ttm_reported_eps",
+        "price_basis": "split-adjusted close (never dividend-adjusted)",
+        "price_basis_note": _PE_PRICE_BASIS_NOTE,
+        "windows": {
+            "5yr": dict(stats_5yr),
+            "10yr": dict(stats_10yr),
+        },
+    }
 
     return {
         "pe_ttm": pe_ttm,
         "pe_fwd": pe_fwd,
         "pe_overview": pe_overview,
+        "pe_overview_fwd": pe_overview_fwd,
         "ev_ebitda_fwd": ev_ebitda,
         "peg": peg,
-        "pe_5yr_median": _pe_median(_FIVE_YR_ROWS),
-        "pe_10yr_median": _pe_median(_TEN_YR_ROWS),
-        "pe_median_method": "approx_current_eps",
+        "pe_5yr_median": stats_5yr["median"],
+        "pe_10yr_median": stats_10yr["median"],
+        "pe_median_method": "rolling_ttm_reported_eps",
+        "pe_5yr_evaluable": stats_5yr["evaluable"],
+        "pe_5yr_evaluability_reason": stats_5yr["evaluability_reason"],
+        "pe_10yr_evaluable": stats_10yr["evaluable"],
+        "pe_10yr_evaluability_reason": stats_10yr["evaluability_reason"],
+        "pe_median_basis": pe_median_basis,
         "fcf_yield": fcf_yield,
     }
 
@@ -1168,7 +2230,7 @@ def build_options(chain_path, chain_path_manifest, price, next_earnings_date,
         expiry pair, or a missing ATM IV on either side.
       - rv20_ex_earnings: indicators.realized_vol_ex_earnings over the daily
         closes/dates, masking returns within +/-1 session of any own-history
-        earnings print (the ``events.earnings_move_history`` quarter_end dates ==
+        earnings print (the ``events.earnings_move_history`` reported_date dates ==
         the quarterlyEarnings reportedDates). Null when the chain/rows are absent
         or too few unmasked returns remain. The IV-vs-realized PRIMARY GATE
         (``iv_minus_rv20``) compares iv30 against this cleaner ex-earnings RV when
@@ -1233,7 +2295,7 @@ def build_options(chain_path, chain_path_manifest, price, next_earnings_date,
     )
 
     # Wave 4B: ex-earnings realized vol. The earnings dates are the own-history
-    # reaction quarter_end dates == quarterlyEarnings reportedDates (same source
+    # reaction reported_date dates == quarterlyEarnings reportedDates (same source
     # build_earnings_move_history reads for events.earnings_move_history).
     rv20_ex_earnings = None
     if rows:
@@ -1720,7 +2782,12 @@ def _days_between(as_of_date, target_date):
 
 
 def build_earnings_move_history(earn_q, rows):
-    """Up-to-8 {"quarter_end", "move_pct"} from the ticker's own reported quarters.
+    """Up-to-8 {"reported_date", "move_pct"} from the ticker's own reported quarters.
+
+    QC7: the key is ``reported_date`` (AV's quarterlyEarnings[].reportedDate),
+    NOT the quarter's fiscalDateEnding -- MU's off-calendar fiscal quarters
+    make the two diverge, and a key literally named "quarter_end" holding a
+    reportedDate value is a live mis-join trap for any downstream consumer.
 
     A1 reaction-window convention (documented -- a MEASUREMENT, not a
     calibration): for a reportedDate D,
@@ -1770,7 +2837,7 @@ def build_earnings_move_history(earn_q, rows):
         if pre_close in (None, 0):
             continue
         out.append({
-            "quarter_end": report_date,
+            "reported_date": report_date,
             "move_pct": post_close / pre_close - 1,
         })
     return out
@@ -1993,13 +3060,14 @@ def build_snapshot(bundle, ticker):
                                   next_earnings_date=next_earnings_date,
                                   earn_q=earn_q)
     benchmark = build_benchmark(rows, spy_rows, sector_rows=sector_rows,
-                                sector_etf=sector_etf if sector_rows else None)
+                                sector_etf=sector_etf if sector_rows else None,
+                                overview=overview)
     fundamentals = build_fundamentals(income, balance, cashflow, earnings,
-                                      estimates, overview, as_of_date)
+                                      estimates, overview, as_of_date, price=price)
     # Gap-fill from cited web sources ONLY where the statement path found nothing;
     # this runs before valuation so a web-supplied eps_ntm/fcf feeds the multiples.
     apply_web_fundamentals(fundamentals, web_fundamentals)
-    valuation = build_valuation(price, fundamentals, overview, rows)
+    valuation = build_valuation(price, fundamentals, overview, rows, earn_q=earn_q)
 
     # Options depend on the chain file being present.
     options = None
