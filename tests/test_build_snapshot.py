@@ -458,7 +458,7 @@ class TestBuildSnapshotFull(unittest.TestCase):
         m = self.snap["meta"]
         self.assertEqual(m["ticker"], "MU")
         self.assertEqual(m["as_of_utc"], AS_OF)
-        self.assertEqual(m["schema_version"], "0.6.0")  # Phase-2 disclosure: 0.5.0 -> 0.6.0
+        self.assertEqual(m["schema_version"], "0.7.0")  # QC20(c): 0.6.0 -> 0.7.0
         self.assertEqual(m["missing"], [])
         self.assertIn("qc", m)
         self.assertTrue(len(m["sources"]) >= 4)
@@ -1843,12 +1843,13 @@ class TestA1EventAwareFields(unittest.TestCase):
         worst = abs_gaps[idx:]
         self.assertAlmostEqual(og["tail_mean_95_3y"], sum(worst) / len(worst), places=9)
 
-    def test_schema_version_is_0_6_0(self):
-        # Phase-2 disclosure release: 0.5.0 -> 0.6.0 (pure disclosure additions
-        # -- Fields 1-4 -- change zero scores; see docs/QC_REMEDIATION_TRACKER.md).
+    def test_schema_version_is_0_7_0(self):
+        # QC20(c): 0.6.0 -> 0.7.0 (adds technicals.extension_gate; a scored
+        # capping mechanism this time, gated behind an armed/binding check --
+        # see build_snapshot.build_extension_gate).
         b = BundleBuilder(self.dir).build_full()
         snap = self._build(b)
-        self.assertEqual(snap["meta"]["schema_version"], "0.6.0")
+        self.assertEqual(snap["meta"]["schema_version"], "0.7.0")
 
 
 # --------------------------------------------------------------------------- #
@@ -2473,6 +2474,309 @@ class TestField2ShortTermMAs(unittest.TestCase):
         for key in ("ma10", "ma21", "ma10_slope_5d", "ma21_slope_5d"):
             self.assertIn(key, t)
             self.assertIsNotNone(t[key])
+
+
+# --------------------------------------------------------------------------- #
+# QC20(c) — extension-credit gating after a fresh event break.
+#
+# build_extension_gate(rows, earn_q) detects a "qualifying break" -- a session j
+# where (a) close[j]/close[j-1]-1 <= -2.0 * sigma_1d(j) (sigma_1d = SAMPLE stdev
+# of the 20 daily returns ending the session BEFORE j) AND (b) j falls on, or
+# within 3 sessions after, a reportedDate read from the RAW earnings payload
+# (earn_q -- QC7: never the renamed events.earnings_move_history[].reported_date).
+# When >=1 qualifying break lies in the trailing 10 sessions, the session
+# immediately before the EARLIEST such break is surfaced as the reference point
+# score_technical caps the extension sub-component against.
+# --------------------------------------------------------------------------- #
+
+class TestExtensionGate(unittest.TestCase):
+
+    def _rows(self, n=40, base=100.0, jitter=0.001, drop_at=None, drop_pct=-0.10,
+             adj_factor=1.0):
+        """n dated rows (oldest-first, ending 2026-07-15), alternating +/-jitter
+        noise around ``base``, with an optional single-session ``drop_pct`` move
+        injected at index ``drop_at`` (negative index allowed). ``adj_factor``
+        scales adjusted_close relative to close (1.0 -> identical, the default)."""
+        from scripts import build_snapshot as bs
+        closes = []
+        px = base
+        for i in range(n):
+            px = base * (1 + (jitter if i % 2 == 0 else -jitter))
+            closes.append(round(px, 6))
+        if drop_at is not None:
+            idx = drop_at if drop_at >= 0 else n + drop_at
+            closes[idx] = closes[idx - 1] * (1 + drop_pct)
+        rows = _ohlcv(closes)
+        if adj_factor != 1.0:
+            for r in rows:
+                r["adjusted_close"] = r["adjusted_close"] * adj_factor
+        return rows
+
+    def _earn_q(self, reported_date):
+        return [{"fiscalDateEnding": reported_date, "reportedDate": reported_date,
+                 "reportedEPS": "1.00"}]
+
+    def _empty_shape(self):
+        return {"armed": False, "qualifying_breaks": [], "earliest_break_date": None,
+                "reference_date": None, "reference_close": None,
+                "reference_ma200": None}
+
+    # -- graceful null-safety -----------------------------------------------
+
+    def test_empty_rows_not_armed(self):
+        from scripts import build_snapshot as bs
+        self.assertEqual(bs.build_extension_gate([], []), self._empty_shape())
+
+    def test_none_inputs_not_armed(self):
+        from scripts import build_snapshot as bs
+        self.assertEqual(bs.build_extension_gate(None, None), self._empty_shape())
+
+    def test_insufficient_history_not_armed(self):
+        # Fewer than 22 dated rows -> not enough history to compute even one
+        # sigma_1d(j) inside the trailing window -> never armed.
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=20, drop_at=-1, drop_pct=-0.10)
+        earn_q = self._earn_q(rows[-1]["date"])
+        self.assertFalse(bs.build_extension_gate(rows, earn_q)["armed"])
+
+    # -- magnitude gate (a) ---------------------------------------------------
+
+    def test_large_event_adjacent_break_arms(self):
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-3, drop_pct=-0.10)
+        break_date = rows[37]["date"]  # index n-3 = 37
+        earn_q = self._earn_q(break_date)
+        gate = bs.build_extension_gate(rows, earn_q)
+        self.assertTrue(gate["armed"])
+        self.assertEqual(gate["earliest_break_date"], break_date)
+        self.assertEqual(len(gate["qualifying_breaks"]), 1)
+        b = gate["qualifying_breaks"][0]
+        self.assertEqual(b["date"], break_date)
+        self.assertLessEqual(b["z"], -2.0)
+        self.assertAlmostEqual(b["return_1d"], -0.10, places=6)
+        self.assertEqual(b["reported_date"], break_date)
+
+    def test_small_move_does_not_arm(self):
+        # This fixture's alternating +/-0.1% jitter gives sigma_1d ~0.205% (2sigma
+        # ~0.41%); a -0.2% single-day move stays under that bar -> condition (a)
+        # fails -> not armed even though (b) holds.
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-3, drop_pct=-0.002)
+        earn_q = self._earn_q(rows[37]["date"])
+        self.assertFalse(bs.build_extension_gate(rows, earn_q)["armed"])
+
+    # -- event-adjacency gate (b) ---------------------------------------------
+
+    def test_large_break_without_nearby_reported_date_does_not_arm(self):
+        # Same magnitude break as the arming case, but the only reportedDate is
+        # far away (the very first row) -> condition (b) fails -> not armed.
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-3, drop_pct=-0.10)
+        earn_q = self._earn_q(rows[0]["date"])
+        self.assertFalse(bs.build_extension_gate(rows, earn_q)["armed"])
+
+    def test_no_earnings_at_all_does_not_arm(self):
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-3, drop_pct=-0.10)
+        self.assertFalse(bs.build_extension_gate(rows, [])["armed"])
+
+    def test_break_exactly_on_reported_date_qualifies(self):
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-3, drop_pct=-0.10)
+        break_date = rows[37]["date"]
+        earn_q = self._earn_q(break_date)
+        self.assertTrue(bs.build_extension_gate(rows, earn_q)["armed"])
+
+    def test_break_three_sessions_after_reported_date_qualifies(self):
+        # reportedDate is the session 3 BEFORE the break -> break falls exactly
+        # at the outer edge of "within 3 sessions after" -> still qualifies.
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-3, drop_pct=-0.10)
+        anchor_date = rows[34]["date"]  # 37 - 3 = 34
+        earn_q = self._earn_q(anchor_date)
+        self.assertTrue(bs.build_extension_gate(rows, earn_q)["armed"])
+
+    def test_break_four_sessions_after_reported_date_does_not_qualify(self):
+        # One session past the 3-session event-adjacency window -> (b) fails.
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-3, drop_pct=-0.10)
+        anchor_date = rows[33]["date"]  # 37 - 4 = 33
+        earn_q = self._earn_q(anchor_date)
+        self.assertFalse(bs.build_extension_gate(rows, earn_q)["armed"])
+
+    # -- the trailing 10-session window ---------------------------------------
+
+    def test_break_outside_trailing_window_does_not_arm(self):
+        # The break sits at index n-12 -- two sessions outside the trailing-10
+        # window (n-10..n-1) -- so it is never even considered.
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-12, drop_pct=-0.10)
+        earn_q = self._earn_q(rows[28]["date"])  # n-12 = 28
+        self.assertFalse(bs.build_extension_gate(rows, earn_q)["armed"])
+
+    # -- reference session selection ------------------------------------------
+
+    def test_reference_is_session_before_the_break(self):
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-3, drop_pct=-0.10)
+        earn_q = self._earn_q(rows[37]["date"])
+        gate = bs.build_extension_gate(rows, earn_q)
+        self.assertEqual(gate["reference_date"], rows[36]["date"])
+        self.assertAlmostEqual(gate["reference_close"], rows[36]["close"], places=6)
+
+    def test_earliest_of_two_qualifying_breaks_is_used(self):
+        # Two independent big drops inside the trailing window, each with its
+        # own nearby reportedDate -> both qualify, but the reference must key
+        # off the EARLIEST (first) break, not the latest.
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40)
+        # break #1 at n-8 (index 32), break #2 at n-3 (index 37).
+        rows[32]["close"] = rows[31]["close"] * 0.90
+        rows[32]["adjusted_close"] = rows[32]["close"]
+        rows[37]["close"] = rows[36]["close"] * 0.90
+        rows[37]["adjusted_close"] = rows[37]["close"]
+        earn_q = [
+            {"reportedDate": rows[32]["date"]},
+            {"reportedDate": rows[37]["date"]},
+        ]
+        gate = bs.build_extension_gate(rows, earn_q)
+        self.assertTrue(gate["armed"])
+        self.assertEqual(len(gate["qualifying_breaks"]), 2)
+        self.assertEqual(gate["earliest_break_date"], rows[32]["date"])
+        self.assertEqual(gate["reference_date"], rows[31]["date"])
+        self.assertAlmostEqual(gate["reference_close"], rows[31]["close"], places=6)
+        # qualifying_breaks is ascending by date (earliest first).
+        self.assertEqual(gate["qualifying_breaks"][0]["date"], rows[32]["date"])
+        self.assertEqual(gate["qualifying_breaks"][1]["date"], rows[37]["date"])
+
+    # -- reference_ma200 (needs >=200 dated rows; basis = adjusted_close) -----
+
+    def test_reference_ma200_none_when_insufficient_history(self):
+        # The 40-row fixture never has 200 bars -> reference_ma200 is honestly
+        # None even though the gate is armed.
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-3, drop_pct=-0.10)
+        earn_q = self._earn_q(rows[37]["date"])
+        gate = bs.build_extension_gate(rows, earn_q)
+        self.assertTrue(gate["armed"])
+        self.assertIsNone(gate["reference_ma200"])
+
+    def test_reference_ma200_computed_from_adjusted_close_not_close(self):
+        # 220 rows so ma200 is computable at the reference session; adjusted_close
+        # is deliberately 0.5x close so the two bases are numerically distinct --
+        # reference_ma200 must come from adjusted_close (indicators.sma house
+        # convention), not from the raw close series.
+        from scripts import build_snapshot as bs
+        from scripts import indicators
+        rows = self._rows(n=220, drop_at=-3, drop_pct=-0.10, adj_factor=0.5)
+        earn_q = self._earn_q(rows[217]["date"])  # n-3 = 217
+        gate = bs.build_extension_gate(rows, earn_q)
+        self.assertTrue(gate["armed"])
+        ref_idx = 216  # session before the break (217 - 1)
+        expected = indicators.sma(
+            [r["adjusted_close"] for r in rows[:ref_idx + 1]], 200)
+        self.assertIsNotNone(expected)
+        self.assertAlmostEqual(gate["reference_ma200"], expected, places=9)
+        # sanity: NOT the close-basis figure (which would be exactly 2x, given
+        # adj_factor=0.5).
+        close_basis = indicators.sma(
+            [r["close"] for r in rows[:ref_idx + 1]], 200)
+        self.assertNotAlmostEqual(gate["reference_ma200"], close_basis, places=2)
+
+    # -- shape ------------------------------------------------------------
+
+    def test_qualifying_break_entry_shape(self):
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-3, drop_pct=-0.10)
+        earn_q = self._earn_q(rows[37]["date"])
+        gate = bs.build_extension_gate(rows, earn_q)
+        b = gate["qualifying_breaks"][0]
+        for key in ("date", "return_1d", "sigma_1d", "z", "reported_date"):
+            self.assertIn(key, b)
+
+
+# --------------------------------------------------------------------------- #
+# QC20(c) real ground-truth: the exact AAPL break (2026-07-31, z=-4.04) and MU's
+# non-arming, from the 2026-08-09 falsifier pre-registration. Guarded -- SKIPPED
+# where the read-only bundle volume isn't mounted.
+# --------------------------------------------------------------------------- #
+
+_QC20C_AAPL_RAW = ("/Volumes/OWC-2TB/dev/kurama-data/Finance/portfolio/"
+                   "stock-analysis/AAPL/2026-08-07-refresh/"
+                   "detail_reports_2026-08-07/raw")
+_QC20C_MU_RAW = ("/Volumes/OWC-2TB/dev/kurama-data/Finance/portfolio/"
+                 "stock-analysis/MU/2026-08-08/detail_reports_2026-08-08/raw")
+
+
+@unittest.skipUnless(os.path.isdir(_QC20C_AAPL_RAW) and os.path.isdir(_QC20C_MU_RAW),
+                     "QC20c ground-truth read-only bundles not mounted on this machine")
+class TestExtensionGateRealGroundTruth(unittest.TestCase):
+
+    @staticmethod
+    def _gate(raw_dir):
+        from scripts import build_snapshot as bs
+        daily = bs.load_daily_raw(os.path.join(raw_dir, "daily_adjusted.json"))
+        rows = bs.parse_daily_rows(daily)
+        earnings = bs.load_raw(os.path.join(raw_dir, "earnings.json"))
+        earn_q = bs.load_quarterly_earnings(earnings)
+        return bs.build_extension_gate(rows, earn_q)
+
+    def test_aapl_break_ground_truth(self):
+        gate = self._gate(_QC20C_AAPL_RAW)
+        self.assertTrue(gate["armed"])
+        self.assertEqual(gate["earliest_break_date"], "2026-07-31")
+        self.assertEqual(gate["reference_date"], "2026-07-30")
+        self.assertAlmostEqual(gate["reference_close"], 333.43, places=2)
+        self.assertAlmostEqual(gate["reference_ma200"], 277.350, places=2)
+        b = gate["qualifying_breaks"][0]
+        self.assertAlmostEqual(b["sigma_1d"], 0.01821, places=4)
+        self.assertAlmostEqual(b["z"], -4.0395, places=3)
+        self.assertAlmostEqual(b["return_1d"], -0.0735, places=3)
+        self.assertEqual(b["reported_date"], "2026-07-30")
+
+    def test_mu_does_not_arm(self):
+        gate = self._gate(_QC20C_MU_RAW)
+        self.assertFalse(gate["armed"])
+        self.assertEqual(gate["qualifying_breaks"], [])
+
+
+# --------------------------------------------------------------------------- #
+# QC20(c) wiring: build_technicals() surfaces extension_gate (needs earn_q).
+# --------------------------------------------------------------------------- #
+
+class TestExtensionGateWiredIntoTechnicals(unittest.TestCase):
+
+    def test_technicals_block_carries_extension_gate_key(self):
+        from scripts import build_snapshot as bs
+        closes = [100.0 * (1.001 ** i) for i in range(60)]
+        rows = _ohlcv(closes)
+        block = bs.build_technicals(rows, earn_q=[])
+        self.assertIn("extension_gate", block)
+        self.assertFalse(block["extension_gate"]["armed"])
+
+    def test_technicals_block_default_earn_q_is_null_safe(self):
+        # build_technicals's earn_q parameter defaults to None -- must not crash.
+        from scripts import build_snapshot as bs
+        closes = [100.0 * (1.001 ** i) for i in range(60)]
+        rows = _ohlcv(closes)
+        block = bs.build_technicals(rows)
+        self.assertIn("extension_gate", block)
+        self.assertFalse(block["extension_gate"]["armed"])
+
+    def test_full_bundle_carries_extension_gate(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        BundleBuilder(d).build_full()
+        proc = _run_build(d)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        snap = json.load(open(os.path.join(d, f"snapshot_MU_{AS_OF_DATE}.json")))
+        eg = snap["technicals"]["extension_gate"]
+        self.assertIn("armed", eg)
+        self.assertIn("qualifying_breaks", eg)
+        self.assertIn("earliest_break_date", eg)
+        self.assertIn("reference_date", eg)
+        self.assertIn("reference_close", eg)
+        self.assertIn("reference_ma200", eg)
 
 
 # --------------------------------------------------------------------------- #

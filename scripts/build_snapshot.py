@@ -25,6 +25,7 @@ import io
 import json
 import math
 import os
+import statistics
 import sys
 
 if sys.version_info < (3, 10):  # statistics.covariance/correlation need 3.10
@@ -40,7 +41,7 @@ if _REPO_ROOT not in sys.path:
 
 from scripts import chain, indicators
 
-SCHEMA_VERSION = "0.6.0"
+SCHEMA_VERSION = "0.7.0"
 
 # Files that MUST be present; their absence aborts the build.
 REQUIRED = ("global_quote", "overview", "daily_adjusted", "spy_daily_adjusted")
@@ -889,6 +890,143 @@ def _weinstein_stage(last, ma50, ma200, ma50_slope, ma200_slope,
     return 1
 
 
+# --------------------------------------------------------------------------- #
+# QC20(c): extension-credit gating after a fresh event break.
+#
+# score_technical.py's extension sub-component (last/ma200 distance-below-over-
+# extended) mechanically REWARDS a crash: a fresh gap-down improves it. This
+# block detects a "qualifying break" -- a session j where
+#   (a) close[j]/close[j-1]-1 <= -_EXTGATE_Z * sigma_1d(j), sigma_1d(j) = the
+#       SAMPLE stdev of the 20 daily returns ENDING THE SESSION BEFORE j.
+#   (b) j falls on, or within _EXTGATE_EVENT_AFTER sessions after, a
+#       reportedDate read from the RAW earnings payload (``earn_q``, the
+#       newest-first quarterlyEarnings list as parsed by ``_quarterly`` --
+#       QC7's mis-join trap applies here too: NEVER the renamed
+#       events.earnings_move_history[].reported_date, or a pre-0.5.0 bundle
+#       would silently disarm the gate).
+# When >=1 qualifying break lies in the trailing _EXTGATE_WINDOW sessions, the
+# session immediately before the EARLIEST such break is surfaced (date/close/
+# ma200) so score_technical can cap the extension sub-component at what it
+# scored the session before the break -- credit WITHHOLDING, never a fresh
+# penalty. score_technical.py is snapshot-only (never reads raw files), so the
+# break DETECTION lives here (it needs both daily bars and raw earnings) and
+# surfaces as ``technicals.extension_gate`` for score_technical to consume.
+# PROVISIONAL -- cleared to ship by the 2026-08-09 offline falsifier sweep
+# (F20c-A armed-rate 4.99% vs a >15% kill; F20c-B binding-rate 30.2% vs a <10%
+# kill -- both pass; see score_technical.MODULE_NOTE).
+_EXTGATE_WINDOW = 10          # trailing sessions checked for a qualifying break
+_EXTGATE_SIGMA_LOOKBACK = 20  # daily returns used for sigma_1d
+_EXTGATE_Z = 2.0              # magnitude threshold, in sigma_1d units
+_EXTGATE_EVENT_AFTER = 3      # sessions after reportedDate that still qualify
+
+
+def build_extension_gate(rows, earn_q):
+    """Detect a qualifying event-break in the trailing sessions (see module
+    note above). ``rows`` are the oldest-first parsed daily rows (needs
+    date + close + adjusted_close); ``earn_q`` is the newest-first
+    quarterlyEarnings list read from the RAW earnings payload.
+
+    Returns (ascending by date within ``qualifying_breaks``)::
+
+        {"armed": bool,
+         "qualifying_breaks": [{"date", "return_1d", "sigma_1d", "z",
+                                 "reported_date"}, ...],
+         "earliest_break_date": str | None,
+         "reference_date": str | None,       # session before the earliest break
+         "reference_close": float | None,    # that session's raw close
+         "reference_ma200": float | None}    # ma200 (adjusted_close basis) as
+                                              # of that session; None if <200
+                                              # dated rows precede it.
+
+    Null-safe throughout: insufficient history, no raw earnings, or an
+    unparseable reportedDate simply leave the gate not armed.
+    """
+    empty = {"armed": False, "qualifying_breaks": [], "earliest_break_date": None,
+             "reference_date": None, "reference_close": None,
+             "reference_ma200": None}
+
+    dated = sorted(
+        ((r["date"], r["close"], r.get("adjusted_close"))
+         for r in (rows or []) if r.get("date") and r.get("close") is not None),
+        key=lambda x: x[0],
+    )
+    n = len(dated)
+    if n < _EXTGATE_SIGMA_LOOKBACK + 2:
+        return empty
+
+    dates = [d for d, _, _ in dated]
+    closes = [c for _, c, _ in dated]
+    adj_closes = [a for _, _, a in dated]
+    rets = indicators.simple_returns(closes)   # rets[i-1] = session i's return
+
+    # reportedDate anchors -- read from the RAW earnings payload (earn_q), never
+    # the renamed events field (QC7 mis-join trap). Each anchor is the index of
+    # the first trading day >= reportedDate (reportedDate need not itself be a
+    # trading day).
+    anchors = []
+    for q in (earn_q or []):
+        if not isinstance(q, dict):
+            continue
+        reported = q.get("reportedDate")
+        d = _parse_date(reported)
+        if d is None:
+            continue
+        idx = bisect.bisect_left(dates, d.isoformat())
+        if idx < n:
+            anchors.append((idx, reported))
+
+    def event_anchor(j):
+        for a_idx, reported in anchors:
+            if a_idx <= j <= a_idx + _EXTGATE_EVENT_AFTER:
+                return reported
+        return None
+
+    window_start = max(0, n - _EXTGATE_WINDOW)
+    start = max(window_start, _EXTGATE_SIGMA_LOOKBACK + 1)
+    breaks = []
+    for j in range(start, n):
+        ret_j = rets[j - 1]
+        window_rets = rets[j - _EXTGATE_SIGMA_LOOKBACK - 1: j - 1]
+        if len(window_rets) < _EXTGATE_SIGMA_LOOKBACK:
+            continue
+        try:
+            sigma = statistics.stdev(window_rets)
+        except statistics.StatisticsError:
+            continue
+        if sigma <= 0 or ret_j > -_EXTGATE_Z * sigma:
+            continue   # condition (a) fails
+        reported = event_anchor(j)
+        if reported is None:
+            continue   # condition (b) fails
+        breaks.append({
+            "date": dates[j], "return_1d": ret_j, "sigma_1d": sigma,
+            "z": ret_j / sigma, "reported_date": reported, "_j": j,
+        })
+
+    if not breaks:
+        return empty
+
+    earliest = breaks[0]
+    ref_idx = earliest["_j"] - 1
+    for b in breaks:
+        del b["_j"]
+
+    ref_window = adj_closes[max(0, ref_idx - 199):ref_idx + 1]
+    if len(ref_window) >= 200 and all(v is not None for v in ref_window):
+        ref_ma200 = indicators.sma(adj_closes[:ref_idx + 1], 200)
+    else:
+        ref_ma200 = None
+
+    return {
+        "armed": True,
+        "qualifying_breaks": breaks,
+        "earliest_break_date": earliest["date"],
+        "reference_date": dates[ref_idx],
+        "reference_close": closes[ref_idx],
+        "reference_ma200": ref_ma200,
+    }
+
+
 def build_technicals(rows, series_source=None, next_earnings_date=None,
                      earn_q=None):
     """Technicals block from adjusted-close + volume series (oldest-first).
@@ -1015,6 +1153,13 @@ def build_technicals(rows, series_source=None, next_earnings_date=None,
             earn_anchor = first.get("reportedDate")
     vwap_earnings = indicators.anchored_vwap(rows, earn_anchor) if earn_anchor else None
 
+    # QC20(c): event-break extension-credit gate. Needs both the daily bars
+    # (already in scope) and the RAW earnings reportedDates (earn_q, passed in
+    # by the caller for the vwap_earnings anchor above) -- see
+    # build_extension_gate's module note for why detection lives here rather
+    # than in score_technical.py.
+    extension_gate = build_extension_gate(rows, earn_q)
+
     block = {
         "ma50": ma50,
         "ma200": ma200,
@@ -1024,6 +1169,7 @@ def build_technicals(rows, series_source=None, next_earnings_date=None,
         "ma21": ma21,
         "ma10_slope_5d": ma10_slope,
         "ma21_slope_5d": ma21_slope,
+        "extension_gate": extension_gate,    # QC20(c): event-break credit gate
         "adx14": adx14,                      # Wave 4A: Wilder ADX(14) trend strength
         "stage": stage,                      # Wave 4A: Weinstein regime 1/2/3/4
         "rsi14": indicators.rsi(adj, 14),

@@ -478,6 +478,295 @@ class TestVolumeExtension(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# QC20(c) — extension-credit gating: score_volume's consumption of
+# technicals.extension_gate (built by build_snapshot.build_extension_gate).
+# --------------------------------------------------------------------------- #
+
+class TestExtensionGateCap(unittest.TestCase):
+    """extension_pts := min(today, the pre-break reading) when the gate is
+    armed AND the cap actually binds (the pre-break reading is lower). No
+    change when the gate is absent, not armed, or armed-but-not-binding
+    (mirrors MU: armed would never bind because extension was already 0)."""
+
+    _NOT_ARMED = {"armed": False, "qualifying_breaks": [],
+                  "earliest_break_date": None, "reference_date": None,
+                  "reference_close": None, "reference_ma200": None}
+
+    def _armed_gate(self, ref_close, ref_ma200, break_date="2026-07-31", z=-4.04):
+        return {
+            "armed": True,
+            "qualifying_breaks": [{"date": break_date, "return_1d": -0.0735,
+                                   "sigma_1d": 0.0182, "z": z,
+                                   "reported_date": "2026-07-30"}],
+            "earliest_break_date": break_date,
+            "reference_date": "2026-07-30",
+            "reference_close": ref_close,
+            "reference_ma200": ref_ma200,
+        }
+
+    def test_gate_absent_no_change(self):
+        # No extension_gate key at all (a pre-QC20c snapshot) -> unaffected.
+        tech = _tech(ma200=100.0, vol_20d_vs_90d=1.2, ret_15d=0.02)
+        sub = st.score_volume(last=105.0, tech=tech)
+        self.assertEqual(sub["inputs"]["extension_points"], 10)
+        self.assertFalse(sub["inputs"]["extension_gate_armed"])
+        self.assertFalse(sub["inputs"]["extension_gate_capped"])
+        self.assertNotIn("capped", sub["arithmetic"])
+
+    def test_gate_not_armed_no_change(self):
+        tech = _tech(ma200=100.0, vol_20d_vs_90d=1.2, ret_15d=0.02,
+                     extension_gate=dict(self._NOT_ARMED))
+        sub = st.score_volume(last=105.0, tech=tech)
+        self.assertEqual(sub["inputs"]["extension_points"], 10)
+        self.assertFalse(sub["inputs"]["extension_gate_armed"])
+        self.assertFalse(sub["inputs"]["extension_gate_capped"])
+
+    def test_gate_armed_and_binds_caps_extension(self):
+        # today: last/ma200 = 130/100 = +30% -> ext_pts 0 (over the 12% band).
+        # reference: 105/100 = +5% -> under 12% -> full 10. 0 < 10 is already
+        # the WRONG direction for "capping down" -- use the AAPL-shaped case
+        # instead: today's reading is HIGH (near-full, little extension) and the
+        # reference (pre-break) reading is LOWER (more extended, pre-crash) so
+        # capping actually reduces today's generous post-crash credit.
+        tech = _tech(ma200=100.0, vol_20d_vs_90d=1.2, ret_15d=0.02,
+                     extension_gate=self._armed_gate(ref_close=120.0, ref_ma200=100.0))
+        # today: last/ma200 = 112/100 = +12% -> right at the band edge -> ext_pts 10.
+        sub = st.score_volume(last=112.0, tech=tech)
+        today_uncapped = 10
+        # reference: 120/100 = +20% -> penalty (0.20-0.12)*100=8 -> 10-8*10/12=3.3333.
+        self.assertLess(3.3333, today_uncapped)
+        self.assertEqual(sub["inputs"]["extension_points"], 3.3333)
+        self.assertTrue(sub["inputs"]["extension_gate_armed"])
+        self.assertTrue(sub["inputs"]["extension_gate_capped"])
+        self.assertIn("extension credit capped at the pre-break value", sub["arithmetic"])
+        self.assertIn("2026-07-31", sub["arithmetic"])
+        self.assertIn("z=-4.04", sub["arithmetic"])
+
+    def test_gate_armed_but_not_binding_no_change(self):
+        # MU-shaped: the gate is armed but the reference reading is HIGHER than
+        # (or equal to) today's already-floored reading -> min() is a no-op ->
+        # not disclosed as "capped" (silent, matching the spec's MU asymmetry).
+        tech = _tech(ma200=100.0, vol_20d_vs_90d=1.2, ret_15d=0.02,
+                     extension_gate=self._armed_gate(ref_close=200.0, ref_ma200=100.0))
+        # today: last/ma200 = 200/100 = +100% -> floored at 0. reference is the
+        # SAME reading -> 0 either way -> the cap does not bind.
+        sub = st.score_volume(last=200.0, tech=tech)
+        self.assertEqual(sub["inputs"]["extension_points"], 0)
+        self.assertTrue(sub["inputs"]["extension_gate_armed"])
+        self.assertFalse(sub["inputs"]["extension_gate_capped"])
+        self.assertNotIn("capped", sub["arithmetic"])
+
+    def test_gate_armed_missing_reference_ma200_graceful(self):
+        # reference_ma200 None (insufficient history at the reference session,
+        # e.g. a young ticker) -> the cap cannot be computed -> skipped, no crash.
+        gate = self._armed_gate(ref_close=120.0, ref_ma200=None)
+        tech = _tech(ma200=100.0, vol_20d_vs_90d=1.2, ret_15d=0.02,
+                     extension_gate=gate)
+        sub = st.score_volume(last=112.0, tech=tech)
+        self.assertEqual(sub["inputs"]["extension_points"], 10)
+        self.assertFalse(sub["inputs"]["extension_gate_capped"])
+
+    def test_extension_gate_field_not_in_extension_pts_when_ma200_null(self):
+        # extension itself n/a (ma200 null) -> the gate must not be consulted /
+        # must not crash.
+        tech = _tech(ma200=None, vol_20d_vs_90d=1.2, ret_15d=0.02,
+                     extension_gate=self._armed_gate(ref_close=120.0, ref_ma200=100.0))
+        sub = st.score_volume(last=112.0, tech=tech)
+        self.assertIsNone(sub["inputs"]["extension_points"])
+
+
+# --------------------------------------------------------------------------- #
+# QC20(c) real ground truth: AAPL's extension component 9.978 -> 3.150,
+# volume_extension 18.9777 -> 12.1497. MU unaffected (gate never arms, and its
+# extension_pts is 0.000 either way). From the 2026-08-09 falsifier
+# pre-registration. Guarded -- SKIPPED where the read-only bundle isn't mounted.
+# --------------------------------------------------------------------------- #
+
+_QC20C_SCORE_AAPL_RAW = ("/Volumes/OWC-2TB/dev/kurama-data/Finance/portfolio/"
+                         "stock-analysis/AAPL/2026-08-07-refresh/"
+                         "detail_reports_2026-08-07/raw")
+_QC20C_SCORE_MU_RAW = ("/Volumes/OWC-2TB/dev/kurama-data/Finance/portfolio/"
+                       "stock-analysis/MU/2026-08-08/detail_reports_2026-08-08/raw")
+
+
+@unittest.skipUnless(os.path.isdir(_QC20C_SCORE_AAPL_RAW) and
+                     os.path.isdir(_QC20C_SCORE_MU_RAW),
+                     "QC20c ground-truth read-only bundles not mounted on this machine")
+class TestExtensionGateRealGroundTruthScoring(unittest.TestCase):
+
+    @staticmethod
+    def _tech_and_last(raw_dir):
+        from scripts import build_snapshot as bs
+        daily = bs.load_daily_raw(os.path.join(raw_dir, "daily_adjusted.json"))
+        rows = bs.parse_daily_rows(daily)
+        earnings = bs.load_raw(os.path.join(raw_dir, "earnings.json"))
+        earn_q = bs.load_quarterly_earnings(earnings)
+        tech = bs.build_technicals(rows, earn_q=earn_q)
+        return tech, rows[-1]["adjusted_close"]
+
+    def test_aapl_extension_capped_to_3_150(self):
+        tech, last = self._tech_and_last(_QC20C_SCORE_AAPL_RAW)
+        sub = st.score_volume(last=last, tech=tech)
+        self.assertTrue(tech["extension_gate"]["armed"])
+        self.assertAlmostEqual(sub["inputs"]["extension_points"], 3.1501, places=3)
+        self.assertTrue(sub["inputs"]["extension_gate_capped"])
+        self.assertIn("2026-07-31", sub["arithmetic"])
+
+    def test_mu_extension_unaffected(self):
+        tech, last = self._tech_and_last(_QC20C_SCORE_MU_RAW)
+        sub = st.score_volume(last=last, tech=tech)
+        self.assertFalse(tech["extension_gate"]["armed"])
+        self.assertEqual(sub["inputs"]["extension_points"], 0)
+        self.assertFalse(sub["inputs"]["extension_gate_capped"])
+
+
+# --------------------------------------------------------------------------- #
+# QC20(a) — trend_short: a 10/21-day factor (max 10), technical-v1.3.0
+# --------------------------------------------------------------------------- #
+
+class TestTrendShort(unittest.TestCase):
+    """3/3/2/2 split: last>ma10 (+3), last>ma21 (+3), ma10_slope_5d>0 (+2),
+    ma21_slope_5d>0 (+2). Null sub-component -> excluded, renormalize over
+    present sub-maxes (v1.1.0 pattern, mirrors score_volume). All four null ->
+    evaluable=False, factor drops out of the denominator (v1.2.0 pattern,
+    mirrors score_rel_strength)."""
+
+    def _tech(self, **over):
+        base = {"ma10": 100.0, "ma21": 95.0,
+                "ma10_slope_5d": 0.01, "ma21_slope_5d": 0.02}
+        base.update(over)
+        return base
+
+    def test_full_marks(self):
+        # last>ma10 (+3), last>ma21 (+3), both slopes>0 (+2+2) = 10.
+        tech = self._tech(ma10=100.0, ma21=95.0,
+                          ma10_slope_5d=0.01, ma21_slope_5d=0.02)
+        sub = st.score_trend_short(last=110.0, tech=tech)
+        self.assertEqual(sub["points"], 10)
+        self.assertEqual(sub["max"], st._TS_MAX)
+        self.assertTrue(sub["evaluable"])
+
+    def test_zero_marks(self):
+        # last below both MAs, both slopes negative -> 0.
+        tech = self._tech(ma10=100.0, ma21=95.0,
+                          ma10_slope_5d=-0.01, ma21_slope_5d=-0.02)
+        sub = st.score_trend_short(last=80.0, tech=tech)
+        self.assertEqual(sub["points"], 0)
+
+    def test_last_ma10_only(self):
+        # last>ma10 only -> +3 of 10.
+        tech = self._tech(ma10=100.0, ma21=120.0,
+                          ma10_slope_5d=-0.01, ma21_slope_5d=-0.02)
+        sub = st.score_trend_short(last=105.0, tech=tech)
+        self.assertEqual(sub["points"], 3)
+
+    def test_slopes_only(self):
+        # both slopes positive, last below both MAs -> +2+2 = 4.
+        tech = self._tech(ma10=120.0, ma21=130.0,
+                          ma10_slope_5d=0.01, ma21_slope_5d=0.02)
+        sub = st.score_trend_short(last=110.0, tech=tech)
+        self.assertEqual(sub["points"], 4)
+
+    def test_null_last_renormalizes_over_slopes_only(self):
+        # last null -> both level comparisons n/a (max 6 excluded); only the two
+        # slope comparisons (max 4) remain present -> renormalize present pts
+        # over present max 4, scaled back to _TS_MAX.
+        tech = self._tech(ma10_slope_5d=0.01, ma21_slope_5d=0.02)
+        sub = st.score_trend_short(last=None, tech=tech)
+        self.assertTrue(sub["evaluable"])
+        # present: 2 (ma10 slope) + 2 (ma21 slope) = 4 over present max 4 -> full 10.
+        self.assertEqual(sub["points"], st._TS_MAX)
+        self.assertIn("n/a", sub["arithmetic"])
+
+    def test_null_ma10_renormalizes(self):
+        # ma10 null -> last>ma10 excluded (present max 7: last>ma21 3 + slopes 2+2).
+        # last>ma21 true (+3), ma10_slope>0 (+2), ma21_slope>0 (+2) = 7 earned of 7
+        # present max -> renormalizes to full _TS_MAX.
+        tech = self._tech(ma10=None, ma21=95.0,
+                          ma10_slope_5d=0.01, ma21_slope_5d=0.02)
+        sub = st.score_trend_short(last=110.0, tech=tech)
+        self.assertEqual(sub["points"], st._TS_MAX)
+        self.assertIn("n/a", sub["arithmetic"])
+
+    def test_null_ma10_slope_partial_renormalizes(self):
+        # ma10_slope_5d null -> excluded (present max 8: last>ma10 3 + last>ma21 3
+        # + ma21_slope 2). Only last>ma10 (+3) and last>ma21 (+3) earn -> 6/8 * 10
+        # = 7.5.
+        tech = self._tech(ma10=100.0, ma21=95.0,
+                          ma10_slope_5d=None, ma21_slope_5d=-0.01)
+        sub = st.score_trend_short(last=110.0, tech=tech)
+        self.assertEqual(sub["points"], 7.5)
+
+    def test_all_four_null_not_evaluable(self):
+        tech = self._tech(ma10=None, ma21=None,
+                          ma10_slope_5d=None, ma21_slope_5d=None)
+        sub = st.score_trend_short(last=110.0, tech=tech)
+        self.assertFalse(sub["evaluable"])
+        self.assertIsNone(sub["points"])
+
+    def test_all_four_null_including_last(self):
+        sub = st.score_trend_short(last=None, tech=self._tech(
+            ma10=None, ma21=None, ma10_slope_5d=None, ma21_slope_5d=None))
+        self.assertFalse(sub["evaluable"])
+
+    def test_provisional_stamp(self):
+        sub = st.score_trend_short(last=110.0, tech=self._tech())
+        self.assertIn("PROVISIONAL", sub["arithmetic"])
+
+    def test_factor_shape(self):
+        sub = st.score_trend_short(last=110.0, tech=self._tech())
+        for key in ("name", "points", "max", "arithmetic", "inputs", "evaluable"):
+            self.assertIn(key, sub)
+        self.assertEqual(sub["name"], "trend_short")
+        self.assertEqual(sub["max"], st._TS_MAX)
+
+    def test_boundary_not_strictly_greater_is_zero(self):
+        # last == ma10/ma21 (not strictly greater) -> +0; slope == 0 -> +0.
+        tech = self._tech(ma10=100.0, ma21=100.0,
+                          ma10_slope_5d=0.0, ma21_slope_5d=0.0)
+        sub = st.score_trend_short(last=100.0, tech=tech)
+        self.assertEqual(sub["points"], 0)
+
+
+# --------------------------------------------------------------------------- #
+# QC20(a) — real ground-truth regression: the exact AAPL/MU archived-bundle
+# trend_short values from the 2026-08-09 falsifier pre-registration (AAPL 2/10,
+# MU 3/10). Guarded -- SKIPPED where the read-only bundle volume isn't mounted.
+# --------------------------------------------------------------------------- #
+
+_QC20_AAPL_RAW = ("/Volumes/OWC-2TB/dev/kurama-data/Finance/portfolio/"
+                  "stock-analysis/AAPL/2026-08-07-refresh/"
+                  "detail_reports_2026-08-07/raw")
+_QC20_MU_RAW = ("/Volumes/OWC-2TB/dev/kurama-data/Finance/portfolio/"
+               "stock-analysis/MU/2026-08-08/detail_reports_2026-08-08/raw")
+
+
+@unittest.skipUnless(os.path.isdir(_QC20_AAPL_RAW) and os.path.isdir(_QC20_MU_RAW),
+                     "QC20 ground-truth read-only bundles not mounted on this machine")
+class TestTrendShortRealGroundTruth(unittest.TestCase):
+
+    @staticmethod
+    def _tech_and_last(raw_dir):
+        import tests.test_build_snapshot as tb
+        block = tb.TestField2RealGroundTruthShortMAs._block(raw_dir)
+        from scripts import build_snapshot as bs
+        daily = bs.load_daily_raw(os.path.join(raw_dir, "daily_adjusted.json"))
+        rows = bs.parse_daily_rows(daily)
+        last = rows[-1]["adjusted_close"]
+        return block, last
+
+    def test_aapl_trend_short_is_2_of_10(self):
+        tech, last = self._tech_and_last(_QC20_AAPL_RAW)
+        sub = st.score_trend_short(last=last, tech=tech)
+        self.assertEqual(sub["points"], 2)
+
+    def test_mu_trend_short_is_3_of_10(self):
+        tech, last = self._tech_and_last(_QC20_MU_RAW)
+        sub = st.score_trend_short(last=last, tech=tech)
+        self.assertEqual(sub["points"], 3)
+
+
+# --------------------------------------------------------------------------- #
 # Track O4 — sector-relative RS factor (score_rel_strength), technical-v1.2.0
 # --------------------------------------------------------------------------- #
 
@@ -601,8 +890,9 @@ class TestTechnicalGracefulIdentity(unittest.TestCase):
                           divergence="none", justification=None,
                           benchmark={"rel_sector_ret_3m": 0.15,
                                      "rel_sector_ret_6m": 0.15})
-        # the RS factor appears as a fifth subscore and lifts the denominator.
-        self.assertEqual(len(with_rs["subscores"]), 5)
+        # the RS factor appears as a subscore (alongside trend_short, always a
+        # considered member since v1.3.0) and lifts the denominator.
+        self.assertEqual(len(with_rs["subscores"]), 6)
         self.assertEqual(sum(s["max"] for s in with_rs["subscores"]),
                          100 + st._RS_MAX)
         # a full-mark RS on top of a strong tech read is still <= 100.
@@ -658,8 +948,10 @@ class TestRenormalization(unittest.TestCase):
         # both rel-sector legs to genuinely satisfy the test's own name. Before
         # the fix this test omitted the RS dimension entirely (it wasn't yet a
         # considered member when non-evaluable) and asserted no-renormalization
-        # anyway; that omission is exactly the defect QC10 corrects.
-        tech = _tech()
+        # anyway; that omission is exactly the defect QC10 corrects. v1.3.0:
+        # trend_short is ALSO now always a considered member -- its four inputs
+        # must be supplied too, or this test's own name is no longer true.
+        tech = _tech(ma10=95.0, ma21=90.0, ma10_slope_5d=0.5, ma21_slope_5d=0.3)
         ladder = _ladder([(97.0, "ma50"), (110.0, "swing_high")])
         result = st.score(last=110.0, tech=tech, ladder=ladder,
                           divergence="none", justification=None,
@@ -667,7 +959,7 @@ class TestRenormalization(unittest.TestCase):
                                      "rel_sector_ret_6m": 0.15})
         self.assertFalse(result["renormalized"])
         maxes = sum(s["max"] for s in result["subscores"])
-        self.assertEqual(maxes, 100 + st._RS_MAX)
+        self.assertEqual(maxes, 100 + st._RS_MAX + st._TS_MAX)
 
 
 # --------------------------------------------------------------------------- #
@@ -688,8 +980,15 @@ class TestQC10SectorRSExclusionDisclosure(unittest.TestCase):
         # MU-shaped: benchmark carries rel_sector_ret_3m/_6m -- the sector-RS
         # dimension is evaluable and joins the denominator (100 -> 110). No
         # dimension was excluded, so renormalized must be False and the note
-        # None -- membership GROWTH is not exclusion.
+        # None -- membership GROWTH is not exclusion. v1.3.0: trend_short is
+        # ALSO now always a considered member -- its own fixture (not the
+        # shared ``_fixture()``, which the sibling AAPL-shaped test below
+        # deliberately leaves trend_short-absent) supplies all four inputs so
+        # "nothing excluded" stays true of both new v1.3.0 factors, denominator
+        # 110 -> 120.
         tech, ladder = self._fixture()
+        tech = dict(tech, ma10=95.0, ma21=90.0,
+                   ma10_slope_5d=0.5, ma21_slope_5d=0.3)
         result = st.score(last=110.0, tech=tech, ladder=ladder,
                           divergence="none", justification=None,
                           benchmark={"rel_sector_ret_3m": 0.15,
@@ -700,8 +999,8 @@ class TestQC10SectorRSExclusionDisclosure(unittest.TestCase):
             self.assertNotIn("inputs: )", result["renormalization_note"])
         # numeric score/denominator pinned to today's (pre- and post-fix
         # identical) values -- this is a disclosure fix, not a scoring change.
-        self.assertEqual(result["score"], 76.8014)
-        self.assertEqual(sum(s["max"] for s in result["subscores"]), 110)
+        self.assertEqual(result["score"], 78.7346)
+        self.assertEqual(sum(s["max"] for s in result["subscores"]), 120)
 
     def test_aapl_shaped_rs_absent_is_excluded_and_disclosed(self):
         # AAPL-shaped: benchmark lacks BOTH rel-sector fields -- the sector-RS
@@ -770,7 +1069,7 @@ class TestCLI(unittest.TestCase):
         with open(out) as fh:
             doc = json.load(fh)
         self.assertEqual(doc["skill"], "technical-analysis")
-        self.assertEqual(doc["rubric_version"], "1.2.0")
+        self.assertEqual(doc["rubric_version"], "1.3.0")
         self.assertIn("PROVISIONAL", doc["module_note"])
         self.assertEqual(doc["ticker"], "MU")
         self.assertIn("as_of", doc)
@@ -781,8 +1080,12 @@ class TestCLI(unittest.TestCase):
         self.assertIsInstance(doc["subscores"], list)
         # QC10: the sector-RS dimension is now always a considered member (the
         # standard build_full fixture carries no sector_daily_adjusted, so RS is
-        # not evaluable here and is published as a 5th, zeroed/excluded row).
-        self.assertEqual(len(doc["subscores"]), 5)
+        # not evaluable here and is published as a zeroed/excluded row). v1.3.0:
+        # trend_short is ALSO always a considered member; the fixture's random-
+        # walk daily series DOES carry ma10/ma21/slopes (Field 2, already shipped)
+        # so trend_short IS evaluable here -- 4 core + trend_short + excluded
+        # sector-RS = 6 rows.
+        self.assertEqual(len(doc["subscores"]), 6)
         self.assertIsInstance(doc["ladder"], list)
         self.assertIn("divergence", doc["flags"])
         # signal is ALWAYS null in the JSON (the LLM writes it in prose)
@@ -858,6 +1161,8 @@ class TestInputFields(unittest.TestCase):
         # v1.1.0 adds the two SCORED volume-quality fields (ad_line_slope,
         # upvol_ratio). adx14 + stage are GUARDS, not here (see GUARD_FIELDS).
         # v1.2.0 (Track O4) adds the two SCORED sector-relative RS fields.
+        # v1.3.0 (QC20a) adds the four SCORED trend_short inputs; the new
+        # extension_gate field (QC20c) is a GUARD/CAP, not here.
         self.assertEqual(st.INPUT_FIELDS, {
             "technicals.ma50", "technicals.ma200",
             "technicals.ma50_slope_20d", "technicals.ma200_slope_20d",
@@ -865,6 +1170,8 @@ class TestInputFields(unittest.TestCase):
             "technicals.vol_20d_vs_90d", "technicals.ret_15d",
             "technicals.ad_line_slope", "technicals.upvol_ratio",
             "benchmark.rel_sector_ret_3m", "benchmark.rel_sector_ret_6m",
+            "technicals.ma10", "technicals.ma21",
+            "technicals.ma10_slope_5d", "technicals.ma21_slope_5d",
         })
 
     def test_rel_sector_fields_in_input_fields(self):
@@ -875,8 +1182,9 @@ class TestInputFields(unittest.TestCase):
 
     def test_guard_fields_exact(self):
         # adx14 + stage MODULATE momentum but earn no points -> guard fields.
+        # v1.3.0 (QC20c): extension_gate CAPS volume_extension, earns no points.
         self.assertEqual(st.GUARD_FIELDS, {
-            "technicals.adx14", "technicals.stage",
+            "technicals.adx14", "technicals.stage", "technicals.extension_gate",
         })
 
     def test_guard_and_input_fields_disjoint(self):
@@ -896,13 +1204,13 @@ class TestInputFields(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# Rubric version + provisional module note (v1.1.0).
+# Rubric version + provisional module note (v1.3.0, QC20).
 # --------------------------------------------------------------------------- #
 
 class TestRubricAndNote(unittest.TestCase):
-    def test_rubric_version_is_120(self):
-        # Track O4 bumps technical to v1.2.0 (adds the PROVISIONAL sector-RS factor).
-        self.assertEqual(st.RUBRIC_VERSION, "1.2.0")
+    def test_rubric_version_is_130(self):
+        # Phase-2 (QC20a + QC20c) bumps technical to v1.3.0.
+        self.assertEqual(st.RUBRIC_VERSION, "1.3.0")
 
     def test_module_note_is_provisional(self):
         self.assertIn("PROVISIONAL", st.MODULE_NOTE)
@@ -910,8 +1218,14 @@ class TestRubricAndNote(unittest.TestCase):
         self.assertIn("falsifier", st.MODULE_NOTE)
 
     def test_module_note_discloses_sector_rs(self):
-        # The note must disclose the new v1.2.0 sector-RS factor as provisional.
+        # The note must disclose the v1.2.0 sector-RS factor as provisional.
         self.assertIn("sector", st.MODULE_NOTE.lower())
+
+    def test_module_note_discloses_trend_short(self):
+        self.assertIn("trend_short", st.MODULE_NOTE)
+
+    def test_module_note_discloses_extension_gate(self):
+        self.assertIn("extension-credit gate", st.MODULE_NOTE)
 
 
 if __name__ == "__main__":

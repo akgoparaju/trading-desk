@@ -7,11 +7,14 @@ report can never silently drift: the numbers a brief cites all originate here, i
 Python, and the version string travels with them into the module JSON and the
 brief footer. The LLM layer narrates; it does no scoring arithmetic.
 
-Scoring is over four CORE dimensions (max 100 total) PLUS an OPTIONAL fifth factor
-(v1.2.0). TOP-LEVEL WEIGHTS of the four cores ARE UNCHANGED from v1.0.0 (Trend 30 /
-Momentum 25 / Structure 25 / Volume 20); rubric v1.1.0 (Wave 4A, R5/B28) enriches
-the SUB-splits and adds a regime GUARD; rubric v1.2.0 (Track O4) adds the sector-RS
-factor -- neither re-weights the four cores:
+Scoring is over four CORE dimensions (max 100 total) PLUS two OPTIONAL additional
+factors (v1.2.0 sector-RS, v1.3.0 trend_short). TOP-LEVEL WEIGHTS of the four cores
+ARE UNCHANGED from v1.0.0 (Trend 30 / Momentum 25 / Structure 25 / Volume 20);
+rubric v1.1.0 (Wave 4A, R5/B28) enriches the SUB-splits and adds a regime GUARD;
+rubric v1.2.0 (Track O4) adds the sector-RS factor; rubric v1.3.0 (QC20, Phase-2)
+adds the trend_short factor AND an event-break extension-credit gate on the
+existing Volume factor (no new points there, a CAP) -- none re-weight the four
+cores:
     1. Trend structure    (30)  -- price/MA stack + MA slopes
     2. Momentum           (25)  -- RSI band (+ optional divergence adj) + MACD
                                    state, REGIME-CONDITIONED by adx14 + stage
@@ -33,8 +36,25 @@ factor -- neither re-weights the four cores:
                                    are unchanged, only scaled; A/D + upvol add
                                    accumulation/distribution quality. Null sub-
                                    components renormalize WITHIN the factor (the
-                                   factor is NOT zeroed).
-    5. Sector-relative RS (_RS_MAX, v1.2.0, PROVISIONAL) -- blend of
+                                   factor is NOT zeroed). v1.3.0 (QC20c, PROVISIONAL):
+                                   the extension sub-component is CAPPED at its
+                                   pre-break value when technicals.extension_gate
+                                   (built by build_snapshot -- see its module
+                                   docstring) reports an armed qualifying break in
+                                   the trailing 10 sessions AND the cap actually
+                                   binds; disclosed inline. No new points; a
+                                   credit-withholding cap, never a penalty below
+                                   today's own reading.
+    5. trend_short (_TS_MAX, v1.3.0, PROVISIONAL, QC20a) -- last-vs-ma10/ma21 (+3/+3)
+                                   and ma10/ma21 5-day slope sign (+2/+2). A NEW
+                                   scored factor following the exact rel_strength_
+                                   sector precedent: present sub-components
+                                   renormalize within the factor (v1.1.0 pattern);
+                                   when ALL FOUR inputs are absent the factor drops
+                                   out of the considered-dimension set entirely
+                                   (graceful identity, v1.2.0 pattern). Cleared by
+                                   the 2026-08-09 offline falsifier sweep.
+    6. Sector-relative RS (_RS_MAX, v1.2.0, PROVISIONAL) -- blend of
                                    rel_sector_ret_3m/6m (stock minus its GICS-sector
                                    SPDR ETF, minted by build_snapshot). A NEW scored
                                    factor: when the benchmark carries the rel_sector
@@ -92,19 +112,26 @@ if _REPO_ROOT not in sys.path:
 from scripts import build_snapshot, chain, confidence, levels
 from scripts._artifact import emit_json
 
-RUBRIC_VERSION = "1.2.0"
+RUBRIC_VERSION = "1.3.0"
 SKILL_NAME = "technical-analysis"
 
-# Module note stamped on every doc: rubric v1.2.0 is PROVISIONAL. The v1.1.0
+# Module note stamped on every doc: rubric v1.3.0 is PROVISIONAL. The v1.1.0
 # provisional pieces (regime guard adx/stage + A/D + upvol volume-quality bands)
-# remain; v1.2.0 (Track O4) ADDS a PROVISIONAL sector-relative RS factor
-# (score_rel_strength) whose bands are unratified pending B9 calibration. A
-# falsifier is pre-registered (this note + the SKILL): if the B9 calibration set
-# shows the sector-RS points do not separate forward winners from losers (or
-# invert), the bands are wrong -- revise or retract the factor.
-MODULE_NOTE = ("technical-v1.2.0 PROVISIONAL -- regime guard + volume-quality "
-               "bands AND the new sector-relative RS factor unratified pending "
-               "B9; falsifier pre-registered")
+# and v1.2.0's sector-relative RS factor (score_rel_strength, bands unratified
+# pending B9 calibration) remain. v1.3.0 (QC20a + QC20c, Phase-2) adds TWO more
+# PROVISIONAL mechanisms, both cleared to ship by the 2026-08-09 offline
+# falsifier sweep against a 22-ticker survey: a trend_short 10/21-day factor
+# (F20a-A redundancy |rho|=0.184 vs a >=0.85 kill; F20a-C slope dead-band 18.2%
+# vs a >25% kill -- both pass) and an event-break extension-credit gate on the
+# volume_extension factor (F20c-A armed-rate 4.99% vs a >15% kill; F20c-B
+# binding-rate 30.2% vs a <10% kill -- both pass). Falsifiers pre-registered
+# (this note + the SKILL); if a later calibration set reverses either result,
+# revise or retract the mechanism.
+MODULE_NOTE = ("technical-v1.3.0 PROVISIONAL -- regime guard + volume-quality "
+               "bands + sector-relative RS (bands unratified pending B9) AND "
+               "two Phase-2 additions cleared by the 2026-08-09 offline "
+               "falsifier sweep: a trend_short 10/21-day factor and an "
+               "event-break extension-credit gate; falsifiers pre-registered")
 
 # The snapshot fields this rubric SCORES on (earns points from). price.last and
 # the ladder are shared reference infrastructure and are intentionally NOT listed
@@ -129,6 +156,11 @@ INPUT_FIELDS = {
     "technicals.upvol_ratio",
     "benchmark.rel_sector_ret_3m",
     "benchmark.rel_sector_ret_6m",
+    # v1.3.0 (QC20a): the trend_short 10/21-day scored inputs.
+    "technicals.ma10",
+    "technicals.ma21",
+    "technicals.ma10_slope_5d",
+    "technicals.ma21_slope_5d",
 }
 
 # Fields that only MODULATE (guard/cap) a scoring branch -- they earn NO points
@@ -136,10 +168,13 @@ INPUT_FIELDS = {
 # ``adx14`` (choppy-regime MACD discount) and ``stage`` (stage-4 RSI cap). A
 # governance test (test_single_mapping) asserts GUARD_FIELDS is DISJOINT from
 # INPUT_FIELDS (a field is either scored xor a pure guard, never both here). This
-# mirrors the sentiment scorer's ``GUARD_FIELDS = {"technicals.rsi14"}``.
+# mirrors the sentiment scorer's ``GUARD_FIELDS = {"technicals.rsi14"}``. v1.3.0
+# (QC20c) adds ``technicals.extension_gate``: it CAPS the existing extension
+# sub-component of score_volume, earning no points of its own.
 GUARD_FIELDS = {
     "technicals.adx14",
     "technicals.stage",
+    "technicals.extension_gate",
 }
 
 # Regime-guard thresholds (v1.1.0, PROVISIONAL -- documented Philosophy-A
@@ -503,13 +538,29 @@ _AD_MAX = 3.0          # new: accumulation/distribution from A/D-line slope
 _UPVOL_MAX = 2.0       # new: up-day volume share
 
 
+def _extension_component(px, ma200):
+    """The extension sub-component (max ``_EXT_MAX``) for one price/ma200 pair.
+    Shared by today's reading and (QC20c) the pre-break reference reading, so
+    the two can never drift apart into two implementations of one formula."""
+    ext = px / ma200 - 1
+    penalty = max(0.0, (ext - 0.12) * 100)
+    return _clean(max(0.0, _EXT_MAX - penalty * (_EXT_MAX / 12.0))), ext
+
+
 def score_volume(last, tech) -> dict:
     """v1.1.0 re-split (extension 10 + vol-regime 5 + A/D 3 + upvol 2 = 20), minus a
     vertical-rally penalty.
 
     - Extension (10): ext = last/ma200 - 1; penalty = max(0, (ext-0.12)*100) points
       (1 pt / 1% above 12%, v1.0.0 shape); component = max(0, 10 - penalty*10/12)
-      (the v1.0.0 0-12 band scaled to 0-10).
+      (the v1.0.0 0-12 band scaled to 0-10). v1.3.0 (QC20c, PROVISIONAL): when
+      ``technicals.extension_gate`` (built by build_snapshot.build_extension_gate)
+      reports an armed qualifying break in the trailing 10 sessions, the
+      component is CAPPED at what it scored the session before the EARLIEST such
+      break -- ``extension_pts := min(today, pre-break)`` -- credit withholding,
+      never a fresh penalty below today's own reading. The cap is disclosed
+      inline ONLY when it actually binds (pre-break < today); an armed-but-
+      inert gate (e.g. today's reading was already floored at 0) stays silent.
     - Vol-regime (5): 0.8<=vol<=1.5 -> 5; >1.5 -> 3.125; <0.8 -> 2.5 (the v1.0.0
       8/5/4 bands scaled by 5/8, same ordering/shape).
     - A/D-line (3): ad_line_slope > 0 -> 3 (accumulation); == 0 (flat) -> 2;
@@ -525,23 +576,43 @@ def score_volume(last, tech) -> dict:
     ret15 = tech.get("ret_15d")
     ad_slope = tech.get("ad_line_slope")
     upvol = tech.get("upvol_ratio")
+    ext_gate = tech.get("extension_gate") or {}
 
     parts = []
     evaluable = 0
     present_pts = 0.0   # points earned over PRESENT sub-components
     present_max = 0.0   # summed max over PRESENT sub-components
+    gate_armed = bool(ext_gate.get("armed"))
+    gate_capped = False
 
     # -- extension (max 10) ------------------------------------------------
     if last is not None and ma200 not in (None, 0):
         evaluable += 1
-        ext = last / ma200 - 1
-        penalty = max(0.0, (ext - 0.12) * 100)
-        extension_pts = _clean(max(0.0, _EXT_MAX - penalty * (_EXT_MAX / 12.0)))
+        extension_pts, ext = _extension_component(last, ma200)
+        # QC20(c): cap at the pre-break (reference) reading when the gate is
+        # armed AND the reference is actually computable AND the cap binds.
+        cap_note = ""
+        if gate_armed:
+            ref_close = ext_gate.get("reference_close")
+            ref_ma200 = ext_gate.get("reference_ma200")
+            if ref_close is not None and ref_ma200 not in (None, 0):
+                ref_pts, _ = _extension_component(ref_close, ref_ma200)
+                if ref_pts < extension_pts:
+                    extension_pts = ref_pts
+                    gate_capped = True
+                    breaks = ext_gate.get("qualifying_breaks") or []
+                    earliest = breaks[0] if breaks else {}
+                    z = earliest.get("z")
+                    z_txt = f"{z:.2f}" if isinstance(z, (int, float)) else "n/a"
+                    cap_note = (
+                        f"; extension credit capped at the pre-break value "
+                        f"(break {ext_gate.get('earliest_break_date')}, "
+                        f"z={z_txt})")
         present_pts += extension_pts
         present_max += _EXT_MAX
         parts.append(
             f"ext {ext*100:.1f}% (last/ma200 {_fmt(last / ma200)}) "
-            f"-> {_fmt(extension_pts)}/{_fmt(_EXT_MAX)}")
+            f"-> {_fmt(extension_pts)}/{_fmt(_EXT_MAX)}{cap_note}")
     else:
         extension_pts = None
         parts.append("extension: n/a")
@@ -626,13 +697,138 @@ def score_volume(last, tech) -> dict:
                    "vertical_rally_penalty": vertical_penalty,
                    "renormalized": renorm,
                    "ma200": ma200, "vol_20d_vs_90d": vol, "ret_15d": ret15,
-                   "ad_line_slope": ad_slope, "upvol_ratio": upvol},
+                   "ad_line_slope": ad_slope, "upvol_ratio": upvol,
+                   "extension_gate_armed": gate_armed,      # QC20(c)
+                   "extension_gate_capped": gate_capped},   # QC20(c)
         "evaluable": evaluable > 0,
     }
 
 
 # --------------------------------------------------------------------------- #
-# 5. Sector-relative relative strength (max _RS_MAX) -- v1.2.0 (Track O4)
+# 5. trend_short -- a 10/21-day factor (max _TS_MAX) -- v1.3.0 (QC20a)
+# --------------------------------------------------------------------------- #
+
+# QC20(a): AAPL scored trend_structure 30/30 one week after a -7.35% guidance
+# break while sitting BELOW its 10/21-day MAs with both short slopes declining
+# -- no 10/21-day construct existed anywhere in the rubric. This factor closes
+# that gap. It is a NEW scored factor following the exact precedent of v1.2.0's
+# rel_strength_sector: the denominator grows when it is evaluable; when it is
+# genuinely absent (no ma10/ma21/slope inputs at all) it drops out of the
+# considered-dimension renormalization entirely (graceful identity). PROVISIONAL
+# -- the 3/3/2/2 point split and the 5-session slope window are documented
+# guesses (only their ORDERING -- level over slope -- is argued); cleared to
+# ship by the 2026-08-09 offline falsifier sweep (F20a-A |rho|=0.184 vs a >=0.85
+# kill; F20a-C 18.2% vs a >25% kill -- see the module note). A slope dead-band
+# was PRE-REGISTERED but NOT triggered (F20a-C passed) and is deliberately NOT
+# implemented here.
+_TS_MAX = 10.0
+_TS_LAST_MA10 = 3.0
+_TS_LAST_MA21 = 3.0
+_TS_MA10_SLOPE = 2.0
+_TS_MA21_SLOPE = 2.0
+
+
+def score_trend_short(last, tech) -> dict:
+    """10/21-day short-horizon factor (max ``_TS_MAX``), PROVISIONAL (QC20a).
+
+    Four independent sub-comparisons, 3/3/2/2:
+      last > ma10          -> +3     last > ma21          -> +3
+      ma10_slope_5d > 0     -> +2     ma21_slope_5d > 0    -> +2
+    A null sub-component (either operand missing) is EXCLUDED and the factor is
+    renormalized over the present sub-maxes back to ``_TS_MAX`` (the v1.1.0
+    volume-factor pattern -- the factor is not zeroed by one missing leg). When
+    ALL FOUR sub-components are unevaluable the factor itself is not evaluable
+    and drops out of the considered-dimension set entirely (the v1.2.0
+    rel_strength_sector pattern).
+    """
+    ma10 = tech.get("ma10")
+    ma21 = tech.get("ma21")
+    s10 = tech.get("ma10_slope_5d")
+    s21 = tech.get("ma21_slope_5d")
+
+    parts = []
+    present_pts = 0.0
+    present_max = 0.0
+    evaluable = 0
+
+    if last is not None and ma10 is not None:
+        evaluable += 1
+        present_max += _TS_LAST_MA10
+        if last > ma10:
+            present_pts += _TS_LAST_MA10
+            parts.append(f"last {_fmt(last)} > ma10 {_fmt(ma10)}: +{_fmt(_TS_LAST_MA10)}")
+        else:
+            parts.append(f"last {_fmt(last)} <= ma10 {_fmt(ma10)}: +0")
+    else:
+        parts.append("last>ma10: n/a (+0)")
+
+    if last is not None and ma21 is not None:
+        evaluable += 1
+        present_max += _TS_LAST_MA21
+        if last > ma21:
+            present_pts += _TS_LAST_MA21
+            parts.append(f"last {_fmt(last)} > ma21 {_fmt(ma21)}: +{_fmt(_TS_LAST_MA21)}")
+        else:
+            parts.append(f"last {_fmt(last)} <= ma21 {_fmt(ma21)}: +0")
+    else:
+        parts.append("last>ma21: n/a (+0)")
+
+    if s10 is not None:
+        evaluable += 1
+        present_max += _TS_MA10_SLOPE
+        if s10 > 0:
+            present_pts += _TS_MA10_SLOPE
+            parts.append(f"ma10_slope_5d {_fmt(s10)} > 0: +{_fmt(_TS_MA10_SLOPE)}")
+        else:
+            parts.append(f"ma10_slope_5d {_fmt(s10)} <= 0: +0")
+    else:
+        parts.append("ma10_slope_5d: n/a (+0)")
+
+    if s21 is not None:
+        evaluable += 1
+        present_max += _TS_MA21_SLOPE
+        if s21 > 0:
+            present_pts += _TS_MA21_SLOPE
+            parts.append(f"ma21_slope_5d {_fmt(s21)} > 0: +{_fmt(_TS_MA21_SLOPE)}")
+        else:
+            parts.append(f"ma21_slope_5d {_fmt(s21)} <= 0: +0")
+    else:
+        parts.append("ma21_slope_5d: n/a (+0)")
+
+    inputs = {"ma10": ma10, "ma21": ma21, "ma10_slope_5d": s10,
+              "ma21_slope_5d": s21, "last": last}
+
+    if evaluable == 0:
+        return {
+            "name": "trend_short",
+            "points": None,
+            "max": _TS_MAX,
+            "arithmetic": ("trend_short: n/a (no ma10/ma21/slopes) "
+                           "[PROVISIONAL v1.3.0]"),
+            "inputs": inputs,
+            "evaluable": False,
+        }
+
+    if present_max == _TS_MAX:
+        total = _clean(present_pts)
+    else:
+        total = _clean(present_pts / present_max * _TS_MAX)
+        parts.append(
+            f"renormalized over present max {_fmt(present_max)} -> "
+            f"{_fmt(total)}/{_fmt(_TS_MAX)}")
+
+    return {
+        "name": "trend_short",
+        "points": total,
+        "max": _TS_MAX,
+        "arithmetic": "; ".join(parts) + " [PROVISIONAL v1.3.0]",
+        "inputs": inputs,
+        "evaluable": True,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 6. Sector-relative relative strength (max _RS_MAX) -- v1.2.0 (Track O4)
 # --------------------------------------------------------------------------- #
 
 # The sector-RS factor's full mark. It is a NEW scored factor (not a re-split of an
@@ -778,6 +974,7 @@ def score(last, tech, ladder, divergence, justification, benchmark=None) -> dict
         score_momentum(tech, divergence, justification),
         score_structure(ladder, last),
         score_volume(last, tech),
+        score_trend_short(last, tech),
         score_rel_strength(benchmark),
     ]
 
