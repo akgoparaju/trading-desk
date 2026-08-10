@@ -40,7 +40,7 @@ if _REPO_ROOT not in sys.path:
 
 from scripts import chain, indicators
 
-SCHEMA_VERSION = "0.5.0"
+SCHEMA_VERSION = "0.6.0"
 
 # Files that MUST be present; their absence aborts the build.
 REQUIRED = ("global_quote", "overview", "daily_adjusted", "spy_daily_adjusted")
@@ -971,6 +971,16 @@ def build_technicals(rows, series_source=None, next_earnings_date=None,
     ma200_slope = indicators.ma_slope(adj, 200, 20)
     last_px = adj[-1] if adj else None
 
+    # Field 2 (Phase-2 disclosure): shorter-horizon MA pair, SAME house
+    # convention as ma50/ma200 above (SMA on adjusted close; slope =
+    # sma_series[-1]/sma_series[-1-lookback]-1, indicators.ma_slope) -- just a
+    # 10/21-day window with a 5-day slope lookback. Pure disclosure, wired
+    # into no scorer.
+    ma10 = indicators.sma(adj, 10)
+    ma21 = indicators.sma(adj, 21)
+    ma10_slope = indicators.ma_slope(adj, 10, 5)
+    ma21_slope = indicators.ma_slope(adj, 21, 5)
+
     # Weinstein regime stage (guard field; pure OHLCV, null-safe).
     stage = _weinstein_stage(last_px, ma50, ma200, ma50_slope, ma200_slope)
 
@@ -1010,6 +1020,10 @@ def build_technicals(rows, series_source=None, next_earnings_date=None,
         "ma200": ma200,
         "ma50_slope_20d": ma50_slope,
         "ma200_slope_20d": ma200_slope,
+        "ma10": ma10,                        # Field 2: short-horizon MA pair
+        "ma21": ma21,
+        "ma10_slope_5d": ma10_slope,
+        "ma21_slope_5d": ma21_slope,
         "adx14": adx14,                      # Wave 4A: Wilder ADX(14) trend strength
         "stage": stage,                      # Wave 4A: Weinstein regime 1/2/3/4
         "rsi14": indicators.rsi(adj, 14),
@@ -1285,6 +1299,81 @@ def _time_weighted_ntm_eps(fy_rows, as_of_date):
     return eps_ntm, coverage, detail, fy_weights
 
 
+def _build_revisions_ntm(fy, as_of_date, eps_ntm_now, fy_weights):
+    """fundamentals.revisions_ntm (Field 3, Phase-2 disclosure).
+
+    revisions_90d is keyed to fy[0] -- the NEAREST future fiscal year -- which
+    is frequently a small slice of the NTM window (AAPL w=0.148, MU w=0.063 in
+    the calibration bundles): its 90-day revision says little about the
+    consensus that actually matters for a forward-365-day view. This applies
+    the SAME NTM-window-overlap weights the eps_ntm_consensus blend used
+    (``fy_weights``, ``_time_weighted_ntm_eps``) to the 90-days-ago column too,
+    and reports a LEVEL-BLEND pct: blend both the now and 90d-ago EPS series
+    with the identical weights, THEN take the ratio of the two blended sums
+    (eps_ntm_now / eps_ntm_90d - 1) -- not a weight-blend of each FY's own pct
+    change (a "rate-weighted" alternative that reads slightly differently on
+    AAPL: -0.005590 vs this method's -0.005713; the level-blend is what the
+    field's spec formula literally computes and is what is implemented here).
+    up_30d/down_30d are read from the HIGHEST-WEIGHT FY record (the record
+    that actually dominates the blend) rather than fy[0], so both revision
+    legs describe the SAME fiscal-year object as eps_ntm_now/eps_ntm_90d.
+
+    ``eps_ntm_now``/``fy_weights`` are the values ``_time_weighted_ntm_eps``
+    already produced for eps_ntm_consensus (passed in, not re-derived, so the
+    two are always bit-identical). Returns None if ``fy``/``as_of_date`` can't
+    support a blend (mirrors ``_time_weighted_ntm_eps``'s own None case --
+    the caller only invokes this once that blend already succeeded).
+    """
+    window_start = as_of_date
+    window_end = as_of_date + timedelta(days=365)
+    # Re-walk the SAME inclusion filter _time_weighted_ntm_eps used (a
+    # parseable date AND a parseable eps_estimate_average) so this list lines
+    # up 1:1 with fy_weights/eps_ntm_now -- same rows, same weights, same order.
+    rows_and_weights = []
+    for row in fy:
+        d = _parse_date(row.get("date"))
+        v_now = num(row.get("eps_estimate_average"))
+        if d is None or v_now is None:
+            continue
+        weight = _fy_overlap_weight(d, window_start, window_end)
+        rows_and_weights.append((row, weight))
+    if len(rows_and_weights) < 2:
+        return None
+
+    v90_vals = [num(row.get("eps_estimate_average_90_days_ago"))
+               for row, _ in rows_and_weights]
+    eps_ntm_90d = None
+    if all(v is not None for v in v90_vals):
+        eps_ntm_90d = sum(v * w for v, (_, w) in zip(v90_vals, rows_and_weights))
+    pct = (eps_ntm_now / eps_ntm_90d - 1) if eps_ntm_90d else None
+
+    top_row, top_weight = max(rows_and_weights, key=lambda t: t[1])
+    up_30d = num(top_row.get("eps_estimate_revision_up_trailing_30_days"))
+    down_30d = num(top_row.get("eps_estimate_revision_down_trailing_30_days"))
+
+    basis = (
+        f"level-blend across {len(rows_and_weights)} future fiscal-year "
+        f"records using the SAME NTM-window-overlap weights as "
+        f"eps_ntm_consensus: eps_ntm_now = sum(w_i * eps_estimate_average_i), "
+        f"eps_ntm_90d = sum(w_i * eps_estimate_average_90_days_ago_i), "
+        f"pct = eps_ntm_now / eps_ntm_90d - 1; up_30d/down_30d are read from "
+        f"the HIGHEST-WEIGHT FY record (FY ending {top_row.get('date')}, "
+        f"weight={top_weight:.6f}) so both revision legs describe the same "
+        f"fiscal-year object -- unlike revisions_90d, which is pinned to the "
+        f"nearest future FY regardless of its weight in the NTM blend."
+    )
+
+    return {
+        "eps_ntm_now": eps_ntm_now,
+        "eps_ntm_90d": eps_ntm_90d,
+        "pct": pct,
+        "up_30d": up_30d,
+        "down_30d": down_30d,
+        "fy_weights": fy_weights,
+        "basis": basis,
+    }
+
+
 def _current_and_next_fy(fy_rows, as_of_date):
     """Return (current_row, next_row) from ascending future-FY ``fy_rows``.
 
@@ -1359,6 +1448,126 @@ def _eps_share_reconciliation(inc_q, earn_q, bal_q):
             "divergence_pct": (implied - shares) / shares,
         })
     return out
+
+
+# Field 4 (Phase-2 disclosure) cycle-economics window: 12 fiscal years is a
+# deliberate judgment call -- long enough to span at least one full
+# semiconductor-style capex/inventory cycle without diluting to noise on a
+# newly-listed name; documented, not calibrated. Below 8 years there isn't
+# enough of a cycle to call the average meaningful, so the whole block is null.
+_CYCLE_ECONOMICS_WINDOW_FY = 12
+_CYCLE_ECONOMICS_MIN_FY = 8
+
+
+def _build_cycle_economics(inc_annual, cf_annual, bal_annual, fcf_ttm, rev_ttm,
+                           window_fy=_CYCLE_ECONOMICS_WINDOW_FY,
+                           min_fy=_CYCLE_ECONOMICS_MIN_FY):
+    """fundamentals.cycle_economics (Field 4, Phase-2 disclosure).
+
+    A name's TTM FCF margin can sit far from its own multi-year (cyclical)
+    average -- e.g. a semiconductor name deep in a capex/inventory trough
+    (TTM margin << cycle average) or at a cyclical peak (TTM margin >> cycle
+    average). cum_fcf/cum_revenue are CUMULATED (dollar sum over dollar sum
+    across the whole window, NOT an average of yearly margins) over the most
+    recent ``window_fy`` fiscal years (newest-first annualReports, capped at
+    however many are actually available); fcf_margin_cycle = cum_fcf /
+    cum_revenue. fcf_margin_ttm REUSES the already-computed quarterly-TTM
+    fcf_ttm / rev_ttm (no re-derivation -- an unrelated, shorter-horizon
+    computation); cycle_gap_ratio = fcf_margin_ttm / fcf_margin_cycle (>1 =>
+    running hot relative to the cycle; <1 => running cold). mean_roe_cycle is
+    the simple average of netIncome / totalShareholderEquity across whichever
+    fiscal years in the window have BOTH values, joined by fiscalDateEnding
+    (income and cash-flow rows are matched the same way -- never assumed to
+    share index alignment, even though AV's own multi-statement exports do in
+    practice).
+
+    Pure disclosure: wired into no scorer.
+
+    Null (the ENTIRE block) when fewer than ``min_fy`` fiscal years of BOTH
+    income and cash-flow annualReports are available -- there is no partial
+    degradation of window_fy below that floor. Once past the floor, any
+    individual dollar field that has NOTHING to sum (every contributing row
+    missing that field) degrades honestly to None rather than a misleading 0;
+    mean_roe_cycle similarly averages only the years with both netIncome and
+    a same-year equity figure, and is None if there are zero such years.
+    """
+    inc_annual = inc_annual if isinstance(inc_annual, list) else []
+    cf_annual = cf_annual if isinstance(cf_annual, list) else []
+    bal_annual = bal_annual if isinstance(bal_annual, list) else []
+
+    n_avail = min(len(inc_annual), len(cf_annual))
+    if n_avail < min_fy:
+        return None
+    n = min(n_avail, window_fy)
+    window = inc_annual[:n]
+
+    cf_by_date = {r.get("fiscalDateEnding"): r
+                 for r in cf_annual if isinstance(r, dict) and r.get("fiscalDateEnding")}
+    eq_by_date = {r.get("fiscalDateEnding"): num(r.get("totalShareholderEquity"))
+                 for r in bal_annual if isinstance(r, dict) and r.get("fiscalDateEnding")}
+
+    cum_fcf = 0.0
+    cum_revenue = 0.0
+    have_fcf = have_rev = False
+    roes = []
+    fy_end = window[0].get("fiscalDateEnding") if window else None
+    fy_start = window[-1].get("fiscalDateEnding") if window else None
+    for row in window:
+        if not isinstance(row, dict):
+            continue
+        d = row.get("fiscalDateEnding")
+
+        rev = num(row.get("totalRevenue"))
+        if rev is not None:
+            cum_revenue += rev
+            have_rev = True
+
+        cf_row = cf_by_date.get(d) if d else None
+        if isinstance(cf_row, dict):
+            ocf = num(cf_row.get("operatingCashflow"))
+            capex = num(cf_row.get("capitalExpenditures"))
+            if ocf is not None and capex is not None:
+                cum_fcf += (ocf - capex)
+                have_fcf = True
+
+        ni = num(row.get("netIncome"))
+        eq = eq_by_date.get(d) if d else None
+        if ni is not None and eq:
+            roes.append(ni / eq)
+
+    fcf_margin_cycle = (cum_fcf / cum_revenue
+                        if (have_rev and cum_revenue and have_fcf) else None)
+    fcf_margin_ttm = (fcf_ttm / rev_ttm) if (fcf_ttm is not None and rev_ttm) else None
+    cycle_gap_ratio = (fcf_margin_ttm / fcf_margin_cycle
+                       if (fcf_margin_ttm is not None and fcf_margin_cycle) else None)
+    mean_roe_cycle = (sum(roes) / len(roes)) if roes else None
+
+    basis = (
+        f"{n}-year (FY{fy_start} .. FY{fy_end}) cumulative FCF "
+        f"(operatingCashflow - capitalExpenditures, cash_flow.json "
+        f"annualReports) over cumulative totalRevenue (income_statement.json "
+        f"annualReports) -- a dollar-sum-over-dollar-sum margin, not an "
+        f"average of yearly margins (window_fy={window_fy}, capped at "
+        f"{n_avail} years available; null under {min_fy}). fcf_margin_ttm "
+        f"reuses the already-computed quarterly-TTM fcf_ttm/rev_ttm "
+        f"(unrelated, shorter-horizon computation -- not derived from this "
+        f"window). cycle_gap_ratio = fcf_margin_ttm / fcf_margin_cycle (>1 "
+        f"running hot vs. the cycle, <1 running cold). mean_roe_cycle = "
+        f"netIncome / totalShareholderEquity (balance_sheet.json "
+        f"annualReports, SAME fiscal year, joined by fiscalDateEnding), "
+        f"averaged over {len(roes)} of {n} years with both values present."
+    )
+
+    return {
+        "window_fy": n,
+        "cum_fcf": cum_fcf if have_fcf else None,
+        "cum_revenue": cum_revenue if have_rev else None,
+        "fcf_margin_cycle": fcf_margin_cycle,
+        "fcf_margin_ttm": fcf_margin_ttm,
+        "cycle_gap_ratio": cycle_gap_ratio,
+        "mean_roe_cycle": mean_roe_cycle,
+        "basis": basis,
+    }
 
 
 def build_fundamentals(income, balance, cashflow, earnings, estimates,
@@ -1437,6 +1646,10 @@ def build_fundamentals(income, balance, cashflow, earnings, estimates,
     # (nothing to disclose an alternative for), and the single-FY degraded
     # proxy already discloses its own degradation via eps_ntm_basis.
     eps_ntm_alternatives = None
+    # Field 3 (Phase-2 disclosure): populated on the SAME condition as
+    # eps_ntm_alternatives -- only the blend path has >=2 future FY rows to
+    # apply NTM-window weights to a 90-days-ago column.
+    revisions_ntm = None
     if len(fq) >= 4:
         vals = [num(r.get("eps_estimate_average")) for r in fq[:4]]
         vals = [v for v in vals if v is not None]
@@ -1497,6 +1710,11 @@ def build_fundamentals(income, balance, cashflow, earnings, estimates,
                 "vendor_forward_pe_implied_eps": vendor_fwd_pe_implied_eps,
                 "fy_weights": fy_weights,
             }
+
+            # Field 3: apply the SAME fy_weights to the 90-days-ago column
+            # (level-blend), keyed to the highest-weight FY for up/down.
+            revisions_ntm = _build_revisions_ntm(fy, as_of_parsed, eps_ntm,
+                                                 fy_weights)
     if eps_ntm is None and fy:
         v = num(fy[0].get("eps_estimate_average"))
         if v is not None:
@@ -1598,6 +1816,16 @@ def build_fundamentals(income, balance, cashflow, earnings, estimates,
     net_cash = _build_net_cash(bal_q[0]) if bal_q else None
     roe = num(overview.get("ReturnOnEquityTTM")) if isinstance(overview, dict) else None
 
+    # Field 4 (Phase-2 disclosure): 12yr cumulative FCF-margin vs TTM-margin
+    # gap, from annualReports (independent of the quarterly TTM machinery
+    # above except for reusing its already-computed fcf_ttm/rev_ttm).
+    cycle_economics = _build_cycle_economics(
+        _quarterly(income, "annualReports"),
+        _quarterly(cashflow, "annualReports"),
+        _quarterly(balance, "annualReports"),
+        fcf_ttm, rev_ttm,
+    )
+
     return {
         "rev_ttm": rev_ttm,
         "rev_growth_latest_q": rev_growth,
@@ -1617,11 +1845,13 @@ def build_fundamentals(income, balance, cashflow, earnings, estimates,
         "eps_ntm_alternatives": eps_ntm_alternatives,  # QC1-REGRESSION: blend inputs + alternative, never silent
         "revisions_90d": revisions,
         "revisions_null_reason": revisions_null_reason,  # QF5: null when revisions populated
+        "revisions_ntm": revisions_ntm,          # Field 3: NTM-weighted revisions view
         "next_fy_consensus": next_fy,
         "next_fy_basis": next_fy_basis,         # QC1: current/next FY-end disclosure
         "fcf_ttm": fcf_ttm,
         "net_cash_defined": net_cash,
         "roe": roe,
+        "cycle_economics": cycle_economics,     # Field 4: cyclical FCF-margin gap
     }
 
 
@@ -2855,7 +3085,7 @@ def build_earnings_move_history(earn_q, rows):
 
 
 def build_events(earnings_calendar, overview, as_of_date, earn_q=None,
-                 rows=None, implied_move=None):
+                 rows=None, implied_move=None, event_implied_move=None):
     """Events block: next earnings + dividends + event-aware disclosure fields.
 
     A1 additions (all deterministic, additive, null-safe):
@@ -2865,6 +3095,22 @@ def build_events(earnings_calendar, overview, as_of_date, earn_q=None,
       - earnings_move_history: up to 8 own-history reaction moves.
       - implied_move_vs_own_history_pctile: percentile rank of implied_move
         within the ABS move-history values.
+
+    Field 1 (Phase-2 disclosure) additions -- PURE DISCLOSURE, wired into no
+    scorer:
+      - event_implied_move: options.event_vol.event_implied_move, copied here
+        (passed in by the caller; no re-computation, no double chain call).
+        Unlike implied_move (the 1-sigma move of the first expiry ON/AFTER
+        the earnings date -- a multi-week horizon), this is the ISOLATED
+        earnings-day variance extracted via variance additivity between the
+        bracketing pre/post expiries (chain.event_implied_vol) -- the
+        dimensionally correct counterpart to earnings_move_history's
+        one-day reactions. implied_move and its own percentile are RETAINED
+        VERBATIM alongside it -- never a silent method swap; both bases
+        stay visible side by side.
+      - event_implied_move_vs_own_history_pctile: percentile rank of
+        event_implied_move within the SAME abs move-history values, using the
+        identical inline formula as implied_move_vs_own_history_pctile.
     Catalysts remain an LLM slot.
     """
     ne = _parse_earnings_calendar(earnings_calendar)
@@ -2893,12 +3139,24 @@ def build_events(earnings_calendar, overview, as_of_date, earn_q=None,
             at_or_below = sum(1 for a in abs_moves if a <= implied_move)
             implied_vs_own = 100 * at_or_below / len(abs_moves)
 
+    # Field 1 (Phase-2 disclosure): SAME inline percentile rule, keyed to the
+    # dimensionally-correct event_implied_move instead of implied_move.
+    event_implied_vs_own = None
+    if event_implied_move is not None and move_history:
+        abs_moves = [abs(m["move_pct"]) for m in move_history
+                     if m.get("move_pct") is not None]
+        if abs_moves:
+            at_or_below = sum(1 for a in abs_moves if a <= event_implied_move)
+            event_implied_vs_own = 100 * at_or_below / len(abs_moves)
+
     return {
         "next_earnings": ne,
         "days_to_event": days_to_event,
         "implied_move": implied_move,
         "earnings_move_history": move_history,
         "implied_move_vs_own_history_pctile": implied_vs_own,
+        "event_implied_move": event_implied_move,                          # Field 1
+        "event_implied_move_vs_own_history_pctile": event_implied_vs_own,  # Field 1
         "dividends": dividends,
         "catalysts": [],   # LLM slot
     }
@@ -3102,6 +3360,14 @@ def build_snapshot(bundle, ticker):
                                 next_earnings_date, as_of_date,
                                 ticker=ticker, options=options)
 
+    # Field 1 (Phase-2 disclosure): pull event_implied_move off the already-
+    # computed options.event_vol (no re-call into chain.event_implied_vol).
+    event_implied_move = None
+    if isinstance(options, dict):
+        event_vol = options.get("event_vol")
+        if isinstance(event_vol, dict):
+            event_implied_move = event_vol.get("event_implied_move")
+
     # A1: assemble events AFTER sentiment so events.implied_move reuses the
     # already-computed sentiment.implied_move_next_earnings_pct (no double chain
     # call). All event fields are deterministic + null-safe.
@@ -3109,6 +3375,7 @@ def build_snapshot(bundle, ticker):
         earnings_calendar, overview, as_of_date,
         earn_q=earn_q, rows=rows,
         implied_move=sentiment.get("implied_move_next_earnings_pct"),
+        event_implied_move=event_implied_move,
     )
     macro = build_macro(treasury)
 
