@@ -1296,6 +1296,17 @@ def _draw_exec_options_warnings(doc, docs, y_top):
     text, ``⚠`` prefix) but WITHOUT the full options table -- exec stays a
     2-page sheet. Omitted entirely (returns ``y_top`` unchanged) when there are
     no warnings, so the common case adds nothing to the page.
+
+    D3 (adversarial review): with enough structures/warnings this band used to
+    decrement y with no bounds check, overprinting the footer or walking off
+    the page (measured to y=-107). The exec sheet is a FIXED 2-page document
+    (unlike the Detail PDF's packed dimension pages, which can open a new
+    page), so a bounds violation here cannot be fixed by paginating -- instead
+    each item is measured before it is drawn, and once the next item would
+    cross the footer band the band stops and CAPS-AND-DISCLOSES with a
+    ``(+N more — see Detail PDF)`` line, so nothing overflows and nothing is
+    dropped silently (the Detail PDF's ``_draw_options_section`` always
+    carries the full, uncapped set).
     """
     opt = docs.get("module_options") or {}
     items = _exec_options_warnings(opt)
@@ -1303,13 +1314,26 @@ def _draw_exec_options_warnings(doc, docs, y_top):
         return y_top
     M = doc.MARGIN
     W = doc.CONTENT_W
+    LEADING = 9.4
+    # Keep clear of the footer hairline -- the same clearance the FINDINGS
+    # block and the packed-dimension pages hold (doc.MARGIN + 24).
+    page_bottom = doc.MARGIN + 24
     doc.section_head(M, y_top, "OPTIONS WARNINGS", w=W)
     y = y_top - 12
-    for label, wn in items:
+    for idx, (label, wn) in enumerate(items):
         txt = "⚠ %s: %s" % (label, wn) if label else "⚠ %s" % wn
-        for ln in doc.wrap(txt, doc.FONT, 7.2, W):
+        lines = doc.wrap(txt, doc.FONT, 7.2, W)
+        block_h = len(lines) * LEADING
+        if y - block_h < page_bottom:
+            remaining = len(items) - idx
+            if y - LEADING >= page_bottom:
+                doc.text(M, y, "(+%d more — see Detail PDF)" % remaining,
+                         font=doc.FONT_I, size=7.2, rgb=doc.GRAY_MD)
+                y -= LEADING
+            return y
+        for ln in lines:
             doc.text(M, y, ln, font=doc.FONT, size=7.2, rgb=doc.RED)
-            y -= 9.4
+            y -= LEADING
     return y
 
 

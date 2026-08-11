@@ -274,6 +274,14 @@ class TestBuildReconcile(unittest.TestCase):
         doc = vr.build_reconcile({"subscores": []}, None, _GOOG_LAST)
         self.assertIsNone(doc["disagreement_state"])
 
+    def test_reconcile_version_is_1_1_0(self):
+        # D4 (adversarial review): the artifact gained two keys
+        # (probability_weighted_fv / probability_weighted_fv_vs_price_pct)
+        # since 1.0.0 -- pin the bump.
+        doc = vr.build_reconcile(_fundamental(), None, _GOOG_LAST)
+        self.assertEqual(doc["reconcile_version"], "1.1.0")
+        self.assertEqual(vr.RECONCILE_VERSION, "1.1.0")
+
 
 # --------------------------------------------------------------------------- #
 # QC21: probability_weighted_fv -- the coverage bear/base/bull DCF blend
@@ -345,6 +353,28 @@ class TestProbabilityWeightedFv(unittest.TestCase):
         doc = vr.build_reconcile(_fundamental(), drivers, _MU_LAST)
         self.assertIsNone(doc["probability_weighted_fv"])
         self.assertIsNone(doc["probability_weighted_fv_vs_price_pct"])
+
+    def test_pct_computed_from_rounded_leaf_not_raw_value(self):
+        # D2 (adversarial review): probability_weighted_fv is rounded 2dp for
+        # display, but probability_weighted_fv_vs_price_pct was computed from
+        # the UNROUNDED raw value -- a reader who recomputes the row's own
+        # printed numbers (fv - last) / last got a DIFFERENT answer than the
+        # bundle carries (measured 52.6% self-inconsistency on sub-$10 names).
+        # Trigger: last=1.20, raw FV 0.914999 -> leaf 0.91 -> pct must be
+        # (0.91 - 1.20) / 1.20 = -0.241667 (4dp -0.2417), NOT the
+        # raw-value answer -0.2375.
+        drivers = {
+            "dcf_reverse_inputs": {
+                "probability_weighted_value_per_share": 0.914999,
+            },
+        }
+        doc = vr.build_reconcile(_fundamental(), drivers, 1.20)
+        self.assertEqual(doc["probability_weighted_fv"], 0.91)
+        self.assertAlmostEqual(doc["probability_weighted_fv_vs_price_pct"],
+                               -0.2417, places=4)
+        # Explicitly reject the raw-value (self-inconsistent) answer.
+        self.assertNotAlmostEqual(doc["probability_weighted_fv_vs_price_pct"],
+                                  -0.2375, places=4)
 
 
 # --------------------------------------------------------------------------- #

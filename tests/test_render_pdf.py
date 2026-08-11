@@ -1709,6 +1709,81 @@ class TestExecOptionsWarningsRendered(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# D3 (adversarial review) -- _draw_exec_options_warnings decremented y with no
+# bounds check; adversarial content (many structures, each with several
+# warnings) could overprint the footer or walk off the page entirely (measured
+# to y=-107 in the review). The exec sheet is a FIXED 2-page document (unlike
+# the Detail PDF's packed dimension pages), so the fix cannot open a new page
+# -- it caps the band before it crosses the footer band and discloses the
+# remainder with a "(+N more -- see Detail PDF)" line (the Detail PDF's
+# _draw_options_section always carries the full, uncapped set).
+# --------------------------------------------------------------------------- #
+
+@unittest.skipUnless(_HAS_RL, "reportlab required")
+class TestExecOptionsWarningsOverflow(unittest.TestCase):
+    def _opt_with_many_warnings(self):
+        """4 structures x 4 warnings + 2 global warnings = 18 items (the
+        review's own '4x4+2' trigger), each long enough to wrap across
+        several lines so 18 of them cannot fit a compact exec band."""
+        long_w = ("Extended adversarial warning text engineered to wrap across "
+                  "multiple measured lines so the compact exec band cannot show "
+                  "every entry without running off the bottom of the page")
+        structures = [
+            {"name": "structure_%d" % i,
+             "warnings": ["%s (structure %d warning %d)" % (long_w, i, j)
+                          for j in range(4)]}
+            for i in range(4)
+        ]
+        warnings_global = ["%s (global warning %d)" % (long_w, k)
+                           for k in range(2)]
+        return {"recommended_structures": structures,
+                "warnings_global": warnings_global}
+
+    def test_band_never_writes_below_the_footer_band(self):
+        opt = self._opt_with_many_warnings()
+        items = rp._exec_options_warnings(opt)
+        self.assertEqual(len(items), 18)  # 4x4 + 2, the review's trigger shape
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "probe.pdf")
+            doc = rp.Doc(path, "MU", "Trade Report", "2026-08-08",
+                        {"qc": "x", "rubrics": "x", "snapshot_date": "2026-08-08"})
+            top = doc.begin_page()
+            page_bottom = doc.MARGIN + 24
+            # A low y_top (deliberately close to the footer) forces overflow
+            # regardless of exact wrap widths -- the adversarial case D3 names.
+            y = rp._draw_exec_options_warnings(
+                doc, {"module_options": opt}, doc.MARGIN + 140)
+            doc.total_pages = 1
+            doc.end_page()
+            doc.save()
+            self.assertGreaterEqual(y, page_bottom)
+            text = _pdf_text(path)
+        # Content is not silently dropped: the first warning still renders...
+        self.assertIn(b"structure 0 warning 0", text)
+        # ...and the reader is told the rest lives in the Detail PDF.
+        self.assertIn(b"more", text)
+        self.assertIn(b"Detail PDF", text)
+
+    def test_no_overflow_disclosure_when_everything_fits(self):
+        # Sanity: the small (real-pipeline-shaped) fixture from
+        # TestExecOptionsWarningsRendered fits comfortably on a full page and
+        # must NOT show a spurious "more" disclosure.
+        opt = {"warnings_global": ["BINARY EVENT within 10 sessions"]}
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "probe.pdf")
+            doc = rp.Doc(path, "MU", "Trade Report", "2026-08-08",
+                        {"qc": "x", "rubrics": "x", "snapshot_date": "2026-08-08"})
+            top = doc.begin_page()
+            rp._draw_exec_options_warnings(doc, {"module_options": opt}, top - 300)
+            doc.total_pages = 1
+            doc.end_page()
+            doc.save()
+            text = _pdf_text(path)
+        self.assertIn(b"BINARY EVENT", text)
+        self.assertNotIn(b"Detail PDF", text)
+
+
+# --------------------------------------------------------------------------- #
 # D7 — profit_take null/repick disclosure reaches the ACTUAL rendered PDF
 # bytes (not just the pure _trade_plan_rows function above). Notes are kept
 # short here so they aren't cut by _trade_plan_table's column-width

@@ -46,7 +46,7 @@ if _REPO_ROOT not in sys.path:
 from scripts._artifact import emit_json
 
 SKILL = "valuation-reconcile"
-RECONCILE_VERSION = "1.0.0"
+RECONCILE_VERSION = "1.1.0"
 
 # The disagreement edge above which the DCF-vs-comps split is UNRESOLVED. This is
 # the SAME 0.25 edge score_fundamental widens on and decision_contract fires
@@ -311,6 +311,15 @@ def build_reconcile(fundamental, scenario_drivers, last):
         citations = scenario_drivers.get("citations")
         prob_weighted_fv = _probability_weighted_fv(dcf_reverse_inputs)
 
+    # D2 (adversarial review): the pct MUST be derived from the same rounded
+    # leaf a reader sees printed, not the raw unrounded value -- otherwise a
+    # reader who recomputes (fv - last) / last from the row's own numbers gets
+    # a different answer than the bundle carries (measured 52.6% self-
+    # inconsistency on sub-$10 names, where 2dp rounding is a large relative
+    # move).
+    prob_weighted_fv_rounded = (round(prob_weighted_fv, 2)
+                                if prob_weighted_fv is not None else None)
+
     return {
         "skill": SKILL,
         "reconcile_version": RECONCILE_VERSION,
@@ -320,9 +329,9 @@ def build_reconcile(fundamental, scenario_drivers, last):
         "reverse_dcf": reverse,
         "scenarios": scenarios,
         "citations": citations,
-        "probability_weighted_fv": (round(prob_weighted_fv, 2)
-                                    if prob_weighted_fv is not None else None),
-        "probability_weighted_fv_vs_price_pct": _fv_vs_price_pct(prob_weighted_fv, last),
+        "probability_weighted_fv": prob_weighted_fv_rounded,
+        "probability_weighted_fv_vs_price_pct": _fv_vs_price_pct(
+            prob_weighted_fv_rounded, last),
     }
 
 

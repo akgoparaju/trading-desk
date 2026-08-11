@@ -624,9 +624,14 @@ def build_street_confrontation(snapshot, contract, reconcile):
     one scripted line -- street consensus PT, coverage's probability-weighted
     DCF fair value (when transcribed), and the desk's own EV -- so a reader can
     answer "the street says B or better, are we wrong?" without hunting the
-    bundle. MU (2026-08-08): street 1507.79 (+71.8%), coverage FV 741.16
-    (-15.5%), desk EV +6.8% -- a confrontation the prose never had to state
-    because it now sits in a scripted table row.
+    bundle. Worked example, MU (2026-08-08), ON A FRESH RE-RUN of
+    valuation_reconcile.py against coverage/scenario_drivers.json: street
+    1507.79 (+71.8%), coverage FV 741.16 (-15.5%), desk EV +6.8% -- a
+    confrontation the prose never had to state because it now sits in a
+    scripted table row. (D1: an already-archived module_valuation_reconcile.json
+    built before probability_weighted_fv existed will not carry the coverage
+    clause until the reconcile step is re-run -- this is a disclosure of what
+    a live run produces, not a claim about every past artifact on disk.)
 
     Every number is a bundle leaf: consensus_pt / pt_vs_price_pct off
     snapshot.sentiment (already computed upstream by build_snapshot); ``fv`` /

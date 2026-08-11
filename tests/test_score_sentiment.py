@@ -1303,6 +1303,17 @@ class TestQF5NamesTheEffectiveInput(unittest.TestCase):
         doc = self._build(self._snap(10, revisions_ntm=None, revisions_90d=None))
         self.assertIsNotNone(doc["flags"]["revisions_null_pre_earnings_warning"])
 
+    def test_warning_string_names_the_effective_both_legs_state(self):
+        # QF5 (adversarial review): the string still said "revisions_90d is
+        # null" though the firing condition is now BOTH legs null and the
+        # primary basis is revisions_ntm -- fix the string to name the
+        # effective state without changing the level/keying (this test's
+        # sibling above already pins WHEN it fires).
+        doc = self._build(self._snap(10, revisions_ntm=None, revisions_90d=None))
+        warning = doc["flags"]["revisions_null_pre_earnings_warning"]
+        self.assertIn("revisions_ntm and revisions_90d are both null", warning)
+        self.assertNotIn("revisions_90d is null within", warning)
+
     def test_no_warning_when_only_90d_present(self):
         # pre-QC17 shape preserved: revisions_ntm absent, revisions_90d present
         # -> the fallback scores it -> no warning.

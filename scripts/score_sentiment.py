@@ -995,9 +995,10 @@ def build_module(snapshot, rating_actions, rating_actions_justification,
     if (revisions_dimension_null and days_to_earnings is not None
             and 0 <= days_to_earnings <= 14):
         pre_earnings_revisions_warning = (
-            f"WARNING: revisions_90d is null within {days_to_earnings}d of next earnings "
-            f"-- the 20-pt revisions dimension has been renormalized away at the most "
-            f"critical signal window. Null reason: {revisions_null_reason or 'unknown'}. "
+            f"WARNING: revisions_ntm and revisions_90d are both null within "
+            f"{days_to_earnings}d of next earnings -- the 20-pt revisions dimension "
+            f"has been renormalized away at the most critical signal window. "
+            f"Null reason: {revisions_null_reason or 'unknown'}. "
             f"Treat the sentiment score as incomplete; do NOT interpret a high score "
             f"as confirmation of positive revision momentum."
         )
