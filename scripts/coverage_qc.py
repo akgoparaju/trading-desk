@@ -47,6 +47,23 @@ CHECKS (each a house-style result dict {check, passed, detail}):
                            appear (as numbers, +/-0.5% or exact string) in
                            valuation.md — anchors are transcriptions, not inventions.
 
+QC-D1 ADVISORY CHECKS (disclosure-only; absent OR implausible -> passed=None/SKIP,
+NEVER passed=False -- these can never fail an existing or a legacy run):
+ 9. wacc_units_sanity   -- valuation_anchors.json.assumptions.wacc and/or
+                           scenario_drivers.json.dcf_reverse_inputs.wacc, when
+                           present, sanity-checked as a plausible fraction
+                           (0 < w < 1). Catches a REAL logged defect: MRVL's
+                           anchors have carried `wacc: 11.0` (percent value in a
+                           fraction field) since 2026-07-24, invisible because
+                           nothing reads the field. An implausible value SKIPs
+                           (never FAILs) with a loud SUSPECT detail.
+10. governed_cost_of_capital -- valuation.md either references the desk's QC-D1
+                           governed cost-of-capital build (rf + the ratified beta
+                           x ERP 5.50%, held constant) or names AND prices a
+                           judgmental deviation from it. Absent -> disclosed, not
+                           failed -- legacy coverage predates the 2026-08-10
+                           convention (forward-looking only).
+
 THRESHOLDS ARE FLOORS, not targets. FSI's own templates set the real target (Task 1 =
 6-8K words / 9 sections; Task 3 comps = 5-10 peers). The floor exists to make SILENT
 SHRINKAGE fail loudly — a coverage run that quietly degraded below a defensible
@@ -157,6 +174,20 @@ _YEAR_TOKEN_RE = re.compile(r"(?:FY)?(20\d\d)(E?)")
 # A markdown table data row whose FIRST cell is ticker-like (1-6 uppercase letters,
 # optionally dotted, e.g. BRK.B). Header/separator rows are excluded.
 _COMPS_ROW_RE = re.compile(r"^\|\s*([A-Z]{1,6}(?:\.[A-Z])?)\s*\|")
+
+# QC-D1 (owner-ratified 2026-08-10) -- a WACC is a discount rate expressed as a
+# fraction (e.g. 0.105 for 10.5%). The plausible range is a strict, open (0, 1):
+# a real coverage bundle's WACC has never been <=0% or >=100%. Bounds are
+# EXCLUSIVE -- 0.0 and 1.0 are themselves implausible.
+_WACC_PLAUSIBLE_MIN = 0.0
+_WACC_PLAUSIBLE_MAX = 1.0
+
+# QC-D1 governed-build disclosure: valuation.md either names the governed
+# cost-of-capital build (loosely -- "governed cost of capital" / "governed
+# WACC" / "governed build", any of the common separators) or contains a
+# paragraph naming a "deviation" alongside a priced (numeric) figure.
+_GOVERNED_BUILD_RE = re.compile(
+    r"governed\s+(?:cost[\s-]*of[\s-]*capital|wacc|build)", re.IGNORECASE)
 
 
 def _result(name, passed, detail):
@@ -664,6 +695,130 @@ def check_anchors_coherent(coverage_dir):
                    "valuation.md")
 
 
+def _dotted_field(data, dotted_path):
+    """Walk a dotted path (e.g. "assumptions.wacc") through nested dicts.
+    Returns None if any hop is missing or not a dict -- never raises."""
+    cur = data
+    for part in dotted_path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def check_wacc_units_sanity(coverage_dir):
+    """QC-D1 ADVISORY (non-blocking): sanity-check that `wacc`, wherever it
+    appears, is a plausible fraction (0 < w < 1) rather than a percent value
+    accidentally stored in a fraction field.
+
+    Real logged defect this catches: MRVL/coverage/valuation_anchors.json has
+    carried `assumptions.wacc: 11.0` since 2026-07-24 -- a 1100% discount
+    rate -- undetected because nothing in the plugin reads
+    `valuation_anchors.assumptions.wacc` (it is a disclosure-only field;
+    `valuation_reconcile.py` reads the SEPARATE, correctly-scaled
+    `scenario_drivers.json.dcf_reverse_inputs.wacc`). This check reads BOTH
+    copies of the field.
+
+    PASS/SKIP semantics (chosen deliberately to stay non-breaking): this
+    check NEVER returns passed=False. A plausible value (or values, if both
+    fields are present) -> passed=True. No numeric wacc field found anywhere
+    -> passed=None (SKIP; the field has always been optional/disclosure-only).
+    An IMPLAUSIBLE value ALSO returns passed=None (SKIP, not FAIL) -- the
+    QC-D1 convention is forward-looking and explicitly not retroactive, so a
+    pre-existing defect like MRVL's must not newly fail a legacy bundle's
+    coverage_qc run. Non-breaking does not mean silent: the detail string
+    surfaces an implausible value loudly, prefixed SUSPECT, so a human
+    reading the QC table sees it and can fix the source bundle.
+    """
+    findings = []  # (label, value) for every present numeric wacc field
+    for rel_path, dotted in (
+        ("valuation_anchors.json", "assumptions.wacc"),
+        ("scenario_drivers.json", "dcf_reverse_inputs.wacc"),
+    ):
+        path = os.path.join(coverage_dir, rel_path)
+        if not os.path.isfile(path):
+            continue
+        try:
+            data = _load_json(path)
+        except (OSError, ValueError):
+            # A malformed file is already a BLOCKING failure elsewhere
+            # (anchors_coherent / scenario_drivers) -- this advisory check
+            # stays silent on it rather than duplicating that failure.
+            continue
+        if not isinstance(data, dict):
+            continue
+        w = _dotted_field(data, dotted)
+        if isinstance(w, (int, float)) and not isinstance(w, bool):
+            findings.append((f"{rel_path}.{dotted}", w))
+
+    if not findings:
+        return _result("wacc_units_sanity", None,
+                       "no numeric wacc field in valuation_anchors."
+                       "assumptions.wacc or scenario_drivers."
+                       "dcf_reverse_inputs.wacc (optional -- skipped)")
+
+    implausible = [(label, w) for label, w in findings
+                   if not (_WACC_PLAUSIBLE_MIN < w < _WACC_PLAUSIBLE_MAX)]
+    if implausible:
+        detail = "; ".join(
+            f"SUSPECT {label}={w:g} is not a plausible fraction (0 < w < 1) "
+            f"-- looks like a percent value in a fraction field (e.g. "
+            f"{w:g} would be a {w * 100:g}% discount rate)"
+            for label, w in implausible)
+        return _result("wacc_units_sanity", None,
+                       "ADVISORY, non-blocking (QC-D1 forward-looking, not "
+                       "retroactive): " + detail)
+
+    return _result("wacc_units_sanity", True,
+                   "wacc field(s) plausible: "
+                   + ", ".join(f"{label}={w:g}" for label, w in findings))
+
+
+def _governed_build_disclosed(text):
+    """True if `text` documents the QC-D1 governed cost-of-capital build --
+    either a direct reference to the build, or a paragraph naming a
+    "deviation" alongside a priced (numeric) figure."""
+    if _GOVERNED_BUILD_RE.search(text):
+        return True
+    for para in re.split(r"\n\s*\n", text):
+        if "deviation" in para.lower() and _NUM_RE.search(para):
+            return True
+    return False
+
+
+def check_governed_cost_of_capital(coverage_dir):
+    """QC-D1 ADVISORY (non-blocking), in-pattern with `has_wacc`: valuation.md
+    either references the desk's governed cost-of-capital build (WACC = rf +
+    the ratified beta x ERP 5.50%, held constant -- see full-trade-analysis
+    SKILL.md Phase 0.5) or names AND prices a judgmental deviation from it.
+
+    PASS/SKIP semantics: this check NEVER returns passed=False. A reference
+    (or a named+priced deviation) -> passed=True. valuation.md absent, or
+    present but silent on the convention -> passed=None (SKIP) with a
+    DISCLOSURE detail -- the QC-D1 convention (ratified 2026-08-10) is
+    forward-looking only, so coverage authored before it exists is legal and
+    must not fail this gate; the point of this check is visibility into
+    which bundles still predate the convention, not enforcement.
+    """
+    path = os.path.join(coverage_dir, "valuation.md")
+    if not os.path.isfile(path):
+        return _result("governed_cost_of_capital", None,
+                       "valuation.md absent (optional -- skipped)")
+    text = _read(path)
+    if _governed_build_disclosed(text):
+        return _result("governed_cost_of_capital", True,
+                       "valuation.md references the QC-D1 governed "
+                       "cost-of-capital build, or names+prices a deviation "
+                       "from it")
+    return _result("governed_cost_of_capital", None,
+                   "DISCLOSURE (non-blocking): valuation.md does not "
+                   "reference the QC-D1 governed cost-of-capital build (rf + "
+                   "ratified beta x ERP 5.50%, held constant) or a "
+                   "named+priced deviation from it -- legacy coverage "
+                   "predates the 2026-08-10 convention (forward-looking "
+                   "only, not retroactive)")
+
+
 # --------------------------------------------------------------------------- #
 # Orchestration.
 # --------------------------------------------------------------------------- #
@@ -674,6 +829,11 @@ def run_coverage_qc(coverage_dir, mode="full"):
     The adjusted_financials (O14) and scenario_drivers (O17) checks are OPTIONAL:
     an absent file -> SKIP (not a failure). They are appended after the required
     checks so the existing 8-check table is extended by the two optional rows.
+
+    The QC-D1 checks (wacc_units_sanity, governed_cost_of_capital) are ADVISORY:
+    they NEVER return passed=False -- absent or implausible/undisclosed input
+    is surfaced via passed=None (SKIP) with a loud detail string, never a gate
+    failure. Appended last.
     """
     return [
         check_artifacts_present(coverage_dir),
@@ -686,6 +846,8 @@ def run_coverage_qc(coverage_dir, mode="full"):
         check_anchors_coherent(coverage_dir),
         check_adjusted_financials(coverage_dir),
         check_scenario_drivers(coverage_dir),
+        check_wacc_units_sanity(coverage_dir),
+        check_governed_cost_of_capital(coverage_dir),
     ]
 
 

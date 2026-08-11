@@ -847,5 +847,182 @@ class TestScenarioDriversCheck(unittest.TestCase):
         self.assertIs(result["passed"], True, result["detail"])
 
 
+# --------------------------------------------------------------------------- #
+# QC-D1 — check_wacc_units_sanity (ADVISORY: absent/implausible -> SKIP
+# (passed=None), NEVER FAIL. Real defect this catches: MRVL/coverage/
+# valuation_anchors.json has carried assumptions.wacc: 11.0 (percent value in
+# a fraction field, i.e. an 1100% discount rate) since 2026-07-24, invisible
+# because nothing reads the field. Non-breaking by design: an implausible
+# value is disclosed loudly in `detail` but never flips passed to False, so
+# no legacy bundle can newly fail coverage_qc over this check.
+# --------------------------------------------------------------------------- #
+
+def _write_anchors_raw(cov_dir, obj):
+    path = os.path.join(cov_dir, "valuation_anchors.json")
+    with open(path, "w") as fh:
+        if isinstance(obj, str):
+            fh.write(obj)
+        else:
+            json.dump(obj, fh)
+    return path
+
+
+class TestWaccUnitsSanityCheck(unittest.TestCase):
+    """check_wacc_units_sanity: absent -> SKIP; plausible -> PASS;
+    implausible -> SKIP (None) with a loud SUSPECT detail, never FAIL."""
+
+    def test_absent_returns_skip(self):
+        with tempfile.TemporaryDirectory() as td:
+            result = cq.check_wacc_units_sanity(td)
+            self.assertIsNone(result["passed"],
+                              "absent wacc field should be SKIP (passed=None)")
+            self.assertIn("skip", result["detail"].lower())
+
+    def test_plausible_wacc_in_anchors_passes(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_anchors_raw(td, {"assumptions": {"wacc": 0.105}})
+            result = cq.check_wacc_units_sanity(td)
+            self.assertIs(result["passed"], True, result["detail"])
+
+    def test_plausible_wacc_in_scenario_drivers_passes(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_scenario_drivers(td, _valid_scenario_drivers())
+            result = cq.check_wacc_units_sanity(td)
+            self.assertIs(result["passed"], True, result["detail"])
+
+    def test_mrvl_shaped_implausible_wacc_returns_none_not_false(self):
+        # The real logged defect: assumptions.wacc: 11.0 (percent-in-a-fraction
+        # field), on disk since 2026-07-24, invisible because nothing reads it.
+        with tempfile.TemporaryDirectory() as td:
+            _write_anchors_raw(td, {"assumptions": {"wacc": 11.0,
+                                                     "terminal_g": 3.5}})
+            result = cq.check_wacc_units_sanity(td)
+            self.assertIsNone(result["passed"],
+                              "implausible wacc must SKIP, not FAIL "
+                              "(advisory, non-breaking)")
+            self.assertIn("SUSPECT", result["detail"])
+            self.assertIn("11", result["detail"])
+
+    def test_implausible_zero_wacc_returns_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_anchors_raw(td, {"assumptions": {"wacc": 0.0}})
+            result = cq.check_wacc_units_sanity(td)
+            self.assertIsNone(result["passed"])
+            self.assertIn("SUSPECT", result["detail"])
+
+    def test_implausible_wacc_at_or_above_one_returns_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_anchors_raw(td, {"assumptions": {"wacc": 1.5}})
+            result = cq.check_wacc_units_sanity(td)
+            self.assertIsNone(result["passed"])
+            self.assertIn("SUSPECT", result["detail"])
+
+    def test_bad_json_treated_as_absent_not_failure(self):
+        # A malformed valuation_anchors.json is already a BLOCKING failure via
+        # anchors_coherent; this advisory check stays silent on it rather than
+        # duplicating that failure, and never returns passed=False itself.
+        with tempfile.TemporaryDirectory() as td:
+            _write_anchors_raw(td, "{not json")
+            result = cq.check_wacc_units_sanity(td)
+            self.assertIsNone(result["passed"])
+
+    def test_mrvl_shaped_defect_does_not_fail_the_overall_gate(self):
+        # The headline requirement: coverage_qc as a whole must NOT fail on
+        # this legacy defect.
+        with tempfile.TemporaryDirectory() as td:
+            anchors = _anchors()
+            anchors["assumptions"] = {"wacc": 11.0, "terminal_g": 3.5}
+            cov = _write_coverage(td, anchors=anchors)
+            results = cq.run_coverage_qc(cov, mode="full")
+            failed = [r for r in results if r["passed"] is False]
+            self.assertEqual(failed, [], f"unexpected failures: {failed}")
+            by_name = {r["check"]: r for r in results}
+            self.assertIn("wacc_units_sanity", by_name)
+            self.assertIsNone(by_name["wacc_units_sanity"]["passed"])
+            self.assertIn("SUSPECT", by_name["wacc_units_sanity"]["detail"])
+
+    def test_present_plausible_passes_alongside_required_checks(self):
+        with tempfile.TemporaryDirectory() as td:
+            cov = _write_coverage(td)  # default anchors carry wacc: 0.10
+            results = cq.run_coverage_qc(cov, mode="full")
+            failed = [r for r in results if r["passed"] is False]
+            self.assertEqual(failed, [], f"unexpected failures: {failed}")
+            by_name = {r["check"]: r for r in results}
+            self.assertIs(by_name["wacc_units_sanity"]["passed"], True)
+
+
+# --------------------------------------------------------------------------- #
+# QC-D1 — check_governed_cost_of_capital (ADVISORY: absent -> SKIP
+# (passed=None), NEVER FAIL. valuation.md either references the desk's
+# governed cost-of-capital build or names+prices a judgmental deviation from
+# it; legacy coverage predates the convention (2026-08-10, forward-looking
+# only) so absence is disclosed, not failed.
+# --------------------------------------------------------------------------- #
+
+class TestGovernedCostOfCapitalCheck(unittest.TestCase):
+    """check_governed_cost_of_capital: absent valuation.md -> SKIP; no
+    reference -> SKIP w/ disclosure; governed-build reference -> PASS;
+    named+priced deviation -> PASS. Never FAIL."""
+
+    def test_absent_valuation_md_returns_skip(self):
+        with tempfile.TemporaryDirectory() as td:
+            result = cq.check_governed_cost_of_capital(td)
+            self.assertIsNone(result["passed"])
+            self.assertIn("absent", result["detail"].lower())
+
+    def test_no_reference_returns_skip_with_disclosure(self):
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "valuation.md"), "w") as fh:
+                fh.write(_valuation_md())  # default fixture, no QC-D1 language
+            result = cq.check_governed_cost_of_capital(td)
+            self.assertIsNone(result["passed"],
+                              "legacy coverage with no reference must SKIP, "
+                              "not FAIL")
+            self.assertIn("DISCLOSURE", result["detail"])
+            self.assertIn("QC-D1", result["detail"])
+
+    def test_reference_to_governed_build_passes(self):
+        with tempfile.TemporaryDirectory() as td:
+            text = (_valuation_md() +
+                    "\n\nWACC is built on the desk's governed cost-of-capital "
+                    "build: rf + beta x ERP, ERP held at 5.50%.\n")
+            with open(os.path.join(td, "valuation.md"), "w") as fh:
+                fh.write(text)
+            result = cq.check_governed_cost_of_capital(td)
+            self.assertIs(result["passed"], True, result["detail"])
+
+    def test_named_and_priced_deviation_passes(self):
+        with tempfile.TemporaryDirectory() as td:
+            text = (_valuation_md() +
+                    "\n\nAs a deviation from the governed build, this bundle "
+                    "uses a hand-authored haircut beta of 1.85 rather than "
+                    "2.1964, moving WACC to 13.47% and dcf_base to $542.16.\n")
+            with open(os.path.join(td, "valuation.md"), "w") as fh:
+                fh.write(text)
+            result = cq.check_governed_cost_of_capital(td)
+            self.assertIs(result["passed"], True, result["detail"])
+
+    def test_deviation_word_without_a_price_returns_skip(self):
+        with tempfile.TemporaryDirectory() as td:
+            text = (_valuation_md() +
+                    "\n\nThis bundle's WACC deviation is discussed "
+                    "qualitatively elsewhere.\n")
+            with open(os.path.join(td, "valuation.md"), "w") as fh:
+                fh.write(text)
+            result = cq.check_governed_cost_of_capital(td)
+            self.assertIsNone(result["passed"])
+            self.assertIn("DISCLOSURE", result["detail"])
+
+    def test_absence_does_not_fail_the_overall_gate(self):
+        with tempfile.TemporaryDirectory() as td:
+            cov = _write_coverage(td)  # default valuation.md, no QC-D1 language
+            results = cq.run_coverage_qc(cov, mode="full")
+            failed = [r for r in results if r["passed"] is False]
+            self.assertEqual(failed, [], f"unexpected failures: {failed}")
+            by_name = {r["check"]: r for r in results}
+            self.assertIn("governed_cost_of_capital", by_name)
+            self.assertIsNone(by_name["governed_cost_of_capital"]["passed"])
+
+
 if __name__ == "__main__":
     unittest.main()
