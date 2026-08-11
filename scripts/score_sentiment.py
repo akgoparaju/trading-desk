@@ -12,7 +12,9 @@ Scoring is over five dimensions (max 100 total):
                                         rating-actions judgment flag (4) +
                                         news_heat (5). SPEC §5.2: pt_vs_price < 0
                                         caps the WHOLE dimension at 10/25.
-    2. Revisions momentum      (20) -- 90-day EPS-revision band + up/down-count adj
+    2. Revisions momentum      (20) -- NTM-blend EPS-revision band (near-FY
+                                        fallback, basis disclosed) + up/down-
+                                        count adj. QC17, see below.
     3. Smart money & insiders  (20) -- 13F inst-flow judgment flag (8) + insider
                                         (12): Cohen/Malloy/Pomorski routine-vs-
                                         opportunistic classification when active,
@@ -29,6 +31,34 @@ retained sub-components are held identical where possible -- only the point ceil
 scale (e.g. buy% 10->8, IV 6->3). This keeps score movement small on a provisional
 wave. Positioning/news bands are unratified defaults pending B9; a falsifier is
 pre-registered in the SKILL.
+
+QC17 (sentiment-v1.2.0, PROVISIONAL): the revisions-momentum leg is RE-KEYED and
+its band edges RE-CUT (ratified 2026-08-10; see
+docs/reviews/2026-08-10-qc17-band-recut-proposal.md). ``score_revisions`` now
+reads ``fundamentals.revisions_ntm.pct`` (the SAME NTM-blended consensus
+``valuation.pe_fwd`` is already scored against, QC1 coherence) when present --
+basis ``"ntm_blend"`` -- falling back to ``fundamentals.revisions_90d.pct`` --
+basis ``"near_fy_fallback"`` -- when ``revisions_ntm`` is null/absent (e.g. a
+thin-estimate name with only one future fiscal-year row, such as COHR). The
+basis actually used is always named in the emitted ``arithmetic``, never
+silently. A single band grid serves BOTH bases (a dual grid would create a
+discontinuity at the NTM blend's 2-FY-row floor): edges widened from
+``>0.03 / >0.005 / >=-0.005 / >=-0.03`` to ``>0.15 / >0.01 / >=-0.01 / >=-0.15``
+after a 21-name cross-sectional sweep found the OLD edges saturating 61.9% of
+names into the top band (F17-A). The point ladder (20/14/10/5/0), the ±2
+up/down-count adjustment, the cap/floor, and null handling are all UNCHANGED.
+Both outer edges are documented guesses (``+0.15`` is fitted to the measured
+cross-section's gap between NVDA and GOOG; ``-0.15`` is a PURE symmetry guess
+with zero supporting observations -- the most negative name measured was
+META at -2.46%) with quarterly falsifiers pre-registered: F17-A2 (forward
+saturation), F17-D (modal-band concentration >50%), F17-E (regime-robustness
+re-check, pre-committed fallback: the 7-band ladder), and F17-F (kills the
+-0.15 edge if the bottom band is still empty after 4 quarterly evaluations).
+KNOWN LIMIT, disclosed and NOT fixed here: the up/down count adjustment reads
+30-day trailing counts against a 90-day-window ``pct`` -- a window mismatch
+that predates QC17 and is unfixable with this vendor (Alpha Vantage's
+``EARNINGS_ESTIMATES`` carries only 7-day and 30-day revision-count windows,
+no 90-day count field).
 
 Design contract (project-wide, mirrors score_technical.py / score_risk.py):
 - The snapshot is READ-ONLY; this module never edits snapshot.json. No market data
@@ -75,25 +105,31 @@ if _REPO_ROOT not in sys.path:
 from scripts import build_snapshot, confidence
 from scripts._artifact import emit_json
 
-RUBRIC_VERSION = "1.1.0"
+RUBRIC_VERSION = "1.2.0"
 SKILL_NAME = "sentiment-positioning"
 
-# sentiment-v1.1.0 PROVISIONAL module note: positioning/news bands are unratified
-# defaults pending B9 calibration; the falsifier is pre-registered in the SKILL.
-MODULE_NOTE = ("sentiment-v1.1.0 PROVISIONAL -- positioning/news bands unratified "
-               "pending B9; falsifier pre-registered")
+# sentiment-v1.2.0 PROVISIONAL module note: positioning/news bands are unratified
+# defaults pending B9 calibration (falsifier pre-registered in the SKILL); QC17
+# additionally re-keys and re-cuts the revisions-momentum leg (falsifiers
+# F17-A2/D/E/F pre-registered above and in the SKILL).
+MODULE_NOTE = ("sentiment-v1.2.0 PROVISIONAL -- positioning/news bands unratified "
+               "pending B9; revisions-momentum re-cut to the NTM basis (QC17), "
+               "edges unratified pending quarterly falsifiers F17-A2/D/E/F; "
+               "falsifier pre-registered")
 
 # The snapshot fields this rubric SCORES on. price.last and the ladder are shared
 # reference infrastructure and are intentionally NOT listed (see module docstring).
 # Wave 3A additions (all null-safe): sentiment.dtc, .put_call_ratio_full_chain_volume,
 # .skew_25d_30d, .news_heat, .insider_classification. si_trend is read ONLY to
 # condition the DTC notch direction (a guard for the SI+DTC branch), so it is NOT an
-# INPUT_FIELD.
+# INPUT_FIELD. QC17 adds fundamentals.revisions_ntm: the primary basis, with
+# revisions_90d retained as the disclosed near-FY fallback (see module docstring).
 INPUT_FIELDS = {
     "sentiment.ratings",
     "sentiment.pt_vs_price_pct",
     "sentiment.news_heat",
     "fundamentals.revisions_90d",
+    "fundamentals.revisions_ntm",
     "sentiment.insider_net_90d_usd",
     "sentiment.insider_classification",
     "sentiment.short_interest_pct",
@@ -291,42 +327,69 @@ def score_street(sentiment, rating_actions, rating_actions_justification) -> dic
 
 
 # --------------------------------------------------------------------------- #
-# 2. Revisions momentum (max 20): band + up/down count adjustment
+# 2. Revisions momentum (max 20): QC17 re-key + re-cut band + up/down count adj
 # --------------------------------------------------------------------------- #
 
-def score_revisions(revisions) -> dict:
-    """90-day EPS-revision band (max 20) + up_30d/down_30d count adjustment.
+def score_revisions(revisions_ntm, revisions_90d) -> dict:
+    """NTM-blend EPS-revision band (max 20, near-FY fallback) + count adjustment.
 
-    rev (revisions_90d.pct): >0.03 -> 20; (0.005,0.03] -> 14; [-0.005,0.005] -> 10;
-        [-0.03,-0.005) -> 5; <-0.03 -> 0; null -> 0 ("n/a").
-    adjustment (same block's up_30d/down_30d): up>down -> +2 (cap 20);
-        down>up -> -2 (floor 0); ties/nulls -> 0.
+    QC17 (ratified 2026-08-10; docs/reviews/2026-08-10-qc17-band-recut-proposal.md
+    -- also see the module docstring above): reads ``revisions_ntm.pct`` when
+    present (basis ``"ntm_blend"``; up/down counts from ``revisions_ntm``'s own
+    ``up_30d``/``down_30d``, sourced upstream from the highest-NTM-weight FY
+    record), falling back to ``revisions_90d.pct`` (basis
+    ``"near_fy_fallback"``; counts from ``revisions_90d``) whenever
+    ``revisions_ntm`` is absent OR its ``pct`` is null -- NEVER silently: the
+    basis actually used is always named in the returned ``arithmetic``.
+
+    band (one grid, either basis): pct >0.15 -> 20; (0.01,0.15] -> 14;
+        [-0.01,0.01] -> 10; [-0.15,-0.01) -> 5; <-0.15 -> 0; null -> 0 ("n/a").
+    adjustment (same basis's up_30d/down_30d): up>down -> +2 (cap 20);
+        down>up -> -2 (floor 0); ties/nulls -> 0. UNCHANGED by QC17.
+
+    KNOWN LIMIT (pre-existing, not created or worsened by QC17, not fixed here):
+    the count adjustment is a 30-day trailing count compared against a 90-day-
+    window ``pct`` -- Alpha Vantage's ``EARNINGS_ESTIMATES`` has no 90-day count
+    field, so this window mismatch is unfixable with this vendor.
     """
-    rev = revisions.get("pct") if isinstance(revisions, dict) else None
-    up = revisions.get("up_30d") if isinstance(revisions, dict) else None
-    down = revisions.get("down_30d") if isinstance(revisions, dict) else None
+    ntm = revisions_ntm if isinstance(revisions_ntm, dict) else {}
+    near_fy = revisions_90d if isinstance(revisions_90d, dict) else {}
+
+    if ntm.get("pct") is not None:
+        basis = "ntm_blend"
+        field_label = "revisions_ntm.pct"
+        rev = ntm.get("pct")
+        up = ntm.get("up_30d")
+        down = ntm.get("down_30d")
+    else:
+        basis = "near_fy_fallback"
+        field_label = "revisions_90d.pct"
+        rev = near_fy.get("pct")
+        up = near_fy.get("up_30d")
+        down = near_fy.get("down_30d")
 
     parts = []
     evaluable = 0
 
     if rev is not None:
         evaluable += 1
-        if rev > 0.03:
+        if rev > 0.15:
             band_pts = 20
-        elif rev > 0.005:
+        elif rev > 0.01:
             band_pts = 14
-        elif rev >= -0.005:
+        elif rev >= -0.01:
             band_pts = 10
-        elif rev >= -0.03:
+        elif rev >= -0.15:
             band_pts = 5
-        else:  # < -0.03
+        else:  # < -0.15
             band_pts = 0
-        parts.append(f"revisions_90d.pct {_fmt(rev)} -> {band_pts}/20")
+        parts.append(f"{field_label} {_fmt(rev)} -> {band_pts}/20 (basis={basis})")
     else:
         band_pts = 0
-        parts.append("revisions_90d.pct: n/a (+0)")
+        parts.append(f"{field_label}: n/a (basis={basis}) (+0)")
 
-    # -- up/down count adjustment ------------------------------------------
+    # -- up/down count adjustment (same basis as the band; window-mismatch
+    # limit disclosed in the docstring, unchanged by QC17) ------------------
     if up is not None and down is not None:
         if up > down:
             adj_pts = 2
@@ -348,7 +411,7 @@ def score_revisions(revisions) -> dict:
         "max": 20,
         "arithmetic": "; ".join(parts),
         "inputs": {"band_points": band_pts, "adjustment_points": adj_pts,
-                   "pct": rev, "up_30d": up, "down_30d": down},
+                   "pct": rev, "up_30d": up, "down_30d": down, "basis": basis},
         "evaluable": evaluable > 0,
     }
 
@@ -791,7 +854,7 @@ def hedging_cost_note(iv_pctile_1yr):
 # Composite scoring + renormalization (identical pattern to the other scorers)
 # --------------------------------------------------------------------------- #
 
-def score(sentiment, revisions, tech, bench,
+def score(sentiment, revisions_ntm, revisions_90d, tech, bench,
           rating_actions, rating_actions_justification,
           inst_flow, inst_flow_justification,
           insider_baseline, insider_baseline_justification) -> dict:
@@ -800,11 +863,16 @@ def score(sentiment, revisions, tech, bench,
     A dimension whose ``evaluable`` is False (all its scored inputs null) is
     EXCLUDED from the max total and the score is rescaled to 0-100 over the
     remaining max, with ``renormalized: true`` recorded.
+
+    QC17: ``revisions_ntm``/``revisions_90d`` are passed through to
+    ``score_revisions`` unchanged (it does its own NTM-first, near-FY-fallback
+    selection and basis disclosure); this signature grew a parameter (was a
+    single ``revisions`` argument) accordingly.
     """
     rsi14 = tech.get("rsi14")
     subs = [
         score_street(sentiment, rating_actions, rating_actions_justification),
-        score_revisions(revisions if isinstance(revisions, dict) else {}),
+        score_revisions(revisions_ntm, revisions_90d),
         score_smart_money(sentiment, inst_flow, inst_flow_justification,
                           insider_baseline, insider_baseline_justification),
         score_positioning(sentiment, rsi14),
@@ -896,22 +964,36 @@ def build_module(snapshot, rating_actions, rating_actions_justification,
     fund = snapshot.get("fundamentals", {}) if isinstance(snapshot, dict) else {}
     meta = snapshot.get("meta", {}) if isinstance(snapshot, dict) else {}
 
-    revisions = fund.get("revisions_90d")
+    # QC17: revisions_ntm is the primary basis, revisions_90d the disclosed
+    # near-FY fallback -- score_revisions does its own selection + disclosure.
+    revisions_ntm = fund.get("revisions_ntm")
+    revisions_90d = fund.get("revisions_90d")
 
-    scored = score(sentiment, revisions, tech, bench,
+    scored = score(sentiment, revisions_ntm, revisions_90d, tech, bench,
                    rating_actions, rating_actions_justification,
                    inst_flow, inst_flow_justification,
                    insider_baseline, insider_baseline_justification)
 
     iv = sentiment.get("iv_pctile_1yr")
 
-    # QF5: when revisions_90d is null and the snapshot is within ~14 days of
-    # next_earnings, the renormalization silently removes the most forward-looking
-    # signal at exactly the moment it matters most -- surface this loudly.
+    # QF5 x QC17: when the revisions dimension is null and the snapshot is
+    # within ~14 days of next_earnings, the renormalization silently removes
+    # the most forward-looking signal at exactly the moment it matters most --
+    # surface this loudly. Post-QC17 the dimension renormalizes away only when
+    # BOTH legs are null (score_revisions falls back from NTM to near-FY), so
+    # the warning must key off that same condition -- keying off revisions_90d
+    # alone would now misfire on names whose NTM leg is populated but whose
+    # near-FY leg happens to be null from AV coverage volatility (see the QC17
+    # proposal doc §3.3.3).
     revisions_null_reason = fund.get("revisions_null_reason")
     days_to_earnings = _days_to_earnings(snapshot)
     pre_earnings_revisions_warning = None
-    if revisions is None and days_to_earnings is not None and 0 <= days_to_earnings <= 14:
+    revisions_dimension_null = (
+        (not isinstance(revisions_ntm, dict) or revisions_ntm.get("pct") is None)
+        and (not isinstance(revisions_90d, dict) or revisions_90d.get("pct") is None)
+    )
+    if (revisions_dimension_null and days_to_earnings is not None
+            and 0 <= days_to_earnings <= 14):
         pre_earnings_revisions_warning = (
             f"WARNING: revisions_90d is null within {days_to_earnings}d of next earnings "
             f"-- the 20-pt revisions dimension has been renormalized away at the most "
