@@ -3006,3 +3006,279 @@ class TestLiquidityVerdictRendered(unittest.TestCase):
         rec_idx = out.index("**Recommended structures**")
         self.assertLess(vd_idx, liq_idx)
         self.assertLess(liq_idx, rec_idx)
+
+
+# --------------------------------------------------------------------------- #
+# QC21: the street-confrontation row -- street consensus PT vs coverage's
+# probability-weighted DCF fair value vs the desk's own EV, three views of one
+# stock on ONE scripted Page-1 bullet. Real MU (2026-08-08) / AAPL
+# (2026-08-07-refresh) ground-truth numbers pin both shapes: MU carries all
+# three views, AAPL (no coverage/scenario_drivers.json) carries street + desk
+# only. Every number is a bundle leaf (snapshot sentiment.consensus_pt /
+# pt_vs_price_pct, module_valuation_reconcile.probability_weighted_fv / _pct,
+# and the decision contract's ev_at_current, itself a module_composite.ev leaf)
+# so number_provenance holds with zero whitelist additions.
+# --------------------------------------------------------------------------- #
+
+def _street_snapshot(consensus_pt=None, pt_vs_price_pct=None):
+    """A minimal snapshot carrying only the sentiment fields the row reads."""
+    snap = {"sentiment": {}}
+    if consensus_pt is not None:
+        snap["sentiment"]["consensus_pt"] = consensus_pt
+    if pt_vs_price_pct is not None:
+        snap["sentiment"]["pt_vs_price_pct"] = pt_vs_price_pct
+    return snap
+
+
+# Real MU (2026-08-08 bundle) shape: consensus_pt/pt_vs_price_pct off the
+# snapshot; probability_weighted_fv off module_valuation_reconcile.json
+# (dcf_reverse_inputs.probability_weighted_value_per_share, QC21 §1);
+# ev_at_current off module_composite.ev (MU's live 877.57 spot).
+_MU_CONSENSUS_PT = 1507.79
+_MU_PT_VS_PRICE_PCT = 0.7181421425071504
+_MU_PROB_WEIGHTED_FV = 741.16
+_MU_FV_VS_PRICE_PCT = -0.1554  # (741.16 - 877.57) / 877.57, rounded 4dp
+_MU_EV_AT_CURRENT = 0.0684
+
+# Real AAPL (2026-08-07-refresh bundle) shape: no coverage/scenario_drivers.json
+# -> probability_weighted_fv null -> the row carries street + desk only.
+_AAPL_CONSENSUS_PT = 320.89
+_AAPL_PT_VS_PRICE_PCT = 0.027143817419416738
+_AAPL_EV_AT_CURRENT = -0.0102
+
+
+class TestStreetConfrontation(unittest.TestCase):
+    """rr.build_street_confrontation(snapshot, contract, reconcile) -- pure,
+    null-safe over the three leaf sources."""
+
+    def test_mu_shape_all_three_views(self):
+        snap = _street_snapshot(_MU_CONSENSUS_PT, _MU_PT_VS_PRICE_PCT)
+        contract = {"ev_at_current": _MU_EV_AT_CURRENT}
+        reconcile = {"probability_weighted_fv": _MU_PROB_WEIGHTED_FV,
+                     "probability_weighted_fv_vs_price_pct": _MU_FV_VS_PRICE_PCT}
+        out = rr.build_street_confrontation(snap, contract, reconcile)
+        self.assertIn("1507.79", out)
+        self.assertIn("+71.8%", out)
+        self.assertIn("741.16", out)
+        self.assertIn("-15.5%", out)
+        self.assertIn("+6.8%", out)
+        self.assertTrue(out.startswith("- "))
+
+    def test_aapl_shape_street_and_desk_only(self):
+        snap = _street_snapshot(_AAPL_CONSENSUS_PT, _AAPL_PT_VS_PRICE_PCT)
+        contract = {"ev_at_current": _AAPL_EV_AT_CURRENT}
+        out = rr.build_street_confrontation(snap, contract, None)
+        self.assertIn("320.89", out)
+        self.assertIn("+2.7%", out)
+        self.assertIn("-1.0%", out)
+        self.assertNotIn("coverage", out.lower())
+
+    def test_no_consensus_pt_renders_nothing(self):
+        snap = _street_snapshot(None, None)
+        out = rr.build_street_confrontation(snap, {"ev_at_current": 0.05}, None)
+        self.assertEqual(out, "")
+
+    def test_consensus_pt_explicit_none_renders_nothing(self):
+        # D7-class: the key can be PRESENT with value None.
+        snap = {"sentiment": {"consensus_pt": None}}
+        out = rr.build_street_confrontation(snap, {"ev_at_current": 0.05}, None)
+        self.assertEqual(out, "")
+
+    def test_no_snapshot_renders_nothing(self):
+        out = rr.build_street_confrontation(None, {"ev_at_current": 0.05}, None)
+        self.assertEqual(out, "")
+
+    def test_reconcile_present_but_fv_none_drops_coverage_clause(self):
+        snap = _street_snapshot(_AAPL_CONSENSUS_PT, _AAPL_PT_VS_PRICE_PCT)
+        reconcile = {"probability_weighted_fv": None,
+                     "probability_weighted_fv_vs_price_pct": None}
+        out = rr.build_street_confrontation(
+            snap, {"ev_at_current": _AAPL_EV_AT_CURRENT}, reconcile)
+        self.assertNotIn("coverage", out.lower())
+        self.assertIn("320.89", out)
+
+    def test_no_contract_desk_ev_renders_na_not_crash(self):
+        snap = _street_snapshot(_AAPL_CONSENSUS_PT, _AAPL_PT_VS_PRICE_PCT)
+        out = rr.build_street_confrontation(snap, None, None)
+        self.assertIn("n/a", out)
+
+
+class TestStreetConfrontationInPage1(unittest.TestCase):
+    """build_page1 threads the row between the capital-status block and the
+    Composite section -- the established decision-surface bullet idiom, no new
+    heading."""
+
+    def test_row_between_capital_status_and_composite(self):
+        snap = _snapshot_doc()
+        snap["sentiment"]["consensus_pt"] = 150.0
+        snap["sentiment"]["pt_vs_price_pct"] = 0.5
+        contract = _eligible_contract()
+        reconcile = {"probability_weighted_fv": 120.0,
+                     "probability_weighted_fv_vs_price_pct": 0.2}
+        out = rr.build_page1(snap, _composite_doc(), _tradeplan_doc(), contract,
+                             reconcile)
+        cap_idx = out.index("**Capital status:**")
+        street_idx = out.index("**Street confrontation:**")
+        composite_idx = out.index("### Composite")
+        self.assertLess(cap_idx, street_idx)
+        self.assertLess(street_idx, composite_idx)
+
+    def test_row_omitted_when_no_consensus_pt(self):
+        # The shared _snapshot_doc fixture carries no consensus_pt -> omitted by
+        # default, unchanged behaviour for every existing render test.
+        out = rr.build_page1(_snapshot_doc(), _composite_doc(), _tradeplan_doc(),
+                             _eligible_contract(), None)
+        self.assertNotIn("**Street confrontation:**", out)
+
+
+class TestStreetConfrontationE2E(unittest.TestCase):
+    """Full render + report_qc: the row appears in the shipped report AND the
+    report still passes number_provenance -- proving every number the row
+    prints traces to a real bundle leaf."""
+
+    def test_full_render_includes_row_and_passes_provenance(self):
+        with tempfile.TemporaryDirectory() as d:
+            _mk_bundle(d)
+            snap_path = os.path.join(d, "snapshot_MU_2026-07-16.json")
+            with open(snap_path) as fh:
+                snap = json.load(fh)
+            snap["sentiment"]["consensus_pt"] = 150.0
+            snap["sentiment"]["pt_vs_price_pct"] = 0.5
+            with open(snap_path, "w") as fh:
+                json.dump(snap, fh)
+            doc = _reconcile_doc()
+            doc["probability_weighted_fv"] = 120.0
+            doc["probability_weighted_fv_vs_price_pct"] = 0.2
+            with open(os.path.join(d, "module_valuation_reconcile.json"), "w") as fh:
+                json.dump(doc, fh)
+
+            rc, out, err = _render(d)
+            self.assertEqual(rc, 0, err)
+            report = _find_report(d)
+            text = _read_file(report)
+            self.assertIn("**Street confrontation:**", text)
+            self.assertIn("150", text)
+            self.assertIn("120", text)
+            # desk EV off the fixture default (_EV_AT_CURRENT = 0.175 -> +17.5%).
+            self.assertIn("+17.5%", text)
+
+            _fill_slots(report)
+            rc, out, err = _qc(d, report)
+            self.assertEqual(rc, 0, out + err)
+            self.assertIn("number_provenance", out)
+
+    def test_aapl_shape_no_reconcile_module_still_passes(self):
+        # No module_valuation_reconcile.json at all (AAPL's real shape) -- the
+        # row must still render (street + desk) and provenance must still hold.
+        with tempfile.TemporaryDirectory() as d:
+            _mk_bundle(d)
+            snap_path = os.path.join(d, "snapshot_MU_2026-07-16.json")
+            with open(snap_path) as fh:
+                snap = json.load(fh)
+            snap["sentiment"]["consensus_pt"] = 150.0
+            snap["sentiment"]["pt_vs_price_pct"] = 0.5
+            with open(snap_path, "w") as fh:
+                json.dump(snap, fh)
+
+            rc, out, err = _render(d)
+            self.assertEqual(rc, 0, err)
+            report = _find_report(d)
+            text = _read_file(report)
+            self.assertIn("**Street confrontation:**", text)
+            self.assertNotIn("coverage", text.split("**Street confrontation:**")[1]
+                             .split("\n")[0].lower())
+
+            _fill_slots(report)
+            rc, out, err = _qc(d, report)
+            self.assertEqual(rc, 0, out + err)
+
+
+# --------------------------------------------------------------------------- #
+# QC21: options warnings reach the reader -- warnings_global (scored by
+# options_strategy but previously never rendered outside the Detail-only PDF
+# section) and per-structure ``warnings`` (e.g. "realized > implied: premium
+# sellers are NOT being paid for delivered vol") now surface in the markdown
+# report's Options Expression block.
+# --------------------------------------------------------------------------- #
+
+class TestOptionsWarningsRendered(unittest.TestCase):
+    def _options_with(self, structure_warnings=None, global_warnings=None):
+        options = _options_doc()
+        if structure_warnings is not None:
+            options["recommended_structures"][0]["warnings"] = structure_warnings
+        if global_warnings is not None:
+            options["warnings_global"] = global_warnings
+        return options
+
+    def test_structure_warning_appears_in_warnings_column(self):
+        warning = ("realized > implied: premium sellers are NOT being paid "
+                   "for delivered vol")
+        options = self._options_with(structure_warnings=[warning])
+        out = rr.build_options_expression(options, _tradeplan_doc())
+        self.assertIn(warning, out)
+        self.assertIn("Warnings", out)
+
+    def test_multiple_structure_warnings_joined_with_semicolon(self):
+        options = self._options_with(
+            structure_warnings=["first warning", "second warning"])
+        out = rr.build_options_expression(options, _tradeplan_doc())
+        self.assertIn("first warning; second warning", out)
+
+    def test_no_structure_warnings_shows_none_not_blank(self):
+        options = self._options_with(structure_warnings=[])
+        out = rr.build_options_expression(options, _tradeplan_doc())
+        row_line = next(ln for ln in out.splitlines()
+                        if ln.startswith("| bull_put_spread"))
+        self.assertTrue(row_line.rstrip().endswith("| none |"), row_line)
+
+    def test_warnings_global_renders_one_bullet_per_entry(self):
+        w1 = "PRIMARY GATE: IV is CHEAP vs realized -- premium selling has no edge"
+        w2 = "second global warning"
+        options = self._options_with(global_warnings=[w1, w2])
+        out = rr.build_options_expression(options, _tradeplan_doc())
+        self.assertIn(f"- ⚠ {w1}", out)
+        self.assertIn(f"- ⚠ {w2}", out)
+
+    def test_no_warnings_global_renders_no_bullets(self):
+        options = self._options_with(global_warnings=[])
+        out = rr.build_options_expression(options, _tradeplan_doc())
+        self.assertNotIn("⚠", out)
+
+    def test_warnings_global_bullets_between_liquidity_and_recommended(self):
+        options = self._options_with(global_warnings=["a global warning"])
+        out = rr.build_options_expression(options, _tradeplan_doc())
+        liq_idx = out.index("**Liquidity**")
+        warn_idx = out.index("⚠ a global warning")
+        rec_idx = out.index("**Recommended structures**")
+        self.assertLess(liq_idx, warn_idx)
+        self.assertLess(warn_idx, rec_idx)
+
+
+class TestOptionsWarningsProvenanceE2E(unittest.TestCase):
+    """A number embedded INSIDE a per-structure warning string must trace via
+    the whitelist (not a numeric leaf) -- proving the report_qc whitelist
+    addition, end to end."""
+
+    def test_structure_warning_with_numbers_passes_provenance(self):
+        with tempfile.TemporaryDirectory() as d:
+            _mk_bundle(d)
+            opt_path = os.path.join(d, "module_options.json")
+            with open(opt_path) as fh:
+                opt = json.load(fh)
+            opt["recommended_structures"][0]["warnings"] = [
+                "realized 45.2% > implied 30.1%: premium sellers are NOT "
+                "being paid for delivered vol"]
+            with open(opt_path, "w") as fh:
+                json.dump(opt, fh)
+
+            rc, out, err = _render(d)
+            self.assertEqual(rc, 0, err)
+            report = _find_report(d)
+            text = _read_file(report)
+            self.assertIn("45.2", text)
+            self.assertIn("30.1", text)
+
+            _fill_slots(report)
+            rc, out, err = _qc(d, report)
+            self.assertEqual(rc, 0, out + err)
+            self.assertIn("number_provenance", out)

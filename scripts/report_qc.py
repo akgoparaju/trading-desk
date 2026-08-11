@@ -249,6 +249,10 @@ def _iter_whitelisted_string_numbers(docs):
         if isinstance(st, dict):
             sources.append(st.get("arithmetic"))
             sources.append(st.get("pop_method"))
+            # QC21: per-structure warnings now render in a Warnings column (the
+            # markdown report) and a compact exec-PDF band -- a number inside
+            # one (e.g. "realized 45% > implied 30%") must not orphan.
+            sources.append(st.get("warnings"))
     for dec in (opts.get("declined") or []):
         if isinstance(dec, dict):
             sources.append(dec.get("reason"))

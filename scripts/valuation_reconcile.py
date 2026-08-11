@@ -46,7 +46,7 @@ if _REPO_ROOT not in sys.path:
 from scripts._artifact import emit_json
 
 SKILL = "valuation-reconcile"
-RECONCILE_VERSION = "1.0.0"
+RECONCILE_VERSION = "1.1.0"
 
 # The disagreement edge above which the DCF-vs-comps split is UNRESOLVED. This is
 # the SAME 0.25 edge score_fundamental widens on and decision_contract fires
@@ -245,6 +245,44 @@ def reverse_dcf(dcf_reverse_inputs, last):
 
 
 # --------------------------------------------------------------------------- #
+# QC21: probability-weighted fair value (the coverage bear/base/bull DCF blend),
+# surfaced as a REAL numeric leaf -- not left to live only inside the
+# variant_justification / scenario_reasoning PROSE strings, where a report-layer
+# citation would orphan under number_provenance (no whitelist entry covers those
+# free-text fields, by design -- they are judgment prose, not a transcribed
+# number). Emitting the value here (already computed, cited, by coverage) makes
+# the provenance problem disappear the same way every other reconcile field does.
+# --------------------------------------------------------------------------- #
+
+def _probability_weighted_fv(dcf_reverse_inputs):
+    """coverage's probability-weighted DCF fair value per share, or None.
+
+    Reads ``dcf_reverse_inputs.probability_weighted_value_per_share`` verbatim
+    (MU: 741.16) -- already the bear/base/bull probability blend coverage
+    computed; this module does not recompute it. A DISCLOSURE, not a new price
+    target, exactly like ``reverse_dcf``. None when the inputs block is absent
+    or the field is missing/non-numeric.
+    """
+    if not isinstance(dcf_reverse_inputs, dict):
+        return None
+    return _num(dcf_reverse_inputs.get("probability_weighted_value_per_share"))
+
+
+def _fv_vs_price_pct(fv, last):
+    """Signed fraction ``(fv - last) / last``, or None.
+
+    Both ``fv`` and ``last`` must be usable numbers and ``last`` non-zero (a
+    disclosure computed from two already-transcribed leaves, so the render layer
+    never re-derives it and the result stays a report-safe numeric leaf).
+    """
+    fv = _num(fv)
+    last = _num(last)
+    if fv is None or last is None or last == 0:
+        return None
+    return round((fv - last) / last, 4)
+
+
+# --------------------------------------------------------------------------- #
 # Bundle assembly.
 # --------------------------------------------------------------------------- #
 
@@ -265,10 +303,22 @@ def build_reconcile(fundamental, scenario_drivers, last):
     reverse = None
     scenarios = None
     citations = None
+    prob_weighted_fv = None
     if isinstance(scenario_drivers, dict):
-        reverse = reverse_dcf(scenario_drivers.get("dcf_reverse_inputs"), last)
+        dcf_reverse_inputs = scenario_drivers.get("dcf_reverse_inputs")
+        reverse = reverse_dcf(dcf_reverse_inputs, last)
         scenarios = scenario_drivers.get("scenarios")
         citations = scenario_drivers.get("citations")
+        prob_weighted_fv = _probability_weighted_fv(dcf_reverse_inputs)
+
+    # D2 (adversarial review): the pct MUST be derived from the same rounded
+    # leaf a reader sees printed, not the raw unrounded value -- otherwise a
+    # reader who recomputes (fv - last) / last from the row's own numbers gets
+    # a different answer than the bundle carries (measured 52.6% self-
+    # inconsistency on sub-$10 names, where 2dp rounding is a large relative
+    # move).
+    prob_weighted_fv_rounded = (round(prob_weighted_fv, 2)
+                                if prob_weighted_fv is not None else None)
 
     return {
         "skill": SKILL,
@@ -279,6 +329,9 @@ def build_reconcile(fundamental, scenario_drivers, last):
         "reverse_dcf": reverse,
         "scenarios": scenarios,
         "citations": citations,
+        "probability_weighted_fv": prob_weighted_fv_rounded,
+        "probability_weighted_fv_vs_price_pct": _fv_vs_price_pct(
+            prob_weighted_fv_rounded, last),
     }
 
 

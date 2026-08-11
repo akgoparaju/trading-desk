@@ -231,70 +231,219 @@ class TestStreetView(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# 2. Revisions momentum (max 20): band + up/down adjustment
+# 2. Revisions momentum (max 20): QC17 re-cut band + up/down adjustment.
+# score_revisions(revisions_ntm, revisions_90d) -- signature changed by QC17 (was
+# score_revisions(revisions)). Band-edge tests below drive the fallback path
+# (revisions_ntm=None) so they pin the edges themselves, basis-agnostic; the
+# NTM-vs-fallback SELECTION logic is exercised separately in
+# TestRevisionsRekey. New edges (single grid, both bases):
+#   pct >  0.15  -> 20      pct >  0.01  -> 14
+#   pct >= -0.01 -> 10      pct >= -0.15 ->  5      else -> 0
 # --------------------------------------------------------------------------- #
 
 class TestRevisions(unittest.TestCase):
     def test_rev_strong_is_20(self):
-        # pct 0.05 > 0.03 -> 20 (up==down so no adj)
-        sub = ss.score_revisions(_rev(pct=0.05, up_30d=3, down_30d=3))
+        # pct 0.20 > 0.15 -> 20 (up==down so no adj)
+        sub = ss.score_revisions(None, _rev(pct=0.20, up_30d=3, down_30d=3))
         self.assertEqual(sub["inputs"]["band_points"], 20)
         self.assertEqual(sub["inputs"]["adjustment_points"], 0)
 
     def test_rev_good_is_14(self):
-        # 0.02 in (0.005,0.03] -> 14
-        sub = ss.score_revisions(_rev(pct=0.02, up_30d=3, down_30d=3))
+        # 0.05 in (0.01,0.15] -> 14
+        sub = ss.score_revisions(None, _rev(pct=0.05, up_30d=3, down_30d=3))
         self.assertEqual(sub["inputs"]["band_points"], 14)
 
     def test_rev_flat_is_10(self):
-        # 0.0 in [-0.005,0.005] -> 10
-        sub = ss.score_revisions(_rev(pct=0.0, up_30d=3, down_30d=3))
+        # 0.0 in [-0.01,0.01] -> 10
+        sub = ss.score_revisions(None, _rev(pct=0.0, up_30d=3, down_30d=3))
         self.assertEqual(sub["inputs"]["band_points"], 10)
 
     def test_rev_soft_is_5(self):
-        # -0.01 in [-0.03,-0.005) -> 5
-        sub = ss.score_revisions(_rev(pct=-0.01, up_30d=3, down_30d=3))
+        # -0.05 in [-0.15,-0.01) -> 5
+        sub = ss.score_revisions(None, _rev(pct=-0.05, up_30d=3, down_30d=3))
         self.assertEqual(sub["inputs"]["band_points"], 5)
 
     def test_rev_weak_is_0(self):
-        # -0.05 < -0.03 -> 0
-        sub = ss.score_revisions(_rev(pct=-0.05, up_30d=3, down_30d=3))
+        # -0.20 < -0.15 -> 0
+        sub = ss.score_revisions(None, _rev(pct=-0.20, up_30d=3, down_30d=3))
         self.assertEqual(sub["inputs"]["band_points"], 0)
 
     def test_rev_null_is_0_na(self):
-        sub = ss.score_revisions(_rev(pct=None))
+        sub = ss.score_revisions(None, _rev(pct=None))
         self.assertEqual(sub["inputs"]["band_points"], 0)
         self.assertIn("n/a", sub["arithmetic"])
 
+    def test_edge_plus_015_is_14_not_20(self):
+        # exactly +0.15 -- boundary is strict '>', so it does NOT clear the top band.
+        sub = ss.score_revisions(None, _rev(pct=0.15, up_30d=3, down_30d=3))
+        self.assertEqual(sub["inputs"]["band_points"], 14)
+
+    def test_edge_minus_001_is_10(self):
+        # exactly -0.01 -- '>=' means it lands in the neutral band.
+        sub = ss.score_revisions(None, _rev(pct=-0.01, up_30d=3, down_30d=3))
+        self.assertEqual(sub["inputs"]["band_points"], 10)
+
+    def test_edge_minus_015_is_5_not_0(self):
+        # exactly -0.15 -- '>=' means it does NOT fall into the dead bottom band.
+        sub = ss.score_revisions(None, _rev(pct=-0.15, up_30d=3, down_30d=3))
+        self.assertEqual(sub["inputs"]["band_points"], 5)
+
     def test_up_gt_down_adds_2_capped(self):
         # band 20 + up(9)>down(3) +2 -> capped at 20
-        sub = ss.score_revisions(_rev(pct=0.05, up_30d=9, down_30d=3))
+        sub = ss.score_revisions(None, _rev(pct=0.20, up_30d=9, down_30d=3))
         self.assertEqual(sub["inputs"]["adjustment_points"], 2)
         self.assertEqual(sub["points"], 20)
 
     def test_up_gt_down_adds_2_below_cap(self):
         # band 14 + up>down +2 -> 16
-        sub = ss.score_revisions(_rev(pct=0.02, up_30d=9, down_30d=3))
+        sub = ss.score_revisions(None, _rev(pct=0.05, up_30d=9, down_30d=3))
         self.assertEqual(sub["inputs"]["adjustment_points"], 2)
         self.assertEqual(sub["points"], 16)
 
     def test_down_gt_up_subtracts_2_floored(self):
         # band 0 + down>up -2 -> floored at 0
-        sub = ss.score_revisions(_rev(pct=-0.05, up_30d=1, down_30d=9))
+        sub = ss.score_revisions(None, _rev(pct=-0.20, up_30d=1, down_30d=9))
         self.assertEqual(sub["inputs"]["adjustment_points"], -2)
         self.assertEqual(sub["points"], 0)
 
     def test_tie_no_adjustment(self):
-        sub = ss.score_revisions(_rev(pct=0.02, up_30d=5, down_30d=5))
+        sub = ss.score_revisions(None, _rev(pct=0.05, up_30d=5, down_30d=5))
         self.assertEqual(sub["inputs"]["adjustment_points"], 0)
 
     def test_null_counts_no_adjustment(self):
-        sub = ss.score_revisions(_rev(pct=0.02, up_30d=None, down_30d=None))
+        sub = ss.score_revisions(None, _rev(pct=0.05, up_30d=None, down_30d=None))
         self.assertEqual(sub["inputs"]["adjustment_points"], 0)
 
     def test_all_null_not_evaluable(self):
-        sub = ss.score_revisions(None)
+        sub = ss.score_revisions(None, None)
         self.assertFalse(sub["evaluable"])
+
+
+# --------------------------------------------------------------------------- #
+# 2b. QC17 re-key: score_revisions reads fundamentals.revisions_ntm.pct when
+# present (basis "ntm_blend"), falling back to fundamentals.revisions_90d.pct
+# (basis "near_fy_fallback") when revisions_ntm is absent/null -- never
+# silently. The basis actually used must appear in the emitted arithmetic.
+# --------------------------------------------------------------------------- #
+
+class TestRevisionsRekey(unittest.TestCase):
+    def test_ntm_used_when_present(self):
+        # NTM says 0.20 (-> 20); near-FY says -0.20 (-> 0). NTM must win.
+        sub = ss.score_revisions(_rev(pct=0.20, up_30d=3, down_30d=3),
+                                 _rev(pct=-0.20, up_30d=1, down_30d=9))
+        self.assertEqual(sub["inputs"]["band_points"], 20)
+        self.assertEqual(sub["inputs"]["basis"], "ntm_blend")
+        self.assertIn("ntm_blend", sub["arithmetic"])
+
+    def test_ntm_counts_come_from_ntm_block_not_near_fy(self):
+        # NTM up(9)>down(1) -> +2; near-FY's up(1)<down(9) must NOT be used.
+        sub = ss.score_revisions(_rev(pct=0.05, up_30d=9, down_30d=1),
+                                 _rev(pct=0.05, up_30d=1, down_30d=9))
+        self.assertEqual(sub["inputs"]["adjustment_points"], 2)
+        self.assertEqual(sub["inputs"]["up_30d"], 9)
+        self.assertEqual(sub["inputs"]["down_30d"], 1)
+
+    def test_fallback_when_ntm_absent(self):
+        sub = ss.score_revisions(None, _rev(pct=0.05, up_30d=9, down_30d=1))
+        self.assertEqual(sub["inputs"]["basis"], "near_fy_fallback")
+        self.assertIn("near_fy_fallback", sub["arithmetic"])
+        self.assertEqual(sub["inputs"]["band_points"], 14)
+
+    def test_fallback_when_ntm_pct_null(self):
+        # revisions_ntm dict present but its pct is null -- still a fallback,
+        # never a silent zero.
+        sub = ss.score_revisions(_rev(pct=None, up_30d=3, down_30d=3),
+                                 _rev(pct=0.05, up_30d=9, down_30d=1))
+        self.assertEqual(sub["inputs"]["basis"], "near_fy_fallback")
+        self.assertEqual(sub["inputs"]["band_points"], 14)
+
+    def test_both_absent_still_names_a_basis(self):
+        sub = ss.score_revisions(None, None)
+        self.assertEqual(sub["inputs"]["basis"], "near_fy_fallback")
+        self.assertIn("near_fy_fallback", sub["arithmetic"])
+        self.assertFalse(sub["evaluable"])
+
+
+# --------------------------------------------------------------------------- #
+# 2c. QC17 ground-truth pins (docs/reviews/2026-08-10-qc17-band-recut-proposal.md
+# section 4.4): both calibration names are score-identical before/after the
+# re-cut. AAPL's -0.5713% NTM revision sits inside the widened neutral band;
+# MU's +51.97% sits far above every candidate outer edge tested.
+# --------------------------------------------------------------------------- #
+
+class TestRevisionsCalibrationNames(unittest.TestCase):
+    def test_aapl_2026_08_07(self):
+        # revisions_ntm.pct (archived bundle, level-blend); counts from the
+        # highest-weight FY record (FY27, w=0.849315): 7 up / 1 down.
+        ntm = {"pct": -0.0057132616437662875, "up_30d": 7, "down_30d": 1}
+        sub = ss.score_revisions(ntm, None)
+        self.assertEqual(sub["inputs"]["basis"], "ntm_blend")
+        self.assertEqual(sub["inputs"]["band_points"], 10)        # unchanged from shipped
+        self.assertEqual(sub["inputs"]["adjustment_points"], 2)   # 7 up > 1 down
+        self.assertEqual(sub["points"], 12)                       # 12/20, unchanged from shipped
+
+    def test_mu_2026_08_08(self):
+        # revisions_ntm.pct (archived bundle); counts 30 up / 0 down.
+        ntm = {"pct": 0.519660642968002, "up_30d": 30, "down_30d": 0}
+        sub = ss.score_revisions(ntm, None)
+        self.assertEqual(sub["inputs"]["basis"], "ntm_blend")
+        self.assertEqual(sub["inputs"]["band_points"], 20)
+        self.assertEqual(sub["inputs"]["adjustment_points"], 2)
+        self.assertEqual(sub["points"], 20)                       # 20/20 capped, unchanged
+
+
+# --------------------------------------------------------------------------- #
+# 2d. Near-FY fallback on a real thin-estimate name (COHR-class: a single
+# future-FY estimate row -> _build_revisions_ntm returns None -> revisions_ntm
+# is absent). Under the OLD edges (>0.03) COHR's +0.0746 saturated the top
+# band (20); under the NEW edges it lands in 14 -- the re-cut fixing the fix.
+# --------------------------------------------------------------------------- #
+
+class TestRevisionsFallbackNearFY(unittest.TestCase):
+    def test_cohr_like_fallback(self):
+        sub = ss.score_revisions(None, {"pct": 0.0746, "up_30d": 4, "down_30d": 1})
+        self.assertEqual(sub["inputs"]["basis"], "near_fy_fallback")
+        self.assertIn("near_fy_fallback", sub["arithmetic"])
+        self.assertEqual(sub["inputs"]["band_points"], 14)
+
+
+# --------------------------------------------------------------------------- #
+# 2e. F17-A2 saturation regression pin: the 21-ticker revisions_ntm.pct cross-
+# section from the 2026-08-09 offline falsifier sweep (quoted verbatim in the
+# QC17 proposal doc's section 0.2 from
+# docs/reviews/data/2026-08-09-phase2-falsifier-sweep-results.json, a file in
+# the separate jutsu-trading-desk repo) must land <=50% in the extreme bands
+# under the new edges -- the whole reason the re-cut shipped. Values are
+# hardcoded here (not read cross-repo) so this test stays self-contained.
+# --------------------------------------------------------------------------- #
+
+class TestRevisionsSaturationRegression(unittest.TestCase):
+    _SWEEP_NTM_PCT = {
+        "META": -0.024599, "PG": -0.010813, "AAPL": -0.005713, "WMT": -0.002837,
+        "T": 0.004858, "ORCL": 0.006113, "KO": 0.013058, "MSFT": 0.019365,
+        "XOM": 0.059927, "JPM": 0.067519, "UNH": 0.080204, "CAT": 0.096563,
+        "TSM": 0.108665, "NVDA": 0.119415, "GOOG": 0.188309, "AMZN": 0.194036,
+        "BE": 0.209647, "RUN": 0.210776, "OUST": 0.284102, "INTC": 0.371177,
+        "MU": 0.530411,
+    }
+
+    def _band(self, pct):
+        sub = ss.score_revisions({"pct": pct, "up_30d": None, "down_30d": None}, None)
+        return sub["inputs"]["band_points"]
+
+    def test_saturation_at_or_below_50pct(self):
+        bands = {t: self._band(p) for t, p in self._SWEEP_NTM_PCT.items()}
+        n = len(bands)
+        saturated = sum(1 for b in bands.values() if b in (20, 0))
+        self.assertLessEqual(saturated / n, 0.50)
+        # measured expectation: 7/21 = 33.3%
+        self.assertEqual(saturated, 7)
+
+    def test_new_distribution_matches_measured_expectation(self):
+        # proposal doc section 4.2: proposed distribution 20:7 / 14:8 / 10:4 / 5:2 / 0:0
+        bands = [self._band(p) for p in self._SWEEP_NTM_PCT.values()]
+        counts = {b: bands.count(b) for b in (20, 14, 10, 5, 0)}
+        self.assertEqual(counts, {20: 7, 14: 8, 10: 4, 5: 2, 0: 0})
 
 
 # --------------------------------------------------------------------------- #
@@ -775,12 +924,16 @@ class TestTables(unittest.TestCase):
 
 class TestScore(unittest.TestCase):
     def _full(self):
-        return {"sentiment": _sent(), "revisions": _rev(),
+        # revisions_ntm=None -> score() exercises the near-FY fallback path by
+        # default, matching pre-QC17 behavior for callers that only carry the
+        # near-FY leg.
+        return {"sentiment": _sent(), "revisions_ntm": None, "revisions_90d": _rev(),
                 "tech": _tech(), "bench": _bench()}
 
     def test_no_renormalization_when_all_dimensions_have_inputs(self):
         d = self._full()
-        result = ss.score(d["sentiment"], d["revisions"], d["tech"], d["bench"],
+        result = ss.score(d["sentiment"], d["revisions_ntm"], d["revisions_90d"],
+                          d["tech"], d["bench"],
                           "neutral", None, "neutral", None, "normal", None)
         self.assertFalse(result["renormalized"])
         maxes = sum(s["max"] for s in result["subscores"])
@@ -789,9 +942,9 @@ class TestScore(unittest.TestCase):
         self.assertLessEqual(result["score"], 100)
 
     def test_revisions_null_renormalizes(self):
-        # revisions block entirely null -> that dimension (max 20) excluded.
+        # both revisions blocks entirely null -> that dimension (max 20) excluded.
         d = self._full()
-        result = ss.score(d["sentiment"], None, d["tech"], d["bench"],
+        result = ss.score(d["sentiment"], None, None, d["tech"], d["bench"],
                           "neutral", None, "neutral", None, "normal", None)
         self.assertTrue(result["renormalized"])
         maxes = sum(s["max"] for s in result["subscores"])
@@ -799,7 +952,8 @@ class TestScore(unittest.TestCase):
 
     def test_score_five_subscores(self):
         d = self._full()
-        result = ss.score(d["sentiment"], d["revisions"], d["tech"], d["bench"],
+        result = ss.score(d["sentiment"], d["revisions_ntm"], d["revisions_90d"],
+                          d["tech"], d["bench"],
                           "neutral", None, "neutral", None, "normal", None)
         self.assertEqual(len(result["subscores"]), 5)
 
@@ -831,11 +985,13 @@ class TestFactorSums(unittest.TestCase):
 
     def test_top_level_maxes_unchanged(self):
         # All five top-level dimension maxes stay 25/20/20/20/15 = 100.
-        d = {"sentiment": _sent(), "revisions": _rev(),
+        d = {"sentiment": _sent(), "revisions_ntm": None, "revisions_90d": _rev(),
              "tech": _tech(), "bench": _bench()}
-        # score(sentiment, revisions, tech, bench, rating_actions, ra_just,
-        #       inst_flow, inst_flow_just, insider_baseline, insider_baseline_just)
-        result = ss.score(d["sentiment"], d["revisions"], d["tech"], d["bench"],
+        # score(sentiment, revisions_ntm, revisions_90d, tech, bench,
+        #       rating_actions, ra_just, inst_flow, inst_flow_just,
+        #       insider_baseline, insider_baseline_just)   -- QC17 signature
+        result = ss.score(d["sentiment"], d["revisions_ntm"], d["revisions_90d"],
+                          d["tech"], d["bench"],
                           "neutral", None, "accumulating", "13F buys",
                           "normal", None)
         maxes = [s["max"] for s in result["subscores"]]
@@ -932,14 +1088,16 @@ class TestBELikeStressCase(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 class TestRubricAndNote(unittest.TestCase):
-    def test_rubric_version_is_110(self):
-        self.assertEqual(ss.RUBRIC_VERSION, "1.1.0")
+    def test_rubric_version_is_120(self):
+        self.assertEqual(ss.RUBRIC_VERSION, "1.2.0")
 
     def test_module_note_is_provisional(self):
         self.assertEqual(
             ss.MODULE_NOTE,
-            "sentiment-v1.1.0 PROVISIONAL -- positioning/news bands unratified "
-            "pending B9; falsifier pre-registered")
+            "sentiment-v1.2.0 PROVISIONAL -- positioning/news bands unratified "
+            "pending B9; revisions-momentum re-cut to the NTM basis (QC17), "
+            "edges unratified pending quarterly falsifiers F17-A2/D/E/F; "
+            "falsifier pre-registered")
         self.assertIn("PROVISIONAL", ss.MODULE_NOTE)
         self.assertIn("falsifier", ss.MODULE_NOTE)
 
@@ -952,10 +1110,13 @@ class TestInputFields(unittest.TestCase):
     def test_input_fields_exact(self):
         # v1.1.0 adds news_heat, insider_classification, dtc,
         # put_call_ratio_full_chain_volume, skew_25d_30d.
+        # QC17 (v1.2.0) adds fundamentals.revisions_ntm (revisions_90d retained
+        # as the disclosed fallback).
         self.assertEqual(ss.INPUT_FIELDS, {
             "sentiment.ratings", "sentiment.pt_vs_price_pct",
             "sentiment.news_heat",
-            "fundamentals.revisions_90d", "sentiment.insider_net_90d_usd",
+            "fundamentals.revisions_90d", "fundamentals.revisions_ntm",
+            "sentiment.insider_net_90d_usd",
             "sentiment.insider_classification",
             "sentiment.short_interest_pct", "sentiment.dtc",
             "sentiment.put_call_ratio_full_chain",
@@ -1010,10 +1171,12 @@ class TestCLI(unittest.TestCase):
         with open(out) as fh:
             doc = json.load(fh)
         self.assertEqual(doc["skill"], "sentiment-positioning")
-        self.assertEqual(doc["rubric_version"], "1.1.0")
+        self.assertEqual(doc["rubric_version"], "1.2.0")
         self.assertEqual(doc["module_note"],
-                         "sentiment-v1.1.0 PROVISIONAL -- positioning/news bands "
-                         "unratified pending B9; falsifier pre-registered")
+                         "sentiment-v1.2.0 PROVISIONAL -- positioning/news bands "
+                         "unratified pending B9; revisions-momentum re-cut to the "
+                         "NTM basis (QC17), edges unratified pending quarterly "
+                         "falsifiers F17-A2/D/E/F; falsifier pre-registered")
         self.assertEqual(doc["ticker"], "MU")
         self.assertIn("as_of", doc)
         self.assertIsInstance(doc["score"], (int, float))
@@ -1093,6 +1256,70 @@ class TestCLI(unittest.TestCase):
         with open(out2) as fh:
             b = fh.read()
         self.assertEqual(a, b)
+
+
+# --------------------------------------------------------------------------- #
+# QF5 x QC17: the pre-earnings null-revisions warning must key off whichever
+# leg score_revisions ACTUALLY scores post-re-key -- not off revisions_90d
+# alone. A name whose revisions_ntm blend is populated (>=2 future FY rows)
+# must NOT fire the warning merely because its near-FY leg (revisions_90d)
+# happens to be null from AV coverage volatility (documented in the QC17
+# proposal doc section 3.3.3): the NTM leg still scores the dimension.
+# --------------------------------------------------------------------------- #
+
+class TestQF5NamesTheEffectiveInput(unittest.TestCase):
+    def _snap(self, days_to_earnings, revisions_ntm=None, revisions_90d=None):
+        from datetime import date, timedelta
+        as_of = date(2026, 7, 16)
+        ne_date = (as_of + timedelta(days=days_to_earnings)).isoformat()
+        return {
+            "meta": {"ticker": "MU", "as_of_utc": "2026-07-16T00:00:00Z"},
+            "sentiment": _sent(),
+            "technicals": _tech(),
+            "benchmark": _bench(),
+            "fundamentals": {
+                "revisions_ntm": revisions_ntm,
+                "revisions_90d": revisions_90d,
+                "revisions_null_reason": ("no_future_fy_row"
+                                          if revisions_90d is None else None),
+            },
+            "events": {"next_earnings": {"date": ne_date, "consensus_eps": None},
+                      "catalysts": []},
+        }
+
+    def _build(self, snap):
+        return ss.build_module(snap, "neutral", None, "unknown", None,
+                               "normal", None)
+
+    def test_no_warning_when_ntm_present_even_if_90d_null(self):
+        ntm = {"pct": 0.05, "up_30d": 9, "down_30d": 1}
+        doc = self._build(self._snap(10, revisions_ntm=ntm, revisions_90d=None))
+        self.assertIsNone(doc["flags"]["revisions_null_pre_earnings_warning"])
+        # the revisions dimension WAS scored (via the NTM leg) -- not excluded.
+        excluded = [s["name"] for s in doc["subscores"] if s.get("excluded")]
+        self.assertNotIn("revisions_momentum", excluded)
+
+    def test_warning_still_fires_when_both_null(self):
+        doc = self._build(self._snap(10, revisions_ntm=None, revisions_90d=None))
+        self.assertIsNotNone(doc["flags"]["revisions_null_pre_earnings_warning"])
+
+    def test_warning_string_names_the_effective_both_legs_state(self):
+        # QF5 (adversarial review): the string still said "revisions_90d is
+        # null" though the firing condition is now BOTH legs null and the
+        # primary basis is revisions_ntm -- fix the string to name the
+        # effective state without changing the level/keying (this test's
+        # sibling above already pins WHEN it fires).
+        doc = self._build(self._snap(10, revisions_ntm=None, revisions_90d=None))
+        warning = doc["flags"]["revisions_null_pre_earnings_warning"]
+        self.assertIn("revisions_ntm and revisions_90d are both null", warning)
+        self.assertNotIn("revisions_90d is null within", warning)
+
+    def test_no_warning_when_only_90d_present(self):
+        # pre-QC17 shape preserved: revisions_ntm absent, revisions_90d present
+        # -> the fallback scores it -> no warning.
+        rev90 = {"pct": 0.02, "up_30d": 9, "down_30d": 3}
+        doc = self._build(self._snap(10, revisions_ntm=None, revisions_90d=rev90))
+        self.assertIsNone(doc["flags"]["revisions_null_pre_earnings_warning"])
 
 
 if __name__ == "__main__":

@@ -160,6 +160,16 @@ def _pct(frac, dp=1):
     return f"{frac * 100:.{dp}f}%"
 
 
+def _signed_pct(frac, dp=1):
+    """A fraction as a SIGNED percent string ('+8.5%' / '-8.5%' / '0.0%'), or
+    'n/a'. Used for vs-spot deltas (QC21 street confrontation) where the sign
+    itself is the point -- an unsigned '8.5%' does not say which direction."""
+    if frac is None or isinstance(frac, bool) or not isinstance(frac, (int, float)):
+        return "n/a"
+    sign = "+" if frac > 0 else ""
+    return f"{sign}{frac * 100:.{dp}f}%"
+
+
 def _read(x):
     """Score-band one-word read (scripted, never a prose slot)."""
     if x is None:
@@ -609,7 +619,56 @@ def build_event_playbook(snapshot, tradeplan):
     return "\n".join(parts)
 
 
-def build_page1(snapshot, composite, tradeplan, contract=None):
+def build_street_confrontation(snapshot, contract, reconcile):
+    """Page-1 STREET CONFRONTATION bullet (QC21): three views of one stock on
+    one scripted line -- street consensus PT, coverage's probability-weighted
+    DCF fair value (when transcribed), and the desk's own EV -- so a reader can
+    answer "the street says B or better, are we wrong?" without hunting the
+    bundle. Worked example, MU (2026-08-08), ON A FRESH RE-RUN of
+    valuation_reconcile.py against coverage/scenario_drivers.json: street
+    1507.79 (+71.8%), coverage FV 741.16 (-15.5%), desk EV +6.8% -- a
+    confrontation the prose never had to state because it now sits in a
+    scripted table row. (D1: an already-archived module_valuation_reconcile.json
+    built before probability_weighted_fv existed will not carry the coverage
+    clause until the reconcile step is re-run -- this is a disclosure of what
+    a live run produces, not a claim about every past artifact on disk.)
+
+    Every number is a bundle leaf: consensus_pt / pt_vs_price_pct off
+    snapshot.sentiment (already computed upstream by build_snapshot); ``fv`` /
+    ``fv_vs_price_pct`` off module_valuation_reconcile.json (QC21 surfaced both
+    as real numeric leaves so this needs no provenance whitelist entry); and
+    ev_at_current off the decision contract (itself a module_composite.ev leaf,
+    the same field build_capital_status's EV-band line already cites).
+
+    Null-safe: no snapshot / no consensus_pt (incl. key present with value
+    None) -> '' (the row is OMITTED, never fabricated -- an absent street PT is
+    not "0%"). No reconcile / no probability_weighted_fv -> the coverage clause
+    is dropped; street + desk still render. No contract -> desk EV renders
+    'n/a' rather than crashing.
+    """
+    sentiment = (snapshot or {}).get("sentiment") or {}
+    consensus_pt = sentiment.get("consensus_pt")
+    if consensus_pt is None:
+        return ""
+    pt_vs_pct = sentiment.get("pt_vs_price_pct")
+
+    bits = [f"street consensus PT {_fmt_price(consensus_pt)} "
+            f"({_signed_pct(pt_vs_pct)} vs spot)"]
+
+    if isinstance(reconcile, dict):
+        fv = reconcile.get("probability_weighted_fv")
+        if fv is not None:
+            fv_pct = reconcile.get("probability_weighted_fv_vs_price_pct")
+            bits.append(f"coverage probability-weighted FV {_fmt_price(fv)} "
+                        f"({_signed_pct(fv_pct)} vs spot)")
+
+    ev_at_current = contract.get("ev_at_current") if isinstance(contract, dict) else None
+    bits.append(f"desk EV {_signed_pct(ev_at_current)}")
+
+    return "- **Street confrontation:** " + " · ".join(bits)
+
+
+def build_page1(snapshot, composite, tradeplan, contract=None, reconcile=None):
     parts = [
         "## Page 1 — Decision",
         "",
@@ -623,6 +682,11 @@ def build_page1(snapshot, composite, tradeplan, contract=None):
     capital_status = build_capital_status(contract)
     if capital_status:
         parts.extend([capital_status, ""])
+    # QC21: the street-confrontation bullet -- omitted (never fabricated) when
+    # the snapshot carries no consensus_pt.
+    street = build_street_confrontation(snapshot, contract, reconcile)
+    if street:
+        parts.extend([street, ""])
     parts.extend([
         build_the_call(composite, contract),
         "",
@@ -1009,6 +1073,12 @@ def build_options_expression(options, tradeplan):
     liq = options.get("liquidity_verdict") or "not disclosed"
     liquidity_line = f"**Liquidity**: *{liq}*."
 
+    # QC21: warnings_global reaches the reader -- one bullet per entry, directly
+    # under the Liquidity line (mirrors the integrity footer's one-note-per-
+    # bullet idiom for api_tier_notes). [] / absent -> no bullets, block unchanged.
+    warnings_global = options.get("warnings_global") or []
+    warnings_bullets = [f"- ⚠ {wn}" for wn in warnings_global]
+
     rec = options.get("recommended_structures", []) or []
     rec_rows = []
     for st in rec:
@@ -1018,12 +1088,19 @@ def build_options_expression(options, tradeplan):
         net = st.get("net_credit")
         net_txt = (f"credit {_fmt_price(net)}" if net is not None
                    else f"debit {_fmt_price(st.get('net_debit'))}")
+        # QC21: per-structure warnings (e.g. "realized > implied: premium
+        # sellers are NOT being paid for delivered vol") were scored by
+        # options_strategy but never reached the reader -- a Warnings column,
+        # joined like every other multi-value cell in this table (legs/
+        # breakevens); "none" (not a blank cell) when there are none.
+        warn_cell = "; ".join(st.get("warnings") or []) or "none"
         rec_rows.append([st.get("name", ""), legs, net_txt,
                          _fmt_price(st.get("max_loss")),
                          "; ".join(_fmt_price(b) for b in st.get("breakevens", [])),
-                         f"{_fmt(st.get('pop'))} ({st.get('pop_method', '')})"])
+                         f"{_fmt(st.get('pop'))} ({st.get('pop_method', '')})",
+                         warn_cell])
     rec_tbl = (_table(["Structure", "Legs", "Net", "Max Loss", "Breakevens",
-                       "PoP (method)"], rec_rows)
+                       "PoP (method)", "Warnings"], rec_rows)
                if rec_rows else "_No structures recommended._")
 
     declined = options.get("declined", []) or []
@@ -1046,12 +1123,15 @@ def build_options_expression(options, tradeplan):
                    for p in ("trader", "balanced", "long-term")]
     matrix_tbl = _table(["Profile", "Expression"], matrix_rows)
 
-    return "\n".join([
+    parts = [
         "### Options Expression",
         "",
         verdict_line,
         "",
         liquidity_line,
+    ]
+    parts.extend(warnings_bullets)
+    parts.extend([
         "",
         "**Recommended structures**",
         "",
@@ -1065,6 +1145,7 @@ def build_options_expression(options, tradeplan):
         "",
         matrix_tbl,
     ])
+    return "\n".join(parts)
 
 
 def build_monitoring(tradeplan):
@@ -1224,7 +1305,8 @@ def build_full_report(bundle_docs, bundle=None):
     contract = decision_contract.build_contract(bundle_docs)
 
     page1 = build_page1(snapshot, bundle_docs["module_composite"],
-                        bundle_docs["module_tradeplan"], contract)
+                        bundle_docs["module_tradeplan"], contract,
+                        bundle_docs.get("module_valuation_reconcile"))
     page2 = build_page2(bundle_docs["module_technical"],
                         bundle_docs["module_fundamental"],
                         bundle_docs["module_sentiment"],

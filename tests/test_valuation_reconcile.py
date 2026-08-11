@@ -65,6 +65,12 @@ _GOOG_REVERSE = {
 }
 _GOOG_LAST = 351.37
 
+# QC21: the real MU probability_weighted_value_per_share (coverage/scenario_drivers
+# .json dcf_reverse_inputs, 2026-08-08 bundle) + the live snapshot price.last used
+# to compute the vs-spot pct -- (741.16 - 877.57) / 877.57 = -15.54%.
+_MU_PROB_WEIGHTED_FV = 741.16
+_MU_LAST = 877.57
+
 
 # --------------------------------------------------------------------------- #
 # disagreement + disagreement_state (the state table).
@@ -267,6 +273,108 @@ class TestBuildReconcile(unittest.TestCase):
     def test_absent_fundamental_anchors_state_none(self):
         doc = vr.build_reconcile({"subscores": []}, None, _GOOG_LAST)
         self.assertIsNone(doc["disagreement_state"])
+
+    def test_reconcile_version_is_1_1_0(self):
+        # D4 (adversarial review): the artifact gained two keys
+        # (probability_weighted_fv / probability_weighted_fv_vs_price_pct)
+        # since 1.0.0 -- pin the bump.
+        doc = vr.build_reconcile(_fundamental(), None, _GOOG_LAST)
+        self.assertEqual(doc["reconcile_version"], "1.1.0")
+        self.assertEqual(vr.RECONCILE_VERSION, "1.1.0")
+
+
+# --------------------------------------------------------------------------- #
+# QC21: probability_weighted_fv -- the coverage bear/base/bull DCF blend
+# (dcf_reverse_inputs.probability_weighted_value_per_share) surfaced as a REAL
+# numeric leaf on module_valuation_reconcile.json, so the report-layer street-
+# confrontation row can cite it without a number_provenance whitelist entry.
+# --------------------------------------------------------------------------- #
+
+class TestProbabilityWeightedFv(unittest.TestCase):
+    def test_present_surfaces_value_and_vs_price_pct(self):
+        drivers = {
+            "dcf_reverse_inputs": {
+                "probability_weighted_value_per_share": _MU_PROB_WEIGHTED_FV,
+            },
+        }
+        doc = vr.build_reconcile(_fundamental(), drivers, _MU_LAST)
+        self.assertEqual(doc["probability_weighted_fv"], _MU_PROB_WEIGHTED_FV)
+        expected_pct = (_MU_PROB_WEIGHTED_FV - _MU_LAST) / _MU_LAST
+        self.assertAlmostEqual(doc["probability_weighted_fv_vs_price_pct"],
+                               expected_pct, places=4)
+        self.assertAlmostEqual(doc["probability_weighted_fv_vs_price_pct"],
+                               -0.1554, places=4)
+
+    def test_absent_scenario_drivers_both_none(self):
+        doc = vr.build_reconcile(_fundamental(), None, _MU_LAST)
+        self.assertIsNone(doc["probability_weighted_fv"])
+        self.assertIsNone(doc["probability_weighted_fv_vs_price_pct"])
+
+    def test_field_missing_from_dcf_reverse_inputs_both_none(self):
+        drivers = {"dcf_reverse_inputs": {"wacc": 0.135}}
+        doc = vr.build_reconcile(_fundamental(), drivers, _MU_LAST)
+        self.assertIsNone(doc["probability_weighted_fv"])
+        self.assertIsNone(doc["probability_weighted_fv_vs_price_pct"])
+
+    def test_absent_dcf_reverse_inputs_block_both_none(self):
+        drivers = {"scenarios": {}}
+        doc = vr.build_reconcile(_fundamental(), drivers, _MU_LAST)
+        self.assertIsNone(doc["probability_weighted_fv"])
+        self.assertIsNone(doc["probability_weighted_fv_vs_price_pct"])
+
+    def test_absent_last_price_fv_still_present_pct_none(self):
+        # AAPL-shape guard: even without a current price, the transcribed FV is
+        # still a real leaf (the pct alone is what needs both legs).
+        drivers = {
+            "dcf_reverse_inputs": {
+                "probability_weighted_value_per_share": _MU_PROB_WEIGHTED_FV,
+            },
+        }
+        doc = vr.build_reconcile(_fundamental(), drivers, None)
+        self.assertEqual(doc["probability_weighted_fv"], _MU_PROB_WEIGHTED_FV)
+        self.assertIsNone(doc["probability_weighted_fv_vs_price_pct"])
+
+    def test_zero_last_price_pct_none_no_div_by_zero(self):
+        drivers = {
+            "dcf_reverse_inputs": {
+                "probability_weighted_value_per_share": _MU_PROB_WEIGHTED_FV,
+            },
+        }
+        doc = vr.build_reconcile(_fundamental(), drivers, 0.0)
+        self.assertEqual(doc["probability_weighted_fv"], _MU_PROB_WEIGHTED_FV)
+        self.assertIsNone(doc["probability_weighted_fv_vs_price_pct"])
+
+    def test_non_numeric_field_is_none(self):
+        drivers = {
+            "dcf_reverse_inputs": {
+                "probability_weighted_value_per_share": "n/a",
+            },
+        }
+        doc = vr.build_reconcile(_fundamental(), drivers, _MU_LAST)
+        self.assertIsNone(doc["probability_weighted_fv"])
+        self.assertIsNone(doc["probability_weighted_fv_vs_price_pct"])
+
+    def test_pct_computed_from_rounded_leaf_not_raw_value(self):
+        # D2 (adversarial review): probability_weighted_fv is rounded 2dp for
+        # display, but probability_weighted_fv_vs_price_pct was computed from
+        # the UNROUNDED raw value -- a reader who recomputes the row's own
+        # printed numbers (fv - last) / last got a DIFFERENT answer than the
+        # bundle carries (measured 52.6% self-inconsistency on sub-$10 names).
+        # Trigger: last=1.20, raw FV 0.914999 -> leaf 0.91 -> pct must be
+        # (0.91 - 1.20) / 1.20 = -0.241667 (4dp -0.2417), NOT the
+        # raw-value answer -0.2375.
+        drivers = {
+            "dcf_reverse_inputs": {
+                "probability_weighted_value_per_share": 0.914999,
+            },
+        }
+        doc = vr.build_reconcile(_fundamental(), drivers, 1.20)
+        self.assertEqual(doc["probability_weighted_fv"], 0.91)
+        self.assertAlmostEqual(doc["probability_weighted_fv_vs_price_pct"],
+                               -0.2417, places=4)
+        # Explicitly reject the raw-value (self-inconsistent) answer.
+        self.assertNotAlmostEqual(doc["probability_weighted_fv_vs_price_pct"],
+                                  -0.2375, places=4)
 
 
 # --------------------------------------------------------------------------- #

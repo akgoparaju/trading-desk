@@ -1260,6 +1260,83 @@ def _draw_exec_page1(doc, bundle, docs, slots, diff, prev_date, plan=None):
     doc.end_page()
 
 
+# --------------------------------------------------------------------------- #
+# QC21: options warnings reach the EXEC docket. render_exec never touched
+# module_options at all -- warnings_global (e.g. "PRIMARY GATE: IV is CHEAP vs
+# realized -- premium selling has no edge") and per-structure ``warnings``
+# (e.g. "realized > implied: premium sellers are NOT being paid for delivered
+# vol") were scored by options_strategy and rendered into the Detail PDF's
+# _draw_options_section, but a reader of the 2-page exec sheet never saw them.
+# --------------------------------------------------------------------------- #
+
+def _exec_options_warnings(opt):
+    """PURE: the ``(label, text)`` pairs the compact exec band renders.
+
+    Per-structure warnings come first, each labeled with its structure name;
+    ``warnings_global`` entries follow, unlabeled (``label`` is None). ``[]``
+    when there are none -- the caller renders nothing (keeps exec compact for
+    the common no-warning case).
+    """
+    out = []
+    for st in (opt.get("recommended_structures") or []):
+        if not isinstance(st, dict):
+            continue
+        name = st.get("name", "")
+        for wn in (st.get("warnings") or []):
+            out.append((name, wn))
+    for wn in (opt.get("warnings_global") or []):
+        out.append((None, wn))
+    return out
+
+
+def _draw_exec_options_warnings(doc, docs, y_top):
+    """Compact OPTIONS WARNINGS band for the exec Trade_Report PDF (QC21).
+
+    Mirrors the Detail PDF's ``_draw_options_section`` warnings convention (red
+    text, ``⚠`` prefix) but WITHOUT the full options table -- exec stays a
+    2-page sheet. Omitted entirely (returns ``y_top`` unchanged) when there are
+    no warnings, so the common case adds nothing to the page.
+
+    D3 (adversarial review): with enough structures/warnings this band used to
+    decrement y with no bounds check, overprinting the footer or walking off
+    the page (measured to y=-107). The exec sheet is a FIXED 2-page document
+    (unlike the Detail PDF's packed dimension pages, which can open a new
+    page), so a bounds violation here cannot be fixed by paginating -- instead
+    each item is measured before it is drawn, and once the next item would
+    cross the footer band the band stops and CAPS-AND-DISCLOSES with a
+    ``(+N more — see Detail PDF)`` line, so nothing overflows and nothing is
+    dropped silently (the Detail PDF's ``_draw_options_section`` always
+    carries the full, uncapped set).
+    """
+    opt = docs.get("module_options") or {}
+    items = _exec_options_warnings(opt)
+    if not items:
+        return y_top
+    M = doc.MARGIN
+    W = doc.CONTENT_W
+    LEADING = 9.4
+    # Keep clear of the footer hairline -- the same clearance the FINDINGS
+    # block and the packed-dimension pages hold (doc.MARGIN + 24).
+    page_bottom = doc.MARGIN + 24
+    doc.section_head(M, y_top, "OPTIONS WARNINGS", w=W)
+    y = y_top - 12
+    for idx, (label, wn) in enumerate(items):
+        txt = "⚠ %s: %s" % (label, wn) if label else "⚠ %s" % wn
+        lines = doc.wrap(txt, doc.FONT, 7.2, W)
+        block_h = len(lines) * LEADING
+        if y - block_h < page_bottom:
+            remaining = len(items) - idx
+            if y - LEADING >= page_bottom:
+                doc.text(M, y, "(+%d more — see Detail PDF)" % remaining,
+                         font=doc.FONT_I, size=7.2, rgb=doc.GRAY_MD)
+                y -= LEADING
+            return y
+        for ln in lines:
+            doc.text(M, y, ln, font=doc.FONT, size=7.2, rgb=doc.RED)
+            y -= LEADING
+    return y
+
+
 def _draw_exec_page2(doc, bundle, docs, slots):
     top = doc.begin_page("Page 2 — Evidence")
     M = doc.MARGIN
@@ -1309,8 +1386,11 @@ def _draw_exec_page2(doc, bundle, docs, slots):
 
     # Positioning & Execution grid.
     pe_top = min(rev_bottom, pe_bottom) - 18
-    _positioning_grid(doc, lx, pe_top, doc.CONTENT_W, gutter,
-                      slots.get("positioning") or {})
+    pg_bottom = _positioning_grid(doc, lx, pe_top, doc.CONTENT_W, gutter,
+                                  slots.get("positioning") or {})
+
+    # QC21: compact options-warnings band (omitted when there are none).
+    _draw_exec_options_warnings(doc, docs, pg_bottom - 16)
 
     doc.end_page()
 
