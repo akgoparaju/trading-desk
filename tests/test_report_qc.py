@@ -1684,3 +1684,45 @@ def test_ev_scenario_agreement_is_registered_in_the_non_delta_check_set_only():
     import inspect
     src = inspect.getsource(rq.run_report_qc)
     assert src.count("check_ev_scenario_agreement(docs)") == 1
+
+
+# --------------------------------------------------------------------------- #
+# QC21: per-structure module_options.recommended_structures[].warnings must be
+# whitelisted -- a number embedded inside one (e.g. "realized 45.2% > implied
+# 30.1%") is not a numeric leaf (it lives only inside a string), so without the
+# whitelist entry it would ORPHAN once the report renders it in the new
+# Warnings column / exec-PDF band.
+# --------------------------------------------------------------------------- #
+
+def test_number_in_structure_warning_is_whitelisted():
+    docs = {
+        "module_options": {
+            "recommended_structures": [
+                {"name": "bull_put_spread",
+                 "warnings": ["realized 45.2% > implied 30.1%: premium "
+                              "sellers are NOT being paid for delivered vol"]},
+            ],
+        },
+    }
+    nums = list(rq._iter_whitelisted_string_numbers(docs))
+    assert 45.2 in nums
+    assert 30.1 in nums
+
+
+def test_absent_warnings_key_yields_nothing_extra_and_does_not_raise():
+    docs = {"module_options": {"recommended_structures": [{"name": "x"}]}}
+    assert list(rq._iter_whitelisted_string_numbers(docs)) == []
+
+
+def test_multiple_structures_each_contribute_their_warnings():
+    docs = {
+        "module_options": {
+            "recommended_structures": [
+                {"name": "a", "warnings": ["first 1.5x number"]},
+                {"name": "b", "warnings": ["second 2.5x number"]},
+            ],
+        },
+    }
+    nums = list(rq._iter_whitelisted_string_numbers(docs))
+    assert 1.5 in nums
+    assert 2.5 in nums

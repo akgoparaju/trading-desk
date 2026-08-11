@@ -65,6 +65,12 @@ _GOOG_REVERSE = {
 }
 _GOOG_LAST = 351.37
 
+# QC21: the real MU probability_weighted_value_per_share (coverage/scenario_drivers
+# .json dcf_reverse_inputs, 2026-08-08 bundle) + the live snapshot price.last used
+# to compute the vs-spot pct -- (741.16 - 877.57) / 877.57 = -15.54%.
+_MU_PROB_WEIGHTED_FV = 741.16
+_MU_LAST = 877.57
+
 
 # --------------------------------------------------------------------------- #
 # disagreement + disagreement_state (the state table).
@@ -267,6 +273,78 @@ class TestBuildReconcile(unittest.TestCase):
     def test_absent_fundamental_anchors_state_none(self):
         doc = vr.build_reconcile({"subscores": []}, None, _GOOG_LAST)
         self.assertIsNone(doc["disagreement_state"])
+
+
+# --------------------------------------------------------------------------- #
+# QC21: probability_weighted_fv -- the coverage bear/base/bull DCF blend
+# (dcf_reverse_inputs.probability_weighted_value_per_share) surfaced as a REAL
+# numeric leaf on module_valuation_reconcile.json, so the report-layer street-
+# confrontation row can cite it without a number_provenance whitelist entry.
+# --------------------------------------------------------------------------- #
+
+class TestProbabilityWeightedFv(unittest.TestCase):
+    def test_present_surfaces_value_and_vs_price_pct(self):
+        drivers = {
+            "dcf_reverse_inputs": {
+                "probability_weighted_value_per_share": _MU_PROB_WEIGHTED_FV,
+            },
+        }
+        doc = vr.build_reconcile(_fundamental(), drivers, _MU_LAST)
+        self.assertEqual(doc["probability_weighted_fv"], _MU_PROB_WEIGHTED_FV)
+        expected_pct = (_MU_PROB_WEIGHTED_FV - _MU_LAST) / _MU_LAST
+        self.assertAlmostEqual(doc["probability_weighted_fv_vs_price_pct"],
+                               expected_pct, places=4)
+        self.assertAlmostEqual(doc["probability_weighted_fv_vs_price_pct"],
+                               -0.1554, places=4)
+
+    def test_absent_scenario_drivers_both_none(self):
+        doc = vr.build_reconcile(_fundamental(), None, _MU_LAST)
+        self.assertIsNone(doc["probability_weighted_fv"])
+        self.assertIsNone(doc["probability_weighted_fv_vs_price_pct"])
+
+    def test_field_missing_from_dcf_reverse_inputs_both_none(self):
+        drivers = {"dcf_reverse_inputs": {"wacc": 0.135}}
+        doc = vr.build_reconcile(_fundamental(), drivers, _MU_LAST)
+        self.assertIsNone(doc["probability_weighted_fv"])
+        self.assertIsNone(doc["probability_weighted_fv_vs_price_pct"])
+
+    def test_absent_dcf_reverse_inputs_block_both_none(self):
+        drivers = {"scenarios": {}}
+        doc = vr.build_reconcile(_fundamental(), drivers, _MU_LAST)
+        self.assertIsNone(doc["probability_weighted_fv"])
+        self.assertIsNone(doc["probability_weighted_fv_vs_price_pct"])
+
+    def test_absent_last_price_fv_still_present_pct_none(self):
+        # AAPL-shape guard: even without a current price, the transcribed FV is
+        # still a real leaf (the pct alone is what needs both legs).
+        drivers = {
+            "dcf_reverse_inputs": {
+                "probability_weighted_value_per_share": _MU_PROB_WEIGHTED_FV,
+            },
+        }
+        doc = vr.build_reconcile(_fundamental(), drivers, None)
+        self.assertEqual(doc["probability_weighted_fv"], _MU_PROB_WEIGHTED_FV)
+        self.assertIsNone(doc["probability_weighted_fv_vs_price_pct"])
+
+    def test_zero_last_price_pct_none_no_div_by_zero(self):
+        drivers = {
+            "dcf_reverse_inputs": {
+                "probability_weighted_value_per_share": _MU_PROB_WEIGHTED_FV,
+            },
+        }
+        doc = vr.build_reconcile(_fundamental(), drivers, 0.0)
+        self.assertEqual(doc["probability_weighted_fv"], _MU_PROB_WEIGHTED_FV)
+        self.assertIsNone(doc["probability_weighted_fv_vs_price_pct"])
+
+    def test_non_numeric_field_is_none(self):
+        drivers = {
+            "dcf_reverse_inputs": {
+                "probability_weighted_value_per_share": "n/a",
+            },
+        }
+        doc = vr.build_reconcile(_fundamental(), drivers, _MU_LAST)
+        self.assertIsNone(doc["probability_weighted_fv"])
+        self.assertIsNone(doc["probability_weighted_fv_vs_price_pct"])
 
 
 # --------------------------------------------------------------------------- #

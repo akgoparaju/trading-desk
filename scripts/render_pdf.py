@@ -1260,6 +1260,59 @@ def _draw_exec_page1(doc, bundle, docs, slots, diff, prev_date, plan=None):
     doc.end_page()
 
 
+# --------------------------------------------------------------------------- #
+# QC21: options warnings reach the EXEC docket. render_exec never touched
+# module_options at all -- warnings_global (e.g. "PRIMARY GATE: IV is CHEAP vs
+# realized -- premium selling has no edge") and per-structure ``warnings``
+# (e.g. "realized > implied: premium sellers are NOT being paid for delivered
+# vol") were scored by options_strategy and rendered into the Detail PDF's
+# _draw_options_section, but a reader of the 2-page exec sheet never saw them.
+# --------------------------------------------------------------------------- #
+
+def _exec_options_warnings(opt):
+    """PURE: the ``(label, text)`` pairs the compact exec band renders.
+
+    Per-structure warnings come first, each labeled with its structure name;
+    ``warnings_global`` entries follow, unlabeled (``label`` is None). ``[]``
+    when there are none -- the caller renders nothing (keeps exec compact for
+    the common no-warning case).
+    """
+    out = []
+    for st in (opt.get("recommended_structures") or []):
+        if not isinstance(st, dict):
+            continue
+        name = st.get("name", "")
+        for wn in (st.get("warnings") or []):
+            out.append((name, wn))
+    for wn in (opt.get("warnings_global") or []):
+        out.append((None, wn))
+    return out
+
+
+def _draw_exec_options_warnings(doc, docs, y_top):
+    """Compact OPTIONS WARNINGS band for the exec Trade_Report PDF (QC21).
+
+    Mirrors the Detail PDF's ``_draw_options_section`` warnings convention (red
+    text, ``⚠`` prefix) but WITHOUT the full options table -- exec stays a
+    2-page sheet. Omitted entirely (returns ``y_top`` unchanged) when there are
+    no warnings, so the common case adds nothing to the page.
+    """
+    opt = docs.get("module_options") or {}
+    items = _exec_options_warnings(opt)
+    if not items:
+        return y_top
+    M = doc.MARGIN
+    W = doc.CONTENT_W
+    doc.section_head(M, y_top, "OPTIONS WARNINGS", w=W)
+    y = y_top - 12
+    for label, wn in items:
+        txt = "⚠ %s: %s" % (label, wn) if label else "⚠ %s" % wn
+        for ln in doc.wrap(txt, doc.FONT, 7.2, W):
+            doc.text(M, y, ln, font=doc.FONT, size=7.2, rgb=doc.RED)
+            y -= 9.4
+    return y
+
+
 def _draw_exec_page2(doc, bundle, docs, slots):
     top = doc.begin_page("Page 2 — Evidence")
     M = doc.MARGIN
@@ -1309,8 +1362,11 @@ def _draw_exec_page2(doc, bundle, docs, slots):
 
     # Positioning & Execution grid.
     pe_top = min(rev_bottom, pe_bottom) - 18
-    _positioning_grid(doc, lx, pe_top, doc.CONTENT_W, gutter,
-                      slots.get("positioning") or {})
+    pg_bottom = _positioning_grid(doc, lx, pe_top, doc.CONTENT_W, gutter,
+                                  slots.get("positioning") or {})
+
+    # QC21: compact options-warnings band (omitted when there are none).
+    _draw_exec_options_warnings(doc, docs, pg_bottom - 16)
 
     doc.end_page()
 

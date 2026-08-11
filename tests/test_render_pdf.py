@@ -1622,6 +1622,93 @@ class TestRenderSmoke(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# QC21: options warnings_global + per-structure warnings reach the EXEC
+# Trade_Report PDF (render_exec never touched module_options at all before this
+# -- grep confirmed zero occurrences outside the Detail-only
+# _draw_options_section). Pure selection logic first, then the rendered bytes.
+# --------------------------------------------------------------------------- #
+
+class TestExecOptionsWarningsSelection(unittest.TestCase):
+    """rp._exec_options_warnings(opt) -- pure (label, text) pair selection, no
+    reportlab required."""
+
+    def test_no_warnings_returns_empty(self):
+        self.assertEqual(rp._exec_options_warnings({}), [])
+        self.assertEqual(rp._exec_options_warnings(
+            {"warnings_global": [],
+             "recommended_structures": [{"name": "x", "warnings": []}]}), [])
+
+    def test_structure_warnings_labeled_with_structure_name(self):
+        opt = {"recommended_structures": [
+            {"name": "bull_put_spread", "warnings": ["w1", "w2"]}]}
+        self.assertEqual(rp._exec_options_warnings(opt),
+                         [("bull_put_spread", "w1"), ("bull_put_spread", "w2")])
+
+    def test_global_warnings_unlabeled_and_come_after_structure_warnings(self):
+        opt = {
+            "recommended_structures": [{"name": "s1", "warnings": ["sw"]}],
+            "warnings_global": ["gw"],
+        }
+        self.assertEqual(rp._exec_options_warnings(opt),
+                         [("s1", "sw"), (None, "gw")])
+
+
+@unittest.skipUnless(_CAN_RENDER, "reportlab+matplotlib required for render smoke")
+class TestExecOptionsWarningsRendered(unittest.TestCase):
+    def _prep_stamped(self, d, charts=True, slots=None):
+        _mk_bundle(d)
+        path = _write_slots(d, slots or _clean_slots())
+        rc, out, err = _qc_slots(d, path)
+        self.assertEqual(rc, 0, out + err)
+        if charts:
+            from scripts import render_charts
+            docs = render_charts.load_docs(d)
+            render_charts.render_set(docs, render_charts._chart_names("all"),
+                                     os.path.join(d, "charts"))
+
+    def test_exec_shows_warnings_global(self):
+        # The default fixture's module_options.json already carries a
+        # warnings_global entry ("BINARY EVENT...").
+        with tempfile.TemporaryDirectory() as d:
+            self._prep_stamped(d)
+            rc, out, err = _render(d, "exec")
+            self.assertEqual(rc, 0, out + err)
+            text = _pdf_text(os.path.join(d, "MU_Trade_Report_2026-07-16.pdf"))
+            self.assertIn(b"BINARY EVENT", text)
+
+    def test_exec_shows_per_structure_warning(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._prep_stamped(d)
+            opt_path = os.path.join(d, "module_options.json")
+            with open(opt_path) as fh:
+                opt = json.load(fh)
+            opt["recommended_structures"][0]["warnings"] = [
+                "realized > implied: premium sellers are NOT being paid "
+                "for delivered vol"]
+            with open(opt_path, "w") as fh:
+                json.dump(opt, fh)
+            rc, out, err = _render(d, "exec")
+            self.assertEqual(rc, 0, out + err)
+            text = _pdf_text(os.path.join(d, "MU_Trade_Report_2026-07-16.pdf"))
+            self.assertIn(b"NOT being paid for delivered vol", text)
+
+    def test_exec_omits_options_warnings_band_when_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._prep_stamped(d)
+            opt_path = os.path.join(d, "module_options.json")
+            with open(opt_path) as fh:
+                opt = json.load(fh)
+            opt["warnings_global"] = []
+            opt["recommended_structures"][0]["warnings"] = []
+            with open(opt_path, "w") as fh:
+                json.dump(opt, fh)
+            rc, out, err = _render(d, "exec")
+            self.assertEqual(rc, 0, out + err)
+            text = _pdf_text(os.path.join(d, "MU_Trade_Report_2026-07-16.pdf"))
+            self.assertNotIn(b"OPTIONS WARNINGS", text)
+
+
+# --------------------------------------------------------------------------- #
 # D7 — profit_take null/repick disclosure reaches the ACTUAL rendered PDF
 # bytes (not just the pure _trade_plan_rows function above). Notes are kept
 # short here so they aren't cut by _trade_plan_table's column-width
