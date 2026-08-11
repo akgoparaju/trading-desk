@@ -25,6 +25,7 @@ import io
 import json
 import math
 import os
+import statistics
 import sys
 
 if sys.version_info < (3, 10):  # statistics.covariance/correlation need 3.10
@@ -40,7 +41,7 @@ if _REPO_ROOT not in sys.path:
 
 from scripts import chain, indicators
 
-SCHEMA_VERSION = "0.5.0"
+SCHEMA_VERSION = "0.7.0"
 
 # Files that MUST be present; their absence aborts the build.
 REQUIRED = ("global_quote", "overview", "daily_adjusted", "spy_daily_adjusted")
@@ -889,6 +890,143 @@ def _weinstein_stage(last, ma50, ma200, ma50_slope, ma200_slope,
     return 1
 
 
+# --------------------------------------------------------------------------- #
+# QC20(c): extension-credit gating after a fresh event break.
+#
+# score_technical.py's extension sub-component (last/ma200 distance-below-over-
+# extended) mechanically REWARDS a crash: a fresh gap-down improves it. This
+# block detects a "qualifying break" -- a session j where
+#   (a) close[j]/close[j-1]-1 <= -_EXTGATE_Z * sigma_1d(j), sigma_1d(j) = the
+#       SAMPLE stdev of the 20 daily returns ENDING THE SESSION BEFORE j.
+#   (b) j falls on, or within _EXTGATE_EVENT_AFTER sessions after, a
+#       reportedDate read from the RAW earnings payload (``earn_q``, the
+#       newest-first quarterlyEarnings list as parsed by ``_quarterly`` --
+#       QC7's mis-join trap applies here too: NEVER the renamed
+#       events.earnings_move_history[].reported_date, or a pre-0.5.0 bundle
+#       would silently disarm the gate).
+# When >=1 qualifying break lies in the trailing _EXTGATE_WINDOW sessions, the
+# session immediately before the EARLIEST such break is surfaced (date/close/
+# ma200) so score_technical can cap the extension sub-component at what it
+# scored the session before the break -- credit WITHHOLDING, never a fresh
+# penalty. score_technical.py is snapshot-only (never reads raw files), so the
+# break DETECTION lives here (it needs both daily bars and raw earnings) and
+# surfaces as ``technicals.extension_gate`` for score_technical to consume.
+# PROVISIONAL -- cleared to ship by the 2026-08-09 offline falsifier sweep
+# (F20c-A armed-rate 4.99% vs a >15% kill; F20c-B binding-rate 30.2% vs a <10%
+# kill -- both pass; see score_technical.MODULE_NOTE).
+_EXTGATE_WINDOW = 10          # trailing sessions checked for a qualifying break
+_EXTGATE_SIGMA_LOOKBACK = 20  # daily returns used for sigma_1d
+_EXTGATE_Z = 2.0              # magnitude threshold, in sigma_1d units
+_EXTGATE_EVENT_AFTER = 3      # sessions after reportedDate that still qualify
+
+
+def build_extension_gate(rows, earn_q):
+    """Detect a qualifying event-break in the trailing sessions (see module
+    note above). ``rows`` are the oldest-first parsed daily rows (needs
+    date + close + adjusted_close); ``earn_q`` is the newest-first
+    quarterlyEarnings list read from the RAW earnings payload.
+
+    Returns (ascending by date within ``qualifying_breaks``)::
+
+        {"armed": bool,
+         "qualifying_breaks": [{"date", "return_1d", "sigma_1d", "z",
+                                 "reported_date"}, ...],
+         "earliest_break_date": str | None,
+         "reference_date": str | None,       # session before the earliest break
+         "reference_close": float | None,    # that session's raw close
+         "reference_ma200": float | None}    # ma200 (adjusted_close basis) as
+                                              # of that session; None if <200
+                                              # dated rows precede it.
+
+    Null-safe throughout: insufficient history, no raw earnings, or an
+    unparseable reportedDate simply leave the gate not armed.
+    """
+    empty = {"armed": False, "qualifying_breaks": [], "earliest_break_date": None,
+             "reference_date": None, "reference_close": None,
+             "reference_ma200": None}
+
+    dated = sorted(
+        ((r["date"], r["close"], r.get("adjusted_close"))
+         for r in (rows or []) if r.get("date") and r.get("close") is not None),
+        key=lambda x: x[0],
+    )
+    n = len(dated)
+    if n < _EXTGATE_SIGMA_LOOKBACK + 2:
+        return empty
+
+    dates = [d for d, _, _ in dated]
+    closes = [c for _, c, _ in dated]
+    adj_closes = [a for _, _, a in dated]
+    rets = indicators.simple_returns(closes)   # rets[i-1] = session i's return
+
+    # reportedDate anchors -- read from the RAW earnings payload (earn_q), never
+    # the renamed events field (QC7 mis-join trap). Each anchor is the index of
+    # the first trading day >= reportedDate (reportedDate need not itself be a
+    # trading day).
+    anchors = []
+    for q in (earn_q or []):
+        if not isinstance(q, dict):
+            continue
+        reported = q.get("reportedDate")
+        d = _parse_date(reported)
+        if d is None:
+            continue
+        idx = bisect.bisect_left(dates, d.isoformat())
+        if idx < n:
+            anchors.append((idx, reported))
+
+    def event_anchor(j):
+        for a_idx, reported in anchors:
+            if a_idx <= j <= a_idx + _EXTGATE_EVENT_AFTER:
+                return reported
+        return None
+
+    window_start = max(0, n - _EXTGATE_WINDOW)
+    start = max(window_start, _EXTGATE_SIGMA_LOOKBACK + 1)
+    breaks = []
+    for j in range(start, n):
+        ret_j = rets[j - 1]
+        window_rets = rets[j - _EXTGATE_SIGMA_LOOKBACK - 1: j - 1]
+        if len(window_rets) < _EXTGATE_SIGMA_LOOKBACK:
+            continue
+        try:
+            sigma = statistics.stdev(window_rets)
+        except statistics.StatisticsError:
+            continue
+        if sigma <= 0 or ret_j > -_EXTGATE_Z * sigma:
+            continue   # condition (a) fails
+        reported = event_anchor(j)
+        if reported is None:
+            continue   # condition (b) fails
+        breaks.append({
+            "date": dates[j], "return_1d": ret_j, "sigma_1d": sigma,
+            "z": ret_j / sigma, "reported_date": reported, "_j": j,
+        })
+
+    if not breaks:
+        return empty
+
+    earliest = breaks[0]
+    ref_idx = earliest["_j"] - 1
+    for b in breaks:
+        del b["_j"]
+
+    ref_window = adj_closes[max(0, ref_idx - 199):ref_idx + 1]
+    if len(ref_window) >= 200 and all(v is not None for v in ref_window):
+        ref_ma200 = indicators.sma(adj_closes[:ref_idx + 1], 200)
+    else:
+        ref_ma200 = None
+
+    return {
+        "armed": True,
+        "qualifying_breaks": breaks,
+        "earliest_break_date": earliest["date"],
+        "reference_date": dates[ref_idx],
+        "reference_close": closes[ref_idx],
+        "reference_ma200": ref_ma200,
+    }
+
+
 def build_technicals(rows, series_source=None, next_earnings_date=None,
                      earn_q=None):
     """Technicals block from adjusted-close + volume series (oldest-first).
@@ -971,6 +1109,16 @@ def build_technicals(rows, series_source=None, next_earnings_date=None,
     ma200_slope = indicators.ma_slope(adj, 200, 20)
     last_px = adj[-1] if adj else None
 
+    # Field 2 (Phase-2 disclosure): shorter-horizon MA pair, SAME house
+    # convention as ma50/ma200 above (SMA on adjusted close; slope =
+    # sma_series[-1]/sma_series[-1-lookback]-1, indicators.ma_slope) -- just a
+    # 10/21-day window with a 5-day slope lookback. Pure disclosure, wired
+    # into no scorer.
+    ma10 = indicators.sma(adj, 10)
+    ma21 = indicators.sma(adj, 21)
+    ma10_slope = indicators.ma_slope(adj, 10, 5)
+    ma21_slope = indicators.ma_slope(adj, 21, 5)
+
     # Weinstein regime stage (guard field; pure OHLCV, null-safe).
     stage = _weinstein_stage(last_px, ma50, ma200, ma50_slope, ma200_slope)
 
@@ -1005,11 +1153,23 @@ def build_technicals(rows, series_source=None, next_earnings_date=None,
             earn_anchor = first.get("reportedDate")
     vwap_earnings = indicators.anchored_vwap(rows, earn_anchor) if earn_anchor else None
 
+    # QC20(c): event-break extension-credit gate. Needs both the daily bars
+    # (already in scope) and the RAW earnings reportedDates (earn_q, passed in
+    # by the caller for the vwap_earnings anchor above) -- see
+    # build_extension_gate's module note for why detection lives here rather
+    # than in score_technical.py.
+    extension_gate = build_extension_gate(rows, earn_q)
+
     block = {
         "ma50": ma50,
         "ma200": ma200,
         "ma50_slope_20d": ma50_slope,
         "ma200_slope_20d": ma200_slope,
+        "ma10": ma10,                        # Field 2: short-horizon MA pair
+        "ma21": ma21,
+        "ma10_slope_5d": ma10_slope,
+        "ma21_slope_5d": ma21_slope,
+        "extension_gate": extension_gate,    # QC20(c): event-break credit gate
         "adx14": adx14,                      # Wave 4A: Wilder ADX(14) trend strength
         "stage": stage,                      # Wave 4A: Weinstein regime 1/2/3/4
         "rsi14": indicators.rsi(adj, 14),
@@ -1285,6 +1445,81 @@ def _time_weighted_ntm_eps(fy_rows, as_of_date):
     return eps_ntm, coverage, detail, fy_weights
 
 
+def _build_revisions_ntm(fy, as_of_date, eps_ntm_now, fy_weights):
+    """fundamentals.revisions_ntm (Field 3, Phase-2 disclosure).
+
+    revisions_90d is keyed to fy[0] -- the NEAREST future fiscal year -- which
+    is frequently a small slice of the NTM window (AAPL w=0.148, MU w=0.063 in
+    the calibration bundles): its 90-day revision says little about the
+    consensus that actually matters for a forward-365-day view. This applies
+    the SAME NTM-window-overlap weights the eps_ntm_consensus blend used
+    (``fy_weights``, ``_time_weighted_ntm_eps``) to the 90-days-ago column too,
+    and reports a LEVEL-BLEND pct: blend both the now and 90d-ago EPS series
+    with the identical weights, THEN take the ratio of the two blended sums
+    (eps_ntm_now / eps_ntm_90d - 1) -- not a weight-blend of each FY's own pct
+    change (a "rate-weighted" alternative that reads slightly differently on
+    AAPL: -0.005590 vs this method's -0.005713; the level-blend is what the
+    field's spec formula literally computes and is what is implemented here).
+    up_30d/down_30d are read from the HIGHEST-WEIGHT FY record (the record
+    that actually dominates the blend) rather than fy[0], so both revision
+    legs describe the SAME fiscal-year object as eps_ntm_now/eps_ntm_90d.
+
+    ``eps_ntm_now``/``fy_weights`` are the values ``_time_weighted_ntm_eps``
+    already produced for eps_ntm_consensus (passed in, not re-derived, so the
+    two are always bit-identical). Returns None if ``fy``/``as_of_date`` can't
+    support a blend (mirrors ``_time_weighted_ntm_eps``'s own None case --
+    the caller only invokes this once that blend already succeeded).
+    """
+    window_start = as_of_date
+    window_end = as_of_date + timedelta(days=365)
+    # Re-walk the SAME inclusion filter _time_weighted_ntm_eps used (a
+    # parseable date AND a parseable eps_estimate_average) so this list lines
+    # up 1:1 with fy_weights/eps_ntm_now -- same rows, same weights, same order.
+    rows_and_weights = []
+    for row in fy:
+        d = _parse_date(row.get("date"))
+        v_now = num(row.get("eps_estimate_average"))
+        if d is None or v_now is None:
+            continue
+        weight = _fy_overlap_weight(d, window_start, window_end)
+        rows_and_weights.append((row, weight))
+    if len(rows_and_weights) < 2:
+        return None
+
+    v90_vals = [num(row.get("eps_estimate_average_90_days_ago"))
+               for row, _ in rows_and_weights]
+    eps_ntm_90d = None
+    if all(v is not None for v in v90_vals):
+        eps_ntm_90d = sum(v * w for v, (_, w) in zip(v90_vals, rows_and_weights))
+    pct = (eps_ntm_now / eps_ntm_90d - 1) if eps_ntm_90d else None
+
+    top_row, top_weight = max(rows_and_weights, key=lambda t: t[1])
+    up_30d = num(top_row.get("eps_estimate_revision_up_trailing_30_days"))
+    down_30d = num(top_row.get("eps_estimate_revision_down_trailing_30_days"))
+
+    basis = (
+        f"level-blend across {len(rows_and_weights)} future fiscal-year "
+        f"records using the SAME NTM-window-overlap weights as "
+        f"eps_ntm_consensus: eps_ntm_now = sum(w_i * eps_estimate_average_i), "
+        f"eps_ntm_90d = sum(w_i * eps_estimate_average_90_days_ago_i), "
+        f"pct = eps_ntm_now / eps_ntm_90d - 1; up_30d/down_30d are read from "
+        f"the HIGHEST-WEIGHT FY record (FY ending {top_row.get('date')}, "
+        f"weight={top_weight:.6f}) so both revision legs describe the same "
+        f"fiscal-year object -- unlike revisions_90d, which is pinned to the "
+        f"nearest future FY regardless of its weight in the NTM blend."
+    )
+
+    return {
+        "eps_ntm_now": eps_ntm_now,
+        "eps_ntm_90d": eps_ntm_90d,
+        "pct": pct,
+        "up_30d": up_30d,
+        "down_30d": down_30d,
+        "fy_weights": fy_weights,
+        "basis": basis,
+    }
+
+
 def _current_and_next_fy(fy_rows, as_of_date):
     """Return (current_row, next_row) from ascending future-FY ``fy_rows``.
 
@@ -1359,6 +1594,126 @@ def _eps_share_reconciliation(inc_q, earn_q, bal_q):
             "divergence_pct": (implied - shares) / shares,
         })
     return out
+
+
+# Field 4 (Phase-2 disclosure) cycle-economics window: 12 fiscal years is a
+# deliberate judgment call -- long enough to span at least one full
+# semiconductor-style capex/inventory cycle without diluting to noise on a
+# newly-listed name; documented, not calibrated. Below 8 years there isn't
+# enough of a cycle to call the average meaningful, so the whole block is null.
+_CYCLE_ECONOMICS_WINDOW_FY = 12
+_CYCLE_ECONOMICS_MIN_FY = 8
+
+
+def _build_cycle_economics(inc_annual, cf_annual, bal_annual, fcf_ttm, rev_ttm,
+                           window_fy=_CYCLE_ECONOMICS_WINDOW_FY,
+                           min_fy=_CYCLE_ECONOMICS_MIN_FY):
+    """fundamentals.cycle_economics (Field 4, Phase-2 disclosure).
+
+    A name's TTM FCF margin can sit far from its own multi-year (cyclical)
+    average -- e.g. a semiconductor name deep in a capex/inventory trough
+    (TTM margin << cycle average) or at a cyclical peak (TTM margin >> cycle
+    average). cum_fcf/cum_revenue are CUMULATED (dollar sum over dollar sum
+    across the whole window, NOT an average of yearly margins) over the most
+    recent ``window_fy`` fiscal years (newest-first annualReports, capped at
+    however many are actually available); fcf_margin_cycle = cum_fcf /
+    cum_revenue. fcf_margin_ttm REUSES the already-computed quarterly-TTM
+    fcf_ttm / rev_ttm (no re-derivation -- an unrelated, shorter-horizon
+    computation); cycle_gap_ratio = fcf_margin_ttm / fcf_margin_cycle (>1 =>
+    running hot relative to the cycle; <1 => running cold). mean_roe_cycle is
+    the simple average of netIncome / totalShareholderEquity across whichever
+    fiscal years in the window have BOTH values, joined by fiscalDateEnding
+    (income and cash-flow rows are matched the same way -- never assumed to
+    share index alignment, even though AV's own multi-statement exports do in
+    practice).
+
+    Pure disclosure: wired into no scorer.
+
+    Null (the ENTIRE block) when fewer than ``min_fy`` fiscal years of BOTH
+    income and cash-flow annualReports are available -- there is no partial
+    degradation of window_fy below that floor. Once past the floor, any
+    individual dollar field that has NOTHING to sum (every contributing row
+    missing that field) degrades honestly to None rather than a misleading 0;
+    mean_roe_cycle similarly averages only the years with both netIncome and
+    a same-year equity figure, and is None if there are zero such years.
+    """
+    inc_annual = inc_annual if isinstance(inc_annual, list) else []
+    cf_annual = cf_annual if isinstance(cf_annual, list) else []
+    bal_annual = bal_annual if isinstance(bal_annual, list) else []
+
+    n_avail = min(len(inc_annual), len(cf_annual))
+    if n_avail < min_fy:
+        return None
+    n = min(n_avail, window_fy)
+    window = inc_annual[:n]
+
+    cf_by_date = {r.get("fiscalDateEnding"): r
+                 for r in cf_annual if isinstance(r, dict) and r.get("fiscalDateEnding")}
+    eq_by_date = {r.get("fiscalDateEnding"): num(r.get("totalShareholderEquity"))
+                 for r in bal_annual if isinstance(r, dict) and r.get("fiscalDateEnding")}
+
+    cum_fcf = 0.0
+    cum_revenue = 0.0
+    have_fcf = have_rev = False
+    roes = []
+    fy_end = window[0].get("fiscalDateEnding") if window else None
+    fy_start = window[-1].get("fiscalDateEnding") if window else None
+    for row in window:
+        if not isinstance(row, dict):
+            continue
+        d = row.get("fiscalDateEnding")
+
+        rev = num(row.get("totalRevenue"))
+        if rev is not None:
+            cum_revenue += rev
+            have_rev = True
+
+        cf_row = cf_by_date.get(d) if d else None
+        if isinstance(cf_row, dict):
+            ocf = num(cf_row.get("operatingCashflow"))
+            capex = num(cf_row.get("capitalExpenditures"))
+            if ocf is not None and capex is not None:
+                cum_fcf += (ocf - capex)
+                have_fcf = True
+
+        ni = num(row.get("netIncome"))
+        eq = eq_by_date.get(d) if d else None
+        if ni is not None and eq:
+            roes.append(ni / eq)
+
+    fcf_margin_cycle = (cum_fcf / cum_revenue
+                        if (have_rev and cum_revenue and have_fcf) else None)
+    fcf_margin_ttm = (fcf_ttm / rev_ttm) if (fcf_ttm is not None and rev_ttm) else None
+    cycle_gap_ratio = (fcf_margin_ttm / fcf_margin_cycle
+                       if (fcf_margin_ttm is not None and fcf_margin_cycle) else None)
+    mean_roe_cycle = (sum(roes) / len(roes)) if roes else None
+
+    basis = (
+        f"{n}-year (FY{fy_start} .. FY{fy_end}) cumulative FCF "
+        f"(operatingCashflow - capitalExpenditures, cash_flow.json "
+        f"annualReports) over cumulative totalRevenue (income_statement.json "
+        f"annualReports) -- a dollar-sum-over-dollar-sum margin, not an "
+        f"average of yearly margins (window_fy={window_fy}, capped at "
+        f"{n_avail} years available; null under {min_fy}). fcf_margin_ttm "
+        f"reuses the already-computed quarterly-TTM fcf_ttm/rev_ttm "
+        f"(unrelated, shorter-horizon computation -- not derived from this "
+        f"window). cycle_gap_ratio = fcf_margin_ttm / fcf_margin_cycle (>1 "
+        f"running hot vs. the cycle, <1 running cold). mean_roe_cycle = "
+        f"netIncome / totalShareholderEquity (balance_sheet.json "
+        f"annualReports, SAME fiscal year, joined by fiscalDateEnding), "
+        f"averaged over {len(roes)} of {n} years with both values present."
+    )
+
+    return {
+        "window_fy": n,
+        "cum_fcf": cum_fcf if have_fcf else None,
+        "cum_revenue": cum_revenue if have_rev else None,
+        "fcf_margin_cycle": fcf_margin_cycle,
+        "fcf_margin_ttm": fcf_margin_ttm,
+        "cycle_gap_ratio": cycle_gap_ratio,
+        "mean_roe_cycle": mean_roe_cycle,
+        "basis": basis,
+    }
 
 
 def build_fundamentals(income, balance, cashflow, earnings, estimates,
@@ -1437,6 +1792,10 @@ def build_fundamentals(income, balance, cashflow, earnings, estimates,
     # (nothing to disclose an alternative for), and the single-FY degraded
     # proxy already discloses its own degradation via eps_ntm_basis.
     eps_ntm_alternatives = None
+    # Field 3 (Phase-2 disclosure): populated on the SAME condition as
+    # eps_ntm_alternatives -- only the blend path has >=2 future FY rows to
+    # apply NTM-window weights to a 90-days-ago column.
+    revisions_ntm = None
     if len(fq) >= 4:
         vals = [num(r.get("eps_estimate_average")) for r in fq[:4]]
         vals = [v for v in vals if v is not None]
@@ -1497,6 +1856,11 @@ def build_fundamentals(income, balance, cashflow, earnings, estimates,
                 "vendor_forward_pe_implied_eps": vendor_fwd_pe_implied_eps,
                 "fy_weights": fy_weights,
             }
+
+            # Field 3: apply the SAME fy_weights to the 90-days-ago column
+            # (level-blend), keyed to the highest-weight FY for up/down.
+            revisions_ntm = _build_revisions_ntm(fy, as_of_parsed, eps_ntm,
+                                                 fy_weights)
     if eps_ntm is None and fy:
         v = num(fy[0].get("eps_estimate_average"))
         if v is not None:
@@ -1598,6 +1962,16 @@ def build_fundamentals(income, balance, cashflow, earnings, estimates,
     net_cash = _build_net_cash(bal_q[0]) if bal_q else None
     roe = num(overview.get("ReturnOnEquityTTM")) if isinstance(overview, dict) else None
 
+    # Field 4 (Phase-2 disclosure): 12yr cumulative FCF-margin vs TTM-margin
+    # gap, from annualReports (independent of the quarterly TTM machinery
+    # above except for reusing its already-computed fcf_ttm/rev_ttm).
+    cycle_economics = _build_cycle_economics(
+        _quarterly(income, "annualReports"),
+        _quarterly(cashflow, "annualReports"),
+        _quarterly(balance, "annualReports"),
+        fcf_ttm, rev_ttm,
+    )
+
     return {
         "rev_ttm": rev_ttm,
         "rev_growth_latest_q": rev_growth,
@@ -1617,11 +1991,13 @@ def build_fundamentals(income, balance, cashflow, earnings, estimates,
         "eps_ntm_alternatives": eps_ntm_alternatives,  # QC1-REGRESSION: blend inputs + alternative, never silent
         "revisions_90d": revisions,
         "revisions_null_reason": revisions_null_reason,  # QF5: null when revisions populated
+        "revisions_ntm": revisions_ntm,          # Field 3: NTM-weighted revisions view
         "next_fy_consensus": next_fy,
         "next_fy_basis": next_fy_basis,         # QC1: current/next FY-end disclosure
         "fcf_ttm": fcf_ttm,
         "net_cash_defined": net_cash,
         "roe": roe,
+        "cycle_economics": cycle_economics,     # Field 4: cyclical FCF-margin gap
     }
 
 
@@ -2855,7 +3231,7 @@ def build_earnings_move_history(earn_q, rows):
 
 
 def build_events(earnings_calendar, overview, as_of_date, earn_q=None,
-                 rows=None, implied_move=None):
+                 rows=None, implied_move=None, event_implied_move=None):
     """Events block: next earnings + dividends + event-aware disclosure fields.
 
     A1 additions (all deterministic, additive, null-safe):
@@ -2865,6 +3241,22 @@ def build_events(earnings_calendar, overview, as_of_date, earn_q=None,
       - earnings_move_history: up to 8 own-history reaction moves.
       - implied_move_vs_own_history_pctile: percentile rank of implied_move
         within the ABS move-history values.
+
+    Field 1 (Phase-2 disclosure) additions -- PURE DISCLOSURE, wired into no
+    scorer:
+      - event_implied_move: options.event_vol.event_implied_move, copied here
+        (passed in by the caller; no re-computation, no double chain call).
+        Unlike implied_move (the 1-sigma move of the first expiry ON/AFTER
+        the earnings date -- a multi-week horizon), this is the ISOLATED
+        earnings-day variance extracted via variance additivity between the
+        bracketing pre/post expiries (chain.event_implied_vol) -- the
+        dimensionally correct counterpart to earnings_move_history's
+        one-day reactions. implied_move and its own percentile are RETAINED
+        VERBATIM alongside it -- never a silent method swap; both bases
+        stay visible side by side.
+      - event_implied_move_vs_own_history_pctile: percentile rank of
+        event_implied_move within the SAME abs move-history values, using the
+        identical inline formula as implied_move_vs_own_history_pctile.
     Catalysts remain an LLM slot.
     """
     ne = _parse_earnings_calendar(earnings_calendar)
@@ -2893,12 +3285,24 @@ def build_events(earnings_calendar, overview, as_of_date, earn_q=None,
             at_or_below = sum(1 for a in abs_moves if a <= implied_move)
             implied_vs_own = 100 * at_or_below / len(abs_moves)
 
+    # Field 1 (Phase-2 disclosure): SAME inline percentile rule, keyed to the
+    # dimensionally-correct event_implied_move instead of implied_move.
+    event_implied_vs_own = None
+    if event_implied_move is not None and move_history:
+        abs_moves = [abs(m["move_pct"]) for m in move_history
+                     if m.get("move_pct") is not None]
+        if abs_moves:
+            at_or_below = sum(1 for a in abs_moves if a <= event_implied_move)
+            event_implied_vs_own = 100 * at_or_below / len(abs_moves)
+
     return {
         "next_earnings": ne,
         "days_to_event": days_to_event,
         "implied_move": implied_move,
         "earnings_move_history": move_history,
         "implied_move_vs_own_history_pctile": implied_vs_own,
+        "event_implied_move": event_implied_move,                          # Field 1
+        "event_implied_move_vs_own_history_pctile": event_implied_vs_own,  # Field 1
         "dividends": dividends,
         "catalysts": [],   # LLM slot
     }
@@ -3102,6 +3506,14 @@ def build_snapshot(bundle, ticker):
                                 next_earnings_date, as_of_date,
                                 ticker=ticker, options=options)
 
+    # Field 1 (Phase-2 disclosure): pull event_implied_move off the already-
+    # computed options.event_vol (no re-call into chain.event_implied_vol).
+    event_implied_move = None
+    if isinstance(options, dict):
+        event_vol = options.get("event_vol")
+        if isinstance(event_vol, dict):
+            event_implied_move = event_vol.get("event_implied_move")
+
     # A1: assemble events AFTER sentiment so events.implied_move reuses the
     # already-computed sentiment.implied_move_next_earnings_pct (no double chain
     # call). All event fields are deterministic + null-safe.
@@ -3109,6 +3521,7 @@ def build_snapshot(bundle, ticker):
         earnings_calendar, overview, as_of_date,
         earn_q=earn_q, rows=rows,
         implied_move=sentiment.get("implied_move_next_earnings_pct"),
+        event_implied_move=event_implied_move,
     )
     macro = build_macro(treasury)
 
@@ -3122,14 +3535,34 @@ def build_snapshot(bundle, ticker):
     # web_fundamentals is a fallback-only source (absent in the normal AV path);
     # its presence/use is disclosed via fundamentals.web_transcribed_fields, so we
     # do NOT report its absence as a "missing" expected source (that would be noise
-    # on every standard-mode build). sector_daily_adjusted (Track O4) is the same:
-    # an OPTIONAL source whose presence/absence is disclosed IN-BAND via the
-    # benchmark block's sector_etf / sector_ret_* keys (present only when a sector
-    # series was fetched AND the sector resolved). It is absent by design on any
-    # build without sector data, so listing it in meta.missing would be noise.
-    _MISSING_DISCLOSURE_EXCLUDED = ("web_fundamentals", "sector_daily_adjusted")
+    # on every standard-mode build). It is UNCONDITIONALLY exempt: there is no
+    # scenario in the standard AV path where fetching it would have been possible
+    # but wasn't -- it either served as a fallback (disclosed separately) or was
+    # never applicable at all, so its absence is never an actionable gap.
+    #
+    # sector_daily_adjusted (Track O4) is CONDITIONALLY exempt (QC16 fix): its
+    # absence is legitimate/undisclosable ONLY when this ticker's GICS sector has
+    # NO SPDR-ETF mapping (sector_etf is None) -- there the sector benchmark is
+    # undefined by construction and nothing could have been fetched. But when the
+    # mapping DOES resolve, an absent series is a genuine, closeable gap: the prior
+    # UNCONDITIONAL exemption made a ticker that simply never had a sector fetch
+    # look identical (in meta.missing) to a ticker with no sector mapping at all --
+    # and because refresh_plan.py plans strictly off "was this in the previous
+    # manifest" (never off this disclosure), that indistinguishability meant the
+    # gap could never surface for a human OR the planner to close, permanently and
+    # silently locking the ticker out of the sector-RS factor on every subsequent
+    # refresh. So a resolvable-but-absent sector series IS now reported missing.
+    _MISSING_DISCLOSURE_EXCLUDED = ["web_fundamentals"]
+    if sector_etf is None:
+        _MISSING_DISCLOSURE_EXCLUDED.append("sector_daily_adjusted")
     optional_keys = [k for k in COVERS
                      if k not in REQUIRED and k not in _MISSING_DISCLOSURE_EXCLUDED]
+    # sector_rows is None whenever the sector series did not actually make it into
+    # the benchmark block -- whether never fetched, or present but unparseable
+    # (parsed_sector is None) -- so present_keys must reflect USABILITY, not mere
+    # file existence, exactly like the options_chain correction just above.
+    if sector_rows is None and "sector_daily_adjusted" in present_keys:
+        present_keys.remove("sector_daily_adjusted")
     missing = [k for k in optional_keys if k not in present_keys]
 
     snapshot = {

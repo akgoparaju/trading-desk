@@ -97,6 +97,8 @@ Example `scenarios.json`:
 ]
 ```
 
+**QC18 — your set is checked against coverage's own DCF weighting, mechanically.** When `module_valuation_reconcile.json` exists (coverage's DCF scenario fan, `--anchors` mode), the script cross-references every scenario's `price_target` against coverage's own anchors — `dcf_bear`/`dcf_base`/`dcf_bull` and the fundamental scorer's `comps_low`/`comps_high` — and discloses the match (or non-match) plus coverage's own probability on that value, in `module_composite.json`'s `ev.scenario_derivation`. This is **computed, not yours to write** — but read it before you finalize `--scenario-reasoning`: if your bull/base/bear turns out to be coverage's own anchors re-weighted under new names, say so. `report_qc`'s blocking `ev_scenario_agreement` check (QC18) independently recomputes EV under your set AND under coverage's own DCF weighting, and **FAILs the report if the two signs disagree** — a real MU run shipped `+6.8%` on the composite scenarios against `-15.5%` on coverage's own weights, an undisclosed re-weighting that flipped the call. SKIPs (never fails) when `module_valuation_reconcile.json` is absent. Waivable like every other check, but a waiver here means you are knowingly overriding a sign flip against coverage's own valuation work — disclose why.
+
 ---
 
 ## Step 3 — Set the four conviction flags (read the evidence briefs FIRST)

@@ -458,7 +458,7 @@ class TestBuildSnapshotFull(unittest.TestCase):
         m = self.snap["meta"]
         self.assertEqual(m["ticker"], "MU")
         self.assertEqual(m["as_of_utc"], AS_OF)
-        self.assertEqual(m["schema_version"], "0.5.0")  # QC Phase 1: 0.4.0 -> 0.5.0
+        self.assertEqual(m["schema_version"], "0.7.0")  # QC20(c): 0.6.0 -> 0.7.0
         self.assertEqual(m["missing"], [])
         self.assertIn("qc", m)
         self.assertTrue(len(m["sources"]) >= 4)
@@ -1843,10 +1843,13 @@ class TestA1EventAwareFields(unittest.TestCase):
         worst = abs_gaps[idx:]
         self.assertAlmostEqual(og["tail_mean_95_3y"], sum(worst) / len(worst), places=9)
 
-    def test_schema_version_is_0_4_0(self):
+    def test_schema_version_is_0_7_0(self):
+        # QC20(c): 0.6.0 -> 0.7.0 (adds technicals.extension_gate; a scored
+        # capping mechanism this time, gated behind an armed/binding check --
+        # see build_snapshot.build_extension_gate).
         b = BundleBuilder(self.dir).build_full()
         snap = self._build(b)
-        self.assertEqual(snap["meta"]["schema_version"], "0.5.0")
+        self.assertEqual(snap["meta"]["schema_version"], "0.7.0")
 
 
 # --------------------------------------------------------------------------- #
@@ -2069,6 +2072,96 @@ class TestWave4BEventVolAndExEarningsRV(unittest.TestCase):
         # rv20_ex_earnings is still present (no earnings quarters to mask, but the
         # RV over the daily series still computes).
         self.assertIsNotNone(snap["options"]["rv20_ex_earnings"])
+
+
+# --------------------------------------------------------------------------- #
+# Phase-2 disclosure Field 1: events.event_implied_move +
+# events.event_implied_move_vs_own_history_pctile. The existing
+# events.implied_move is the 1sigma move of the first expiry ON/AFTER the
+# earnings date (a MULTI-WEEK horizon) but is percentile-ranked against
+# earnings_move_history, a list of ONE-DAY post-print reactions -- a
+# dimensional mismatch. chain.event_implied_vol already isolates the
+# earnings-day-only variance (variance additivity between the bracketing
+# pre/post expiries) and its output already reaches
+# options.event_vol.event_implied_move; this just SURFACES that value on
+# events and ranks it with the SAME inline percentile formula, side by side
+# with the untouched implied_move (never a silent method swap).
+# --------------------------------------------------------------------------- #
+
+class TestField1EventImpliedMoveDisclosure(unittest.TestCase):
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _build(self, b):
+        b.write_manifest()
+        proc = _run_build(self.dir)
+        self.assertEqual(proc.returncode, 0, f"stdout={proc.stdout}\nstderr={proc.stderr}")
+        out = os.path.join(self.dir, f"snapshot_MU_{AS_OF_DATE}.json")
+        with open(out) as fh:
+            return json.load(fh)
+
+    def test_event_implied_move_matches_options_block(self):
+        # events.event_implied_move must be the SAME value as
+        # options.event_vol.event_implied_move -- surfaced, not recomputed.
+        b = BundleBuilder(self.dir).build_full()
+        snap = self._build(b)
+        ev = snap["events"]
+        opt_event_vol = snap["options"]["event_vol"]
+        self.assertIsNotNone(opt_event_vol)
+        self.assertIn("event_implied_move", ev)
+        self.assertEqual(ev["event_implied_move"], opt_event_vol["event_implied_move"])
+
+    def test_event_implied_move_vs_own_history_pctile_hand_computed(self):
+        # Same inline percentile rule as implied_move_vs_own_history_pctile
+        # (100 * count(abs_move <= x) / n), just keyed to event_implied_move.
+        b = BundleBuilder(self.dir).build_full()
+        snap = self._build(b)
+        ev = snap["events"]
+        eim = ev["event_implied_move"]
+        self.assertIsNotNone(eim)
+        abs_moves = [abs(m["move_pct"]) for m in ev["earnings_move_history"]]
+        expected = 100 * sum(1 for a in abs_moves if a <= eim) / len(abs_moves)
+        self.assertAlmostEqual(ev["event_implied_move_vs_own_history_pctile"],
+                               expected, places=9)
+
+    def test_implied_move_retained_verbatim_not_silently_swapped(self):
+        # The pre-existing implied_move (first-expiry-after-earnings basis)
+        # and its own percentile stay untouched -- both bases visible side by
+        # side, and they must NOT collapse to the same figure (different,
+        # deliberately incompatible horizons).
+        b = BundleBuilder(self.dir).build_full()
+        snap = self._build(b)
+        ev = snap["events"]
+        self.assertIsNotNone(ev["implied_move"])
+        self.assertEqual(ev["implied_move"],
+                         snap["sentiment"]["implied_move_next_earnings_pct"])
+        self.assertIsNotNone(ev["implied_move_vs_own_history_pctile"])
+        self.assertIsNotNone(ev["event_implied_move"])
+        self.assertNotAlmostEqual(ev["implied_move"], ev["event_implied_move"],
+                                  places=4)
+
+    def test_event_implied_move_null_when_no_chain(self):
+        # No options chain -> options block None -> event_implied_move null.
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        b.add_earnings_calendar()
+        snap = self._build(b)
+        self.assertIsNone(snap["options"])
+        self.assertIsNone(snap["events"]["event_implied_move"])
+        self.assertIsNone(snap["events"]["event_implied_move_vs_own_history_pctile"])
+
+    def test_event_implied_move_null_when_no_earnings_date(self):
+        # Chain present but NO earnings_calendar -> options.event_vol null ->
+        # events.event_implied_move null too (AAPL-shaped: no earnings date).
+        b = BundleBuilder(self.dir)
+        b.add_global_quote(); b.add_overview(); b.add_daily(); b.add_spy()
+        b.add_chain(); b.add_pc()
+        snap = self._build(b)
+        self.assertIsNone(snap["options"]["event_vol"])
+        self.assertIsNone(snap["events"]["event_implied_move"])
+        self.assertIsNone(snap["events"]["event_implied_move_vs_own_history_pctile"])
 
 
 class TestWave3AInsiderClassification(unittest.TestCase):
@@ -2335,6 +2428,358 @@ class TestWave4ATechnicals(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# Phase-2 disclosure Field 2: technicals.ma10 / ma21 / ma10_slope_5d /
+# ma21_slope_5d -- SAME house convention as the existing ma50/ma200 pair
+# (SMA on adjusted close; slope = sma_series[-1]/sma_series[-1-lookback]-1,
+# indicators.ma_slope), just shorter windows. Pure wiring -- indicators.sma
+# and indicators.ma_slope are unchanged, generic functions.
+# --------------------------------------------------------------------------- #
+
+class TestField2ShortTermMAs(unittest.TestCase):
+
+    def test_new_fields_present_and_match_indicators(self):
+        from scripts import build_snapshot as bs
+        from scripts import indicators
+        closes = [100.0 * (1.003 ** i) for i in range(60)]
+        rows = _ohlcv(closes)
+        block = bs.build_technicals(rows)
+        adj = [r["adjusted_close"] for r in rows]
+        for key in ("ma10", "ma21", "ma10_slope_5d", "ma21_slope_5d"):
+            self.assertIn(key, block)
+        self.assertAlmostEqual(block["ma10"], indicators.sma(adj, 10), places=9)
+        self.assertAlmostEqual(block["ma21"], indicators.sma(adj, 21), places=9)
+        self.assertAlmostEqual(block["ma10_slope_5d"],
+                               indicators.ma_slope(adj, 10, 5), places=9)
+        self.assertAlmostEqual(block["ma21_slope_5d"],
+                               indicators.ma_slope(adj, 21, 5), places=9)
+
+    def test_null_safety_short_series(self):
+        from scripts import build_snapshot as bs
+        # 3 rows: not enough for a 10-bar SMA, let alone its 5d-lookback slope.
+        rows = _ohlcv([100.0, 101.0, 102.0])
+        block = bs.build_technicals(rows)
+        self.assertIsNone(block["ma10"])
+        self.assertIsNone(block["ma21"])
+        self.assertIsNone(block["ma10_slope_5d"])
+        self.assertIsNone(block["ma21_slope_5d"])
+
+    def test_full_bundle_carries_field2_fields(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        BundleBuilder(d).build_full()
+        proc = _run_build(d)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        snap = json.load(open(os.path.join(d, f"snapshot_MU_{AS_OF_DATE}.json")))
+        t = snap["technicals"]
+        for key in ("ma10", "ma21", "ma10_slope_5d", "ma21_slope_5d"):
+            self.assertIn(key, t)
+            self.assertIsNotNone(t[key])
+
+
+# --------------------------------------------------------------------------- #
+# QC20(c) — extension-credit gating after a fresh event break.
+#
+# build_extension_gate(rows, earn_q) detects a "qualifying break" -- a session j
+# where (a) close[j]/close[j-1]-1 <= -2.0 * sigma_1d(j) (sigma_1d = SAMPLE stdev
+# of the 20 daily returns ending the session BEFORE j) AND (b) j falls on, or
+# within 3 sessions after, a reportedDate read from the RAW earnings payload
+# (earn_q -- QC7: never the renamed events.earnings_move_history[].reported_date).
+# When >=1 qualifying break lies in the trailing 10 sessions, the session
+# immediately before the EARLIEST such break is surfaced as the reference point
+# score_technical caps the extension sub-component against.
+# --------------------------------------------------------------------------- #
+
+class TestExtensionGate(unittest.TestCase):
+
+    def _rows(self, n=40, base=100.0, jitter=0.001, drop_at=None, drop_pct=-0.10,
+             adj_factor=1.0):
+        """n dated rows (oldest-first, ending 2026-07-15), alternating +/-jitter
+        noise around ``base``, with an optional single-session ``drop_pct`` move
+        injected at index ``drop_at`` (negative index allowed). ``adj_factor``
+        scales adjusted_close relative to close (1.0 -> identical, the default)."""
+        from scripts import build_snapshot as bs
+        closes = []
+        px = base
+        for i in range(n):
+            px = base * (1 + (jitter if i % 2 == 0 else -jitter))
+            closes.append(round(px, 6))
+        if drop_at is not None:
+            idx = drop_at if drop_at >= 0 else n + drop_at
+            closes[idx] = closes[idx - 1] * (1 + drop_pct)
+        rows = _ohlcv(closes)
+        if adj_factor != 1.0:
+            for r in rows:
+                r["adjusted_close"] = r["adjusted_close"] * adj_factor
+        return rows
+
+    def _earn_q(self, reported_date):
+        return [{"fiscalDateEnding": reported_date, "reportedDate": reported_date,
+                 "reportedEPS": "1.00"}]
+
+    def _empty_shape(self):
+        return {"armed": False, "qualifying_breaks": [], "earliest_break_date": None,
+                "reference_date": None, "reference_close": None,
+                "reference_ma200": None}
+
+    # -- graceful null-safety -----------------------------------------------
+
+    def test_empty_rows_not_armed(self):
+        from scripts import build_snapshot as bs
+        self.assertEqual(bs.build_extension_gate([], []), self._empty_shape())
+
+    def test_none_inputs_not_armed(self):
+        from scripts import build_snapshot as bs
+        self.assertEqual(bs.build_extension_gate(None, None), self._empty_shape())
+
+    def test_insufficient_history_not_armed(self):
+        # Fewer than 22 dated rows -> not enough history to compute even one
+        # sigma_1d(j) inside the trailing window -> never armed.
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=20, drop_at=-1, drop_pct=-0.10)
+        earn_q = self._earn_q(rows[-1]["date"])
+        self.assertFalse(bs.build_extension_gate(rows, earn_q)["armed"])
+
+    # -- magnitude gate (a) ---------------------------------------------------
+
+    def test_large_event_adjacent_break_arms(self):
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-3, drop_pct=-0.10)
+        break_date = rows[37]["date"]  # index n-3 = 37
+        earn_q = self._earn_q(break_date)
+        gate = bs.build_extension_gate(rows, earn_q)
+        self.assertTrue(gate["armed"])
+        self.assertEqual(gate["earliest_break_date"], break_date)
+        self.assertEqual(len(gate["qualifying_breaks"]), 1)
+        b = gate["qualifying_breaks"][0]
+        self.assertEqual(b["date"], break_date)
+        self.assertLessEqual(b["z"], -2.0)
+        self.assertAlmostEqual(b["return_1d"], -0.10, places=6)
+        self.assertEqual(b["reported_date"], break_date)
+
+    def test_small_move_does_not_arm(self):
+        # This fixture's alternating +/-0.1% jitter gives sigma_1d ~0.205% (2sigma
+        # ~0.41%); a -0.2% single-day move stays under that bar -> condition (a)
+        # fails -> not armed even though (b) holds.
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-3, drop_pct=-0.002)
+        earn_q = self._earn_q(rows[37]["date"])
+        self.assertFalse(bs.build_extension_gate(rows, earn_q)["armed"])
+
+    # -- event-adjacency gate (b) ---------------------------------------------
+
+    def test_large_break_without_nearby_reported_date_does_not_arm(self):
+        # Same magnitude break as the arming case, but the only reportedDate is
+        # far away (the very first row) -> condition (b) fails -> not armed.
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-3, drop_pct=-0.10)
+        earn_q = self._earn_q(rows[0]["date"])
+        self.assertFalse(bs.build_extension_gate(rows, earn_q)["armed"])
+
+    def test_no_earnings_at_all_does_not_arm(self):
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-3, drop_pct=-0.10)
+        self.assertFalse(bs.build_extension_gate(rows, [])["armed"])
+
+    def test_break_exactly_on_reported_date_qualifies(self):
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-3, drop_pct=-0.10)
+        break_date = rows[37]["date"]
+        earn_q = self._earn_q(break_date)
+        self.assertTrue(bs.build_extension_gate(rows, earn_q)["armed"])
+
+    def test_break_three_sessions_after_reported_date_qualifies(self):
+        # reportedDate is the session 3 BEFORE the break -> break falls exactly
+        # at the outer edge of "within 3 sessions after" -> still qualifies.
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-3, drop_pct=-0.10)
+        anchor_date = rows[34]["date"]  # 37 - 3 = 34
+        earn_q = self._earn_q(anchor_date)
+        self.assertTrue(bs.build_extension_gate(rows, earn_q)["armed"])
+
+    def test_break_four_sessions_after_reported_date_does_not_qualify(self):
+        # One session past the 3-session event-adjacency window -> (b) fails.
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-3, drop_pct=-0.10)
+        anchor_date = rows[33]["date"]  # 37 - 4 = 33
+        earn_q = self._earn_q(anchor_date)
+        self.assertFalse(bs.build_extension_gate(rows, earn_q)["armed"])
+
+    # -- the trailing 10-session window ---------------------------------------
+
+    def test_break_outside_trailing_window_does_not_arm(self):
+        # The break sits at index n-12 -- two sessions outside the trailing-10
+        # window (n-10..n-1) -- so it is never even considered.
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-12, drop_pct=-0.10)
+        earn_q = self._earn_q(rows[28]["date"])  # n-12 = 28
+        self.assertFalse(bs.build_extension_gate(rows, earn_q)["armed"])
+
+    # -- reference session selection ------------------------------------------
+
+    def test_reference_is_session_before_the_break(self):
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-3, drop_pct=-0.10)
+        earn_q = self._earn_q(rows[37]["date"])
+        gate = bs.build_extension_gate(rows, earn_q)
+        self.assertEqual(gate["reference_date"], rows[36]["date"])
+        self.assertAlmostEqual(gate["reference_close"], rows[36]["close"], places=6)
+
+    def test_earliest_of_two_qualifying_breaks_is_used(self):
+        # Two independent big drops inside the trailing window, each with its
+        # own nearby reportedDate -> both qualify, but the reference must key
+        # off the EARLIEST (first) break, not the latest.
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40)
+        # break #1 at n-8 (index 32), break #2 at n-3 (index 37).
+        rows[32]["close"] = rows[31]["close"] * 0.90
+        rows[32]["adjusted_close"] = rows[32]["close"]
+        rows[37]["close"] = rows[36]["close"] * 0.90
+        rows[37]["adjusted_close"] = rows[37]["close"]
+        earn_q = [
+            {"reportedDate": rows[32]["date"]},
+            {"reportedDate": rows[37]["date"]},
+        ]
+        gate = bs.build_extension_gate(rows, earn_q)
+        self.assertTrue(gate["armed"])
+        self.assertEqual(len(gate["qualifying_breaks"]), 2)
+        self.assertEqual(gate["earliest_break_date"], rows[32]["date"])
+        self.assertEqual(gate["reference_date"], rows[31]["date"])
+        self.assertAlmostEqual(gate["reference_close"], rows[31]["close"], places=6)
+        # qualifying_breaks is ascending by date (earliest first).
+        self.assertEqual(gate["qualifying_breaks"][0]["date"], rows[32]["date"])
+        self.assertEqual(gate["qualifying_breaks"][1]["date"], rows[37]["date"])
+
+    # -- reference_ma200 (needs >=200 dated rows; basis = adjusted_close) -----
+
+    def test_reference_ma200_none_when_insufficient_history(self):
+        # The 40-row fixture never has 200 bars -> reference_ma200 is honestly
+        # None even though the gate is armed.
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-3, drop_pct=-0.10)
+        earn_q = self._earn_q(rows[37]["date"])
+        gate = bs.build_extension_gate(rows, earn_q)
+        self.assertTrue(gate["armed"])
+        self.assertIsNone(gate["reference_ma200"])
+
+    def test_reference_ma200_computed_from_adjusted_close_not_close(self):
+        # 220 rows so ma200 is computable at the reference session; adjusted_close
+        # is deliberately 0.5x close so the two bases are numerically distinct --
+        # reference_ma200 must come from adjusted_close (indicators.sma house
+        # convention), not from the raw close series.
+        from scripts import build_snapshot as bs
+        from scripts import indicators
+        rows = self._rows(n=220, drop_at=-3, drop_pct=-0.10, adj_factor=0.5)
+        earn_q = self._earn_q(rows[217]["date"])  # n-3 = 217
+        gate = bs.build_extension_gate(rows, earn_q)
+        self.assertTrue(gate["armed"])
+        ref_idx = 216  # session before the break (217 - 1)
+        expected = indicators.sma(
+            [r["adjusted_close"] for r in rows[:ref_idx + 1]], 200)
+        self.assertIsNotNone(expected)
+        self.assertAlmostEqual(gate["reference_ma200"], expected, places=9)
+        # sanity: NOT the close-basis figure (which would be exactly 2x, given
+        # adj_factor=0.5).
+        close_basis = indicators.sma(
+            [r["close"] for r in rows[:ref_idx + 1]], 200)
+        self.assertNotAlmostEqual(gate["reference_ma200"], close_basis, places=2)
+
+    # -- shape ------------------------------------------------------------
+
+    def test_qualifying_break_entry_shape(self):
+        from scripts import build_snapshot as bs
+        rows = self._rows(n=40, drop_at=-3, drop_pct=-0.10)
+        earn_q = self._earn_q(rows[37]["date"])
+        gate = bs.build_extension_gate(rows, earn_q)
+        b = gate["qualifying_breaks"][0]
+        for key in ("date", "return_1d", "sigma_1d", "z", "reported_date"):
+            self.assertIn(key, b)
+
+
+# --------------------------------------------------------------------------- #
+# QC20(c) real ground-truth: the exact AAPL break (2026-07-31, z=-4.04) and MU's
+# non-arming, from the 2026-08-09 falsifier pre-registration. Guarded -- SKIPPED
+# where the read-only bundle volume isn't mounted.
+# --------------------------------------------------------------------------- #
+
+_QC20C_AAPL_RAW = ("/Volumes/OWC-2TB/dev/kurama-data/Finance/portfolio/"
+                   "stock-analysis/AAPL/2026-08-07-refresh/"
+                   "detail_reports_2026-08-07/raw")
+_QC20C_MU_RAW = ("/Volumes/OWC-2TB/dev/kurama-data/Finance/portfolio/"
+                 "stock-analysis/MU/2026-08-08/detail_reports_2026-08-08/raw")
+
+
+@unittest.skipUnless(os.path.isdir(_QC20C_AAPL_RAW) and os.path.isdir(_QC20C_MU_RAW),
+                     "QC20c ground-truth read-only bundles not mounted on this machine")
+class TestExtensionGateRealGroundTruth(unittest.TestCase):
+
+    @staticmethod
+    def _gate(raw_dir):
+        from scripts import build_snapshot as bs
+        daily = bs.load_daily_raw(os.path.join(raw_dir, "daily_adjusted.json"))
+        rows = bs.parse_daily_rows(daily)
+        earnings = bs.load_raw(os.path.join(raw_dir, "earnings.json"))
+        earn_q = bs.load_quarterly_earnings(earnings)
+        return bs.build_extension_gate(rows, earn_q)
+
+    def test_aapl_break_ground_truth(self):
+        gate = self._gate(_QC20C_AAPL_RAW)
+        self.assertTrue(gate["armed"])
+        self.assertEqual(gate["earliest_break_date"], "2026-07-31")
+        self.assertEqual(gate["reference_date"], "2026-07-30")
+        self.assertAlmostEqual(gate["reference_close"], 333.43, places=2)
+        self.assertAlmostEqual(gate["reference_ma200"], 277.350, places=2)
+        b = gate["qualifying_breaks"][0]
+        self.assertAlmostEqual(b["sigma_1d"], 0.01821, places=4)
+        self.assertAlmostEqual(b["z"], -4.0395, places=3)
+        self.assertAlmostEqual(b["return_1d"], -0.0735, places=3)
+        self.assertEqual(b["reported_date"], "2026-07-30")
+
+    def test_mu_does_not_arm(self):
+        gate = self._gate(_QC20C_MU_RAW)
+        self.assertFalse(gate["armed"])
+        self.assertEqual(gate["qualifying_breaks"], [])
+
+
+# --------------------------------------------------------------------------- #
+# QC20(c) wiring: build_technicals() surfaces extension_gate (needs earn_q).
+# --------------------------------------------------------------------------- #
+
+class TestExtensionGateWiredIntoTechnicals(unittest.TestCase):
+
+    def test_technicals_block_carries_extension_gate_key(self):
+        from scripts import build_snapshot as bs
+        closes = [100.0 * (1.001 ** i) for i in range(60)]
+        rows = _ohlcv(closes)
+        block = bs.build_technicals(rows, earn_q=[])
+        self.assertIn("extension_gate", block)
+        self.assertFalse(block["extension_gate"]["armed"])
+
+    def test_technicals_block_default_earn_q_is_null_safe(self):
+        # build_technicals's earn_q parameter defaults to None -- must not crash.
+        from scripts import build_snapshot as bs
+        closes = [100.0 * (1.001 ** i) for i in range(60)]
+        rows = _ohlcv(closes)
+        block = bs.build_technicals(rows)
+        self.assertIn("extension_gate", block)
+        self.assertFalse(block["extension_gate"]["armed"])
+
+    def test_full_bundle_carries_extension_gate(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        BundleBuilder(d).build_full()
+        proc = _run_build(d)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        snap = json.load(open(os.path.join(d, f"snapshot_MU_{AS_OF_DATE}.json")))
+        eg = snap["technicals"]["extension_gate"]
+        self.assertIn("armed", eg)
+        self.assertIn("qualifying_breaks", eg)
+        self.assertIn("earliest_break_date", eg)
+        self.assertIn("reference_date", eg)
+        self.assertIn("reference_close", eg)
+        self.assertIn("reference_ma200", eg)
+
+
+# --------------------------------------------------------------------------- #
 # Track O4 — sector-relative RS: SECTOR_ETF map + build_benchmark sector returns
 # --------------------------------------------------------------------------- #
 
@@ -2489,6 +2934,93 @@ class TestSectorDailyOptionalSource(unittest.TestCase):
         self.assertIsNotNone(bm["sector_ret_3m"])
         self.assertIsNotNone(bm["rel_sector_ret_3m"])
         self.assertIsNotNone(bm["rel_sector_ret_6m"])
+
+
+class TestSectorMissingDisclosure(unittest.TestCase):
+    """QC16 fix 1: sector_daily_adjusted's exemption from meta.missing must be
+    CONDITIONAL on whether this ticker's GICS sector actually maps to a real SPDR
+    ETF, not unconditional. An unconditional exemption hid an actionable, closeable
+    gap (a ticker whose sector DOES resolve but whose sector series was never
+    fetched looked identical to a ticker in a sector with no ETF at all -- the
+    QC16 lockout root cause)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _build_with_overview(self, overview_extra=None, add_sector_file=False,
+                             sector_file_payload=None):
+        b = BundleBuilder(self.dir)
+        b.add_global_quote()
+        ov = {
+            "Symbol": b.ticker,
+            "MarketCapitalization": f"{b.mktcap:.0f}",
+            "SharesOutstanding": f"{b.shares:.0f}", "EPS": "6.00",
+            "PERatio": f"{b.last / 6.0:.4f}", "52WeekHigh": "140.00",
+            "52WeekLow": "60.00", "Beta": "1.30",
+        }
+        if overview_extra:
+            ov.update(overview_extra)
+        b._add("overview", "overview.json", ov, "COMPANY_OVERVIEW")
+        b.add_daily(); b.add_spy()
+        b.add_income(); b.add_balance(); b.add_cashflow(); b.add_earnings()
+        if add_sector_file:
+            payload = sector_file_payload
+            if payload is None:
+                payload = _daily_json(_walk(320, seed=404, start=190.0))
+            b._add("sector_daily_adjusted", "sector_daily.json", payload,
+                   "TIME_SERIES_DAILY_ADJUSTED")
+        b.write_manifest()
+        proc = _run_build(self.dir)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(self.dir,
+                               f"snapshot_MU_{AS_OF_DATE}.json")) as fh:
+            return json.load(fh)
+
+    def test_missing_lists_sector_when_mapping_resolves_and_absent(self):
+        # ETF mapping resolves (TECHNOLOGY -> XLK) but the series was never
+        # fetched -- this is now an actionable, disclosed gap.
+        snap = self._build_with_overview(overview_extra={"Sector": "TECHNOLOGY"})
+        self.assertIn("sector_daily_adjusted", snap["meta"]["missing"])
+
+    def test_missing_omits_sector_when_no_etf_mapping(self):
+        # No Sector field at all -> no resolvable ETF -> legitimately undefined
+        # sector benchmark -> must NOT be reported as missing.
+        snap = self._build_with_overview()
+        self.assertNotIn("sector_daily_adjusted", snap["meta"]["missing"])
+
+    def test_missing_omits_sector_when_unrecognized_sector(self):
+        # A Sector string that does not map to any SPDR Select Sector ETF is the
+        # same "nothing to fetch" case as no Sector at all.
+        snap = self._build_with_overview(
+            overview_extra={"Sector": "SOME UNLISTED SECTOR"})
+        self.assertNotIn("sector_daily_adjusted", snap["meta"]["missing"])
+
+    def test_missing_omits_sector_when_present_and_mapped(self):
+        # Mapping resolves AND the file is present -> not missing (unchanged
+        # success path).
+        snap = self._build_with_overview(overview_extra={"Sector": "TECHNOLOGY"},
+                                         add_sector_file=True)
+        self.assertNotIn("sector_daily_adjusted", snap["meta"]["missing"])
+
+    def test_missing_lists_sector_when_present_but_unparseable(self):
+        # Mapping resolves and a sector_daily_adjusted file EXISTS, but it is not
+        # a parseable daily series (a fetch corruption) -- the benchmark ends up
+        # with no usable sector data, so the disclosure must match reality, not
+        # mere file existence (mirrors the existing options_chain
+        # present-but-unusable correction at build_snapshot.py:3119-3120).
+        snap = self._build_with_overview(
+            overview_extra={"Sector": "TECHNOLOGY"}, add_sector_file=True,
+            sector_file_payload={"not": "a daily series"})
+        self.assertIn("sector_daily_adjusted", snap["meta"]["missing"])
+        self.assertNotIn("sector_etf", snap["benchmark"])
+
+    def test_web_fundamentals_still_unconditionally_exempt(self):
+        # web_fundamentals is a genuine fallback-only source (never expected in
+        # the standard AV path; its use is disclosed via
+        # fundamentals.web_transcribed_fields) -- QC16 leaves it exempt.
+        snap = self._build_with_overview()
+        self.assertNotIn("web_fundamentals", snap["meta"]["missing"])
 
 
 class TestSecurityMaster(unittest.TestCase):
@@ -2890,6 +3422,115 @@ class TestQC1TimeWeightedNtmEpsBlend(unittest.TestCase):
         v = bs.build_valuation({"last": 312.41}, f, {}, rows=[])
         self.assertIsNone(v["pe_overview_fwd"])
 
+    # ----------------------------------------------------------------------- #
+    # Phase-2 disclosure Field 3: fundamentals.revisions_ntm. revisions_90d is
+    # keyed to fy[0] (the NEAREST future fiscal year) -- often a small slice
+    # of the NTM window (AAPL w=0.148, MU w=0.063) -- while eps_ntm_consensus
+    # blends ALL future FY rows by NTM-window overlap. revisions_ntm applies
+    # the SAME weights (_fy_overlap_weight / _time_weighted_ntm_eps) to BOTH
+    # the now and 90-days-ago columns -- a level-blend (blend both columns,
+    # then take the ratio), matching the eps_ntm_now/eps_ntm_90d/pct formula
+    # given verbatim in the field spec. up_30d/down_30d come from the
+    # HIGHEST-weight FY record (the dominant record in the blend) so both
+    # revision legs describe the same fiscal-year object -- unlike
+    # revisions_90d, which is pinned to the nearest (often lowest-weight) FY.
+    # ----------------------------------------------------------------------- #
+
+    def test_aapl_revisions_ntm_now_matches_eps_ntm_consensus(self):
+        # eps_ntm_now must be BIT-IDENTICAL to eps_ntm_consensus -- same
+        # blend, not re-derived.
+        f = self._fundamentals(self._AAPL_ESTIMATES, "2026-08-07")
+        r = f["revisions_ntm"]
+        self.assertIsNotNone(r)
+        self.assertEqual(r["eps_ntm_now"], f["eps_ntm_consensus"])
+        self.assertAlmostEqual(r["eps_ntm_now"], 9.411997808219176, places=6)
+
+    def test_aapl_revisions_ntm_level_blend_pct(self):
+        # Level-blend (spec formula): eps_ntm_90d = SAME weights over the 90d
+        # column; pct = eps_ntm_now / eps_ntm_90d - 1 (the RATIO of the two
+        # blended sums -- not a weight-blend of each FY's own pct change).
+        f = self._fundamentals(self._AAPL_ESTIMATES, "2026-08-07")
+        r = f["revisions_ntm"]
+        w26, w27 = 54 / 365, 310 / 365
+        expected_90d = w26 * 8.7658 + w27 * 9.6186
+        self.assertAlmostEqual(r["eps_ntm_90d"], expected_90d, places=6)
+        self.assertAlmostEqual(r["pct"], r["eps_ntm_now"] / r["eps_ntm_90d"] - 1,
+                               places=12)
+        # Measured level-blend pct (Decimal-precise from the same inputs):
+        # -0.0057132616437662875 -- close to, but not bit-identical to, the
+        # rate-weighted alternative (-0.005587) some readers might expect;
+        # see the Field 3 report note on which convention this is.
+        self.assertAlmostEqual(r["pct"], -0.0057132616437662875, places=9)
+
+    def test_aapl_revisions_ntm_up_down_from_highest_weight_fy(self):
+        # FY2027 (w=0.849, the dominant record) supplies up/down -- NOT
+        # FY2026 (w=0.148), which is what revisions_90d uses.
+        f = self._fundamentals(self._AAPL_ESTIMATES, "2026-08-07")
+        r = f["revisions_ntm"]
+        self.assertEqual(r["up_30d"], 7)
+        self.assertEqual(r["down_30d"], 1)
+        self.assertEqual(f["revisions_90d"]["up_30d"], 5)
+        self.assertEqual(f["revisions_90d"]["down_30d"], 2)
+
+    def test_aapl_revisions_ntm_fy_weights_and_basis(self):
+        f = self._fundamentals(self._AAPL_ESTIMATES, "2026-08-07")
+        r = f["revisions_ntm"]
+        self.assertEqual(len(r["fy_weights"]), 2)
+        self.assertAlmostEqual(r["fy_weights"][0]["weight"], 0.147945, places=5)
+        self.assertAlmostEqual(r["fy_weights"][1]["weight"], 0.849315, places=5)
+        self.assertIsInstance(r["basis"], str)
+        self.assertIn("2027-09-30", r["basis"])   # names the highest-weight FY
+
+    def test_mu_revisions_ntm_matches_ground_truth(self):
+        f = self._fundamentals(self._MU_ESTIMATES, "2026-08-08")
+        r = f["revisions_ntm"]
+        self.assertIsNotNone(r)
+        self.assertEqual(r["eps_ntm_now"], f["eps_ntm_consensus"])
+        self.assertAlmostEqual(r["eps_ntm_now"], 148.2585794520548, places=5)
+        w26, w27 = 23 / 365, 341 / 365
+        expected_90d = w26 * 57.8371 + w27 * 100.5257
+        self.assertAlmostEqual(r["eps_ntm_90d"], expected_90d, places=5)
+        self.assertAlmostEqual(r["pct"], 0.519660642968002, places=8)
+        self.assertEqual(r["up_30d"], 30)
+        self.assertEqual(r["down_30d"], 0)
+
+    def test_revisions_ntm_null_when_blend_path_not_used(self):
+        # sum_next_4_fiscal_quarters path -> no fy blend ran -> nothing to
+        # disclose an NTM-revisions view for (mirrors eps_ntm_alternatives'
+        # null-when-undegraded convention).
+        estimates = [
+            {"date": "2026-09-30", "horizon": "fiscal quarter", "eps_estimate_average": "1.00"},
+            {"date": "2026-12-31", "horizon": "fiscal quarter", "eps_estimate_average": "1.10"},
+            {"date": "2027-03-31", "horizon": "fiscal quarter", "eps_estimate_average": "1.20"},
+            {"date": "2027-06-30", "horizon": "fiscal quarter", "eps_estimate_average": "1.30"},
+            {"date": "2028-06-30", "horizon": "fiscal year", "eps_estimate_average": "5.00"},
+        ]
+        f = self._fundamentals(estimates, "2026-08-07")
+        self.assertEqual(f["eps_ntm_method"], "sum_next_4_fiscal_quarters")
+        self.assertIsNone(f["revisions_ntm"])
+
+    def test_revisions_ntm_90d_null_when_a_row_missing_90d_field(self):
+        # eps_ntm_now/up_30d/down_30d/fy_weights still populate (they don't
+        # depend on the 90d column); eps_ntm_90d/pct null-safely degrade.
+        from scripts import build_snapshot as bs
+        estimates = [
+            {"date": "2026-09-30", "horizon": "fiscal year", "eps_estimate_average": "8.7998",
+             "eps_estimate_revision_up_trailing_30_days": "5",
+             "eps_estimate_revision_down_trailing_30_days": "2"},
+            {"date": "2027-09-30", "horizon": "fiscal year", "eps_estimate_average": "9.5490",
+             "eps_estimate_average_90_days_ago": "9.6186",
+             "eps_estimate_revision_up_trailing_30_days": "7",
+             "eps_estimate_revision_down_trailing_30_days": "1"},
+        ]
+        f = self._fundamentals(estimates, "2026-08-07")
+        r = f["revisions_ntm"]
+        self.assertIsNotNone(r)
+        self.assertIsNotNone(r["eps_ntm_now"])
+        self.assertIsNone(r["eps_ntm_90d"])
+        self.assertIsNone(r["pct"])
+        self.assertEqual(r["up_30d"], 7)
+        self.assertEqual(r["down_30d"], 1)
+
 
 # --------------------------------------------------------------------------- #
 # QC3: eps_ttm_from_ni (three-way TTM EPS reconciliation input) +
@@ -3010,6 +3651,108 @@ class TestQC3EpsReconciliation(unittest.TestCase):
         dates = {r["fiscal_date_ending"] for r in f["eps_share_reconciliation"]}
         self.assertNotIn("2025-09-30", dates)
         self.assertEqual(len(f["eps_share_reconciliation"]), 3)
+
+
+# --------------------------------------------------------------------------- #
+# Phase-2 disclosure Field 4: fundamentals.cycle_economics -- a 12-fiscal-year
+# cumulative FCF margin (cum_fcf / cum_revenue from annualReports) versus the
+# already-computed quarterly TTM FCF margin (fcf_ttm / rev_ttm, reused, not
+# re-derived), plus their ratio (cycle_gap_ratio) and a same-window mean ROE.
+# Real AAPL/MU ground truth is pinned separately at the end of this file
+# (TestField4CycleEconomicsRealGroundTruth, guarded on the mounted archive);
+# this class exercises the null-safety/wiring contract with synthetic data.
+# --------------------------------------------------------------------------- #
+
+class TestField4CycleEconomics(unittest.TestCase):
+
+    @staticmethod
+    def _annual(n, start_year=2025):
+        """n synthetic fiscal years (newest-first), round hand-verifiable
+        numbers: revenue 1000/yr, FCF 100/yr (150 ocf - 50 capex), equity 500."""
+        inc, cf, bal = [], [], []
+        for i in range(n):
+            fy = f"{start_year - i}-12-31"
+            inc.append({"fiscalDateEnding": fy, "totalRevenue": "1000",
+                       "netIncome": "100"})
+            cf.append({"fiscalDateEnding": fy, "operatingCashflow": "150",
+                      "capitalExpenditures": "50"})
+            bal.append({"fiscalDateEnding": fy, "totalShareholderEquity": "500"})
+        return inc, cf, bal
+
+    def test_null_when_fewer_than_8_years(self):
+        from scripts import build_snapshot as bs
+        inc, cf, bal = self._annual(7)
+        self.assertIsNone(bs._build_cycle_economics(inc, cf, bal, None, None))
+
+    def test_window_fy_capped_at_12_with_more_available(self):
+        from scripts import build_snapshot as bs
+        inc, cf, bal = self._annual(20)
+        block = bs._build_cycle_economics(inc, cf, bal, 30.0, 100.0)
+        self.assertIsNotNone(block)
+        self.assertEqual(block["window_fy"], 12)
+        self.assertAlmostEqual(block["cum_fcf"], 12 * 100.0)      # 12 * (150-50)
+        self.assertAlmostEqual(block["cum_revenue"], 12 * 1000.0)
+        self.assertAlmostEqual(block["fcf_margin_cycle"], 100.0 / 1000.0)
+        self.assertAlmostEqual(block["fcf_margin_ttm"], 30.0 / 100.0)
+        self.assertAlmostEqual(block["cycle_gap_ratio"],
+                               (30.0 / 100.0) / (100.0 / 1000.0))
+        self.assertAlmostEqual(block["mean_roe_cycle"], 100.0 / 500.0)
+        self.assertIsInstance(block["basis"], str)
+
+    def test_window_fy_equals_available_when_between_8_and_12(self):
+        from scripts import build_snapshot as bs
+        inc, cf, bal = self._annual(9)
+        block = bs._build_cycle_economics(inc, cf, bal, None, None)
+        self.assertIsNotNone(block)
+        self.assertEqual(block["window_fy"], 9)
+        # No TTM inputs supplied -> fcf_margin_ttm/cycle_gap_ratio null-safe.
+        self.assertIsNone(block["fcf_margin_ttm"])
+        self.assertIsNone(block["cycle_gap_ratio"])
+        # cum_fcf/cum_revenue/mean_roe_cycle are independent of TTM inputs.
+        self.assertAlmostEqual(block["cum_fcf"], 9 * 100.0)
+        self.assertAlmostEqual(block["mean_roe_cycle"], 100.0 / 500.0)
+
+    def test_mean_roe_cycle_null_when_no_balance_sheet(self):
+        from scripts import build_snapshot as bs
+        inc, cf, _ = self._annual(12)
+        block = bs._build_cycle_economics(inc, cf, [], None, None)
+        self.assertIsNotNone(block)
+        self.assertIsNone(block["mean_roe_cycle"])
+        # The rest of the block is unaffected by a missing balance sheet.
+        self.assertIsNotNone(block["fcf_margin_cycle"])
+
+    def test_cum_fcf_cum_revenue_null_when_no_usable_years(self):
+        from scripts import build_snapshot as bs
+        # 8 years of income/cashflow rows that carry NONE of the needed
+        # numeric fields -> nothing to sum -> honestly null, not zero.
+        inc = [{"fiscalDateEnding": f"{2025 - i}-12-31"} for i in range(8)]
+        cf = [{"fiscalDateEnding": f"{2025 - i}-12-31"} for i in range(8)]
+        block = bs._build_cycle_economics(inc, cf, [], None, None)
+        self.assertIsNotNone(block)
+        self.assertIsNone(block["cum_fcf"])
+        self.assertIsNone(block["cum_revenue"])
+        self.assertIsNone(block["fcf_margin_cycle"])
+
+    def test_wired_into_build_fundamentals(self):
+        from scripts import build_snapshot as bs
+        inc_ann, cf_ann, bal_ann = self._annual(12)
+        income = {"quarterlyReports": [], "annualReports": inc_ann}
+        cashflow = {"quarterlyReports": [], "annualReports": cf_ann}
+        balance = {"quarterlyReports": [], "annualReports": bal_ann}
+        f = bs.build_fundamentals(income, balance, cashflow,
+                                  {"quarterlyEarnings": []}, [], {}, "2026-08-07")
+        self.assertIn("cycle_economics", f)
+        self.assertIsNotNone(f["cycle_economics"])
+        self.assertEqual(f["cycle_economics"]["window_fy"], 12)
+
+    def test_null_when_no_annual_reports_at_all(self):
+        from scripts import build_snapshot as bs
+        income = {"quarterlyReports": [], "annualReports": []}
+        cashflow = {"quarterlyReports": [], "annualReports": []}
+        balance = {"quarterlyReports": [], "annualReports": []}
+        f = bs.build_fundamentals(income, balance, cashflow,
+                                  {"quarterlyEarnings": []}, [], {}, "2026-08-07")
+        self.assertIsNone(f["cycle_economics"])
 
 
 # --------------------------------------------------------------------------- #
@@ -3883,6 +4626,95 @@ class TestD2D3GoogDegradedSplitData(unittest.TestCase):
         w5 = bs._pe_window_stats(rows, earn_q, bs._FIVE_YR_ROWS)
         # The window is entirely degraded-source bars -> loudly disclosed.
         self.assertGreater(w5["split_degraded_bars"], 0)
+
+
+# --------------------------------------------------------------------------- #
+# Phase-2 disclosure Field 2: EXACT measured ma10/ma21/slope ground truth from
+# the real AAPL (2026-08-07) / MU (2026-08-08) archived bundles. Guarded --
+# SKIPPED where the read-only bundle volume isn't mounted.
+# --------------------------------------------------------------------------- #
+
+@unittest.skipUnless(os.path.isdir(_QC12_AAPL_RAW) and os.path.isdir(_QC12_MU_RAW),
+                     "Field 2 ground-truth read-only bundles not mounted on this machine")
+class TestField2RealGroundTruthShortMAs(unittest.TestCase):
+
+    @staticmethod
+    def _block(raw_dir):
+        from scripts import build_snapshot as bs
+        daily = bs.load_daily_raw(os.path.join(raw_dir, "daily_adjusted.json"))
+        rows = bs.parse_daily_rows(daily)
+        return bs.build_technicals(rows)
+
+    def test_aapl_ground_truth(self):
+        block = self._block(_QC12_AAPL_RAW)
+        # Pre-existing ma50/ma200 pair: verifies the house convention (SMA on
+        # adjusted close; slope = sma_series[-1]/sma_series[-1-lookback]-1)
+        # still reproduces the shipped values before trusting it for ma10/ma21.
+        self.assertAlmostEqual(block["ma50"], 309.7358, places=4)
+        self.assertAlmostEqual(block["ma200"], 278.87088, places=5)
+        self.assertAlmostEqual(block["ma50_slope_20d"], 0.043479750, places=9)
+        self.assertAlmostEqual(block["ma200_slope_20d"], 0.026032494, places=8)
+        # New Field 2 ground truth.
+        self.assertAlmostEqual(block["ma10"], 322.675, places=3)
+        self.assertAlmostEqual(block["ma21"], 323.183, places=3)
+        self.assertAlmostEqual(block["ma10_slope_5d"], -0.02728, places=5)
+        self.assertAlmostEqual(block["ma21_slope_5d"], 0.000796, places=6)
+
+    def test_mu_ground_truth(self):
+        block = self._block(_QC12_MU_RAW)
+        self.assertAlmostEqual(block["ma50"], 970.8666, places=4)
+        self.assertAlmostEqual(block["ma200"], 534.8532, places=4)
+        self.assertAlmostEqual(block["ma10"], 853.182, places=3)
+        self.assertAlmostEqual(block["ma21"], 892.600, places=3)
+        self.assertAlmostEqual(block["ma10_slope_5d"], -0.03751, places=5)
+        self.assertAlmostEqual(block["ma21_slope_5d"], -0.02419, places=5)
+
+
+# --------------------------------------------------------------------------- #
+# Phase-2 disclosure Field 4: fundamentals.cycle_economics -- 12yr cumulative
+# FCF margin vs TTM FCF margin. Guarded -- SKIPPED where the read-only bundle
+# volume isn't mounted.
+# --------------------------------------------------------------------------- #
+
+@unittest.skipUnless(os.path.isdir(_QC12_AAPL_RAW) and os.path.isdir(_QC12_MU_RAW),
+                     "Field 4 ground-truth read-only bundles not mounted on this machine")
+class TestField4CycleEconomicsRealGroundTruth(unittest.TestCase):
+
+    @staticmethod
+    def _fundamentals(raw_dir, as_of_date):
+        from scripts import build_snapshot as bs
+        income = bs.load_raw(os.path.join(raw_dir, "income_statement.json"))
+        balance = bs.load_raw(os.path.join(raw_dir, "balance_sheet.json"))
+        cashflow = bs.load_raw(os.path.join(raw_dir, "cash_flow.json"))
+        return bs.build_fundamentals(income, balance, cashflow,
+                                     {"quarterlyEarnings": []}, [], {}, as_of_date)
+
+    def test_aapl_cycle_economics_ground_truth(self):
+        f = self._fundamentals(_QC12_AAPL_RAW, "2026-08-07")
+        ce = f["cycle_economics"]
+        self.assertIsNotNone(ce)
+        self.assertEqual(ce["window_fy"], 12)
+        # FY2014-2025 cumulative FCF/revenue (measured against the real
+        # bundle's annualReports; the task's spot-check figure is the 5yr
+        # (FY21-25) sub-window: $511.554B FCF on $1,950.626B revenue).
+        self.assertAlmostEqual(ce["cum_fcf"], 932334000000.0, delta=1.0)
+        self.assertAlmostEqual(ce["cum_revenue"], 3612293000000.0, delta=1.0)
+        self.assertAlmostEqual(ce["fcf_margin_cycle"], 0.2581, places=4)
+        self.assertAlmostEqual(ce["fcf_margin_ttm"], 0.2928, places=4)
+        self.assertAlmostEqual(ce["cycle_gap_ratio"], 1.13, places=2)
+        self.assertAlmostEqual(ce["mean_roe_cycle"], 0.9799608182652754, places=6)
+
+    def test_mu_cycle_economics_ground_truth(self):
+        f = self._fundamentals(_QC12_MU_RAW, "2026-08-08")
+        ce = f["cycle_economics"]
+        self.assertIsNotNone(ce)
+        self.assertEqual(ce["window_fy"], 12)
+        self.assertAlmostEqual(ce["cum_fcf"], 17389000000.0, delta=1.0)
+        self.assertAlmostEqual(ce["cum_revenue"], 276995000000.0, delta=1.0)
+        self.assertAlmostEqual(ce["fcf_margin_cycle"], 0.0628, places=4)
+        self.assertAlmostEqual(ce["fcf_margin_ttm"], 0.3010, places=4)
+        self.assertAlmostEqual(ce["cycle_gap_ratio"], 4.79, places=2)
+        self.assertAlmostEqual(ce["mean_roe_cycle"], 0.15012477322309653, places=6)
 
 
 if __name__ == "__main__":

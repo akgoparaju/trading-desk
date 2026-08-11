@@ -143,14 +143,23 @@ DEPTH_TABLE = {
         # v1.2.0 (Track O4): adds a PROVISIONAL sector-relative RS factor. The
         # DEPTH TIER is UNCHANGED from 1.1.0 -- still HIGH (the regime-depth pass
         # already landed; adding one more provisional factor does not lower the
-        # depth badge, and promoting anything is a SEPARATE gated task). This
-        # explicit row exists only to DISCLOSE the new provisional factor in the
-        # why-tag (it overrides the generic "rubric past 1.0.0 -> HIGH" fallthrough
-        # so the disclosure travels). The sector-RS bands SURVIVED the 2026-07-22
-        # structural set (6/7 names carried RS and spread across the bands), so the
-        # "provisional" why-tag is dropped (the OUTCOME -- do RS bands predict forward
-        # winners -- remains forward-tracking via the SKILL falsifier).
-        "1.2.0": (HIGH, "regime-conditional depth; sector-RS"),
+        # depth badge, and promoting anything is a SEPARATE gated task).
+        #
+        # QC16 (fixed): this row's why-tag USED TO unconditionally read
+        # "regime-conditional depth; sector-RS" for EVERY 1.2.0 module doc, purely
+        # off rubric_version -- which claimed the sector-RS factor ran even on a
+        # ticker whose sector data was never fetched (the factor stood aside,
+        # `excluded: true`, but the confidence badge said otherwise; verified
+        # false on an AAPL bundle). The row below is now only the BASE why; the
+        # "; sector-RS" clause is appended dynamically by ``_depth_axis`` (see
+        # ``_sector_rs_executed``), gated on the technical module doc's
+        # subscores actually carrying a non-excluded rel_strength_sector row --
+        # i.e. on EXECUTION, never on rubric version alone. The sector-RS bands
+        # SURVIVED the 2026-07-22 structural set (6/7 names carried RS and spread
+        # across the bands), so the "provisional" why-tag stays dropped when the
+        # clause IS disclosed (the OUTCOME -- do RS bands predict forward winners
+        # -- remains forward-tracking via the SKILL falsifier).
+        "1.2.0": (HIGH, "regime-conditional depth"),
     },
     "sentiment": {
         # keyed on rubric_version.
@@ -301,8 +310,42 @@ def _source_axis(module_doc, snapshot):
 # DEPTH axis.
 # --------------------------------------------------------------------------- #
 
+# QC16: the technical module's PROVISIONAL sector-relative RS factor
+# (score_technical.score_rel_strength, Track O4 / v1.2.0). Its subscores row name,
+# read here so the depth why-tag can be gated on EXECUTION, not rubric_version.
+_SECTOR_RS_SUBSCORE_NAME = "rel_strength_sector"
+
+
+def _sector_rs_executed(module_doc):
+    """True iff the technical module's sector-relative RS factor actually ran.
+
+    QC16: a rubric-version-only depth lookup used to claim "sector-RS" on EVERY
+    1.2.0 build, even when the factor was never evaluable (no sector data was
+    ever fetched for this ticker -- see refresh_plan.py's sector gap-fill fix,
+    and build_snapshot.py's now-conditional missing-disclosure). The technical
+    module doc's ``subscores`` array always carries a ``rel_strength_sector`` row
+    once the module hits rubric 1.2.0 (score_technical.py's score() makes it an
+    unconditional member of the considered dimension set, per QC10); it is
+    stamped ``excluded: true`` when it was not evaluable. Only a present,
+    non-excluded row means the factor actually executed on this build.
+    """
+    subscores = module_doc.get("subscores") if isinstance(module_doc, dict) else None
+    if not isinstance(subscores, list):
+        return False
+    for row in subscores:
+        if isinstance(row, dict) and row.get("name") == _SECTOR_RS_SUBSCORE_NAME:
+            return not row.get("excluded", False)
+    return False
+
+
 def _depth_axis(module_doc):
-    """Return {"level","why"} for the DEPTH axis of one module (DEPTH_TABLE lookup)."""
+    """Return {"level","why"} for the DEPTH axis of one module (DEPTH_TABLE lookup).
+
+    QC16: for technical, DEPTH_TABLE supplies only the BASE why-tag; the
+    "; sector-RS" clause is appended dynamically, gated on whether the factor
+    ACTUALLY EXECUTED on this build (see ``_sector_rs_executed``) -- never on
+    rubric_version alone, so a module never advertises a factor that did not run.
+    """
     module = _module_key(module_doc)
     rows = DEPTH_TABLE.get(module, {})
     if module == "fundamental":
@@ -315,9 +358,12 @@ def _depth_axis(module_doc):
     rubric = module_doc.get("rubric_version", "1.0.0")
     if rubric in rows:
         level, why = rows[rubric]
-        return {"level": level, "why": why}
-    # rubric bumped beyond the shallow 1.0.0 row -> the depth pass landed.
-    return {"level": HIGH, "why": "depth pass landed"}
+    else:
+        # rubric bumped beyond the shallow 1.0.0 row -> the depth pass landed.
+        level, why = HIGH, "depth pass landed"
+    if module == "technical" and _sector_rs_executed(module_doc):
+        why = "%s; sector-RS" % why
+    return {"level": level, "why": why}
 
 
 # --------------------------------------------------------------------------- #
