@@ -30,7 +30,7 @@ Constructive but sub-hurdle.
 
 ## Page 2 - Evidence
 
-### Technical - 69.5/100
+### Technical — 69.5/100 (rubric v1.3.0) · ◐ MEDIUM
 
 Trend intact above the rising 50-day.
 
@@ -89,7 +89,11 @@ def test_parity_with_report_qc_page_sections():
 
 
 def test_parity_with_report_qc_countable_prose():
-    for body in wb.page_sections(REPORT):
+    # The flat fixture alone never exercises the nested-Data-Integrity branch (a
+    # delta report nests "### Data Integrity" inside "## Data Integrity"); include
+    # it so parity is checked on that path too, not just the common one.
+    extra = "## Data Integrity\n### Data Integrity\n" + "x " * 20 + "\n### Tail\n y\n"
+    for body in wb.page_sections(REPORT) + [extra]:
         assert wb.countable_prose(body) == rq._countable_prose(body)
 
 
@@ -144,6 +148,13 @@ def test_section_contributors_strips_the_score_suffix_from_the_heading():
 
 def test_section_contributors_respects_top_n():
     assert len(wb.section_contributors(REPORT, top_n=2)) == 2
+
+
+def test_section_contributors_are_ranked_largest_first():
+    fat = REPORT.replace("Watch the print.", "word " * 200)
+    rows = wb.section_contributors(fat, top_n=5)
+    assert rows[0][0] == "Monitoring Protocol"
+    assert [c for _, c in rows] == sorted((c for _, c in rows), reverse=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -206,3 +217,29 @@ def test_format_budget_block_is_quiet_when_nothing_is_wrong():
     assert "OVER-SUBSCRIBED" not in block
     assert "SKELETON NEAR CAP" not in block
     assert "brief slot" not in block
+
+
+# --------------------------------------------------------------------------- #
+# Non-report documents -- a delta report has no ``## Page`` headers, so
+# check_word_cap's own ``_page_sections`` finds none and SKIPs the cap entirely.
+# The dict and block must say so honestly instead of reporting a fabricated
+# 0-word skeleton against a room that never actually applies.
+# --------------------------------------------------------------------------- #
+
+DELTA = """# PLTR Delta Report
+
+### Summary
+
+Position unchanged since last snapshot.
+
+<!-- SLOT:delta_interpretation -->
+"""
+
+
+def test_budget_reports_not_capped_when_there_are_no_page_sections():
+    assert wb.budget(DELTA)["capped"] is False
+
+
+def test_format_budget_block_says_the_cap_does_not_apply_for_a_delta():
+    block = wb.format_budget_block(wb.budget(DELTA))
+    assert "does not apply" in block

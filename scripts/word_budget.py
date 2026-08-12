@@ -23,9 +23,10 @@ import re
 WORD_CAP = 2100
 WORD_TRIM_MARGIN = 40
 
-# Per-slot authoring budgets. MIRRORED in skills/report-renderer/SKILL.md's slot
-# table -- change both together. The five briefs plus five signals plus the four
-# small slots sum to 985, comfortably inside the room a normal skeleton leaves.
+# Per-slot authoring budgets. Two numbers mirror skills/report-renderer/SKILL.md:
+# BRIEF_SLOT_BUDGET <-> "<=150 words each", and the 985 total <-> "Target <=1,000
+# words of authored prose across all slots" -- change those together. The rest
+# quantify SKILL.md's qualitative sizes ("1 sentence", "1-2 lines").
 BRIEF_SLOT_BUDGET = 150
 SIGNAL_SLOT_BUDGET = 15
 _NAMED_SLOT_BUDGETS = {
@@ -39,7 +40,10 @@ _NAMED_SLOT_BUDGETS = {
 # a KeyError -- the block is a diagnostic and must never break a render.
 _DEFAULT_SLOT_BUDGET = 35
 
-_SLOT_RE = re.compile(r"<!--\s*SLOT:([a-z_]+)\s*-->")
+# Public: report_qc's own strict slot regex will alias onto this one so the two
+# checks (the render-time budget and the blocking gate's check_no_empty_slots)
+# cannot silently diverge on what counts as "open".
+SLOT_RE = re.compile(r"<!--\s*SLOT:([a-z_]+)\s*-->")
 _PAGE_RE = re.compile(r"^## Page ", re.MULTILINE)
 _SUBSECTION_RE = re.compile(r"^### ", re.MULTILINE)
 
@@ -110,14 +114,15 @@ def countable_prose(section_text):
 
 
 def count_words(report_text):
-    """``(total, [p1, p2, p3])`` countable words across the page sections."""
+    """``(total, counts)`` -- countable words, and one count per Page section
+    found (possibly none, e.g. a delta report with no ``## Page`` headers)."""
     counts = [len(countable_prose(s).split()) for s in page_sections(report_text)]
     return sum(counts), counts
 
 
 def open_slots(report_text):
     """Names of the slots still carrying an unfilled mark, in document order."""
-    return _SLOT_RE.findall(report_text)
+    return SLOT_RE.findall(report_text)
 
 
 def slot_budget(name):
@@ -168,10 +173,14 @@ def budget(report_text):
         "cap": WORD_CAP,
         "margin": WORD_TRIM_MARGIN,
         "room": room,
+        # No ``## Page`` sections (e.g. a delta report) => check_word_cap's own
+        # _page_sections finds none and SKIPs -- the cap never actually runs, so
+        # a 0-word skeleton and a "room" number here would be fabricated.
+        "capped": bool(per_page),
         "open_slots": slots,
         "budgeted": budgeted,
         "oversubscribed": budgeted > room,
-        "skeleton_near_cap": skeleton_words > WORD_CAP - WORD_TRIM_MARGIN,
+        "skeleton_near_cap": room < 0,
         "brief_slots_open": [s for s in slots if s.startswith("brief_")],
         "contributors": section_contributors(report_text, top_n=3),
     }
@@ -181,34 +190,49 @@ def format_budget_block(info):
     """The printable block. ASCII only -- this goes to a terminal."""
     cap, margin = info["cap"], info["margin"]
     skeleton = info["skeleton_words"]
-    lines = [
-        f"WORD BUDGET  skeleton {skeleton} / cap {cap}   "
-        f"(prose+headings; table rows and Data Integrity excluded)",
-        f"  room for authored prose: {info['room']}   "
-        f"(cap {cap} - margin {margin} - skeleton {skeleton})",
-    ]
+    if not info["capped"]:
+        lines = ["WORD BUDGET  no Page sections -- the word cap does not apply "
+                 "(report_qc SKIPs word_cap on this document)."]
+    else:
+        lines = [
+            f"WORD BUDGET  skeleton {skeleton} / cap {cap}   "
+            f"(prose+headings; table rows and Data Integrity excluded)",
+            f"  room for authored prose: {info['room']}   "
+            f"(cap {cap} - margin {margin} - skeleton {skeleton})",
+        ]
+
     slots = info["open_slots"]
     if slots:
-        lines.append(f"  {len(slots)} open slots, budgeted {info['budgeted']}:")
+        # Point the author at the slot budgets (985 total), not at the room
+        # (1663 on the bundle this module exists because of): the failure this
+        # module prevents was spending TO THE ROOM, not to the per-slot table.
+        lines.append(f"  {len(slots)} open slot(s), budgeted {info['budgeted']} "
+                     f"-- WRITE TO THIS, not to the room "
+                     f"({info['room'] - info['budgeted']} words of slack).")
         for name in slots:
             lines.append(f"    {name:<24} {slot_budget(name)}")
     else:
         lines.append("  0 open slots -- every slot is filled or transcluded.")
 
     contrib = ", ".join(f"{n} {c}" for n, c in info["contributors"])
+    warned = False
     if info["oversubscribed"]:
         lines.append(
             f"  !! OVER-SUBSCRIBED -- slot budgets ({info['budgeted']}) exceed the "
             f"room ({info['room']}). Writing to budget still fails the cap, so the "
-            f"fix is upstream, not a tighter slot. Largest sections: {contrib}")
+            f"fix is upstream, not a tighter slot.")
+        warned = True
     if info["skeleton_near_cap"]:
         lines.append(
-            f"  !! SKELETON NEAR CAP -- {skeleton} of {cap} before a word of prose. "
-            f"Largest sections: {contrib}")
+            f"  !! SKELETON NEAR CAP -- {skeleton} of {cap} before a word of "
+            f"prose.")
+        warned = True
+    if warned and contrib:
+        lines.append(f"  Largest sections: {contrib}")
     if info["brief_slots_open"]:
         n = len(info["brief_slots_open"])
         lines.append(
-            f"  NOTE  {n} brief slot(s) OPEN -- brief_*.md absent or missing its "
-            f"delimiters, so ~{n * BRIEF_SLOT_BUDGET} words that normally "
+            f"  NOTE  {n} brief slot(s) OPEN -- the brief's transclusion span "
+            f"was not found, so ~{n * BRIEF_SLOT_BUDGET} words that normally "
             f"transclude must be authored here.")
     return "\n".join(lines)
