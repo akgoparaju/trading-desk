@@ -330,7 +330,57 @@ resolved plugin cache tree → fill the handoff status block in place.
 - Chasing the caller's missing `brief_*.md` — root-caused to their side (driving `run_pipeline.py` /
   `score_*.py` directly instead of the module skills) and gated there.
 
-## 6. Noted for the backlog, not this release
+## 6. Acceptance results (2026-08-12) — PASS, with three findings
+
+Run by a fresh agent following the SKILL cold, from the plugin repo root, against **copies** on the
+internal disk. The requester's live workspace was never written to.
+
+**RUN 1 — `report-renderer PLTR --output-dir <SCRATCH>/PLTR_2026-08-12 --prev-dir <SCRATCH>/PLTR_2026-08-11`**
+
+| Stage | Result |
+|---|---|
+| Discovery | branch (a), announced `discovery: flat under --output-dir`; no `cd`, no CWD glob matched |
+| Completeness | 7 modules + snapshot — PASS |
+| Step 2 | **resumed** (0 open slots); budget block `skeleton 2133 / cap 2100`, `room -73`, `!! SKELETON NEAR CAP` |
+| Step 4 (1st) | `word_cap` **FAIL** — 2133 > 2100, `CUT >= 73 words IN ONE EDIT` |
+| Trim | 103 words cut from 12 Page-2 prose paragraphs, verified to drop no numeric token |
+| Step 4 (2nd) | **PASS** — 2032 words (p1 420, p2 1169, p3 443). One iteration to green |
+| Step 4b | decision gates — 3/3 PASS |
+| Delta | prior resolved; delta re-rendered (never resumed); `delta_interpretation` authored; QC PASS first try |
+| Step 5 | venv READY; charts 16 ok / 0 skipped; slots gate PASS (stamp written) |
+| Docket | `PLTR_Delta_Note` 3,615 B · `PLTR_Trade_Report` (exec) 441,466 B · `PLTR_Detail` 906,175 B |
+
+**Pass criteria 1-6: all met.** Criterion 4 verified by mtime diff — the ONLY changes inside
+`detail_reports_2026-08-12/` were `charts/` (16 PNGs + manifest) and `pdf_slots.json`;
+**`module_decision.json` byte-identical**, confirming the resume path did not rewrite it. `--prev-dir`
+untouched. Criterion 5: `diff` of the live workspace's mtimes before and after is **empty**.
+
+**RUN 2 — `report-renderer ORCL --output-dir <SCRATCH>/ORCL_2026-07-23`** (discovery only): branch (a)
+matched nothing, branch (b) resolved `trading_desk_ORCL/detail_reports_2026-07-24` — newest of the two
+nested bundles — completeness PASS, nothing rendered.
+
+### Three findings, two of them defects fixed here
+
+1. **`ls -dt` ranks by mtime; the spec says newest by DATE.** Caught while staging the fixture: a
+   plain `cp -RL` collapsed two real bundles to one timestamp and `ls -dt` then ranked the
+   *older-dated* bundle first. mtime and date diverge on any copy, backup restore, or `rsync` without
+   `-t` — and a recovered workspace is exactly what this entry point serves. Flat discovery now sorts
+   by the ISO date in the name, which cannot tie in that layout.
+2. **Shell portability — a live defect in shipped 1.5.1, not introduced here.** Discovery paired two
+   globs on one line (`ls -dt <a>/detail_reports_* <a>/td_bundle_* 2>/dev/null`). Under **zsh** — the
+   macOS default — an unmatched glob is a `NOMATCH` error that aborts the whole command *before* `ls`
+   runs, so a workspace with no legacy `td_bundle_*` (the normal case) reported "no bundle found"
+   with the bundle sitting right there. `2>/dev/null` hides the message, not the abort. Under bash the
+   same line works, which is why it survived. Every discovery command now uses `find` with a quoted
+   `-name`, which does its own matching and behaves identically in both shells — verified in both.
+   **This changes the no-flag human path**, from silently broken under zsh to working.
+3. **`--output-dir`'s own directory name is not a bundle selector** (working as designed, worth
+   stating). A workspace named `.../ORCL/2026-07-23/` can hold a bundle dated `2026-07-24` — a later
+   refresh writing into the same run-date workspace. Discovery resolves the newest *bundle*, not the
+   date in the root's name. The mandatory branch announcement makes the resolved path visible, which
+   is what that guardrail is for.
+
+## 7. Noted for the backlog, not this release
 
 - **`run_pipeline.py` is referenced by no SKILL**, yet it is discoverable, self-documents via
   `--help`, and produces a bundle that passes the plugin's own QC while missing artifacts the report
