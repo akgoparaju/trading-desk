@@ -16,6 +16,7 @@ This is the **L4 output layer**. It consumes the entire bundle (snapshot + `modu
 - **`--output-dir <ABS_DIR>` given** → `WORKROOT = <ABS_DIR>` (MUST be absolute) and — **FLAT under `--output-dir` (v1.2.0)** — `TICKER_WS = <WORKROOT>`: the ticker workspace IS `<WORKROOT>`, so drop the `trading_desk_<TICKER>/` segment (the caller passes a per-ticker dir). All I/O is rooted here, decoupled from the process CWD.
 - **`--output-dir` absent** → `WORKROOT = .` and `TICKER_WS = ./trading_desk_<TICKER>` (the human/CWD layout — byte-for-byte unchanged).
 - **`--prev-dir <ABS_DIR>`** (delta only) → the PRIOR **workspace root**; `<PREV_BUNDLE>` = the newest `detail_reports_*` under it. **Tolerant:** if the given path's own basename starts with `detail_reports`, it IS `<PREV_BUNDLE>` — a caller who handed you a bundle instead of a root is right, not wrong. **`--prev-dir` is READ-ONLY**; never write into it.
+- **`--fresh-skeleton`** (no value) → re-render the skeleton even when a report already exists, **discarding its authored prose**. Never take this branch on your own initiative — see Step 2.
 
 **One name per layer, translated exactly once.** The SKILL boundary takes `--prev-dir <workspace root>`; the SCRIPT boundary takes `--previous <bundle dir>`. Resolve `--prev-dir` → `<PREV_BUNDLE>` here, once, then pass the **bundle** to every `render_report.py --previous`, `report_qc.py --previous`, and `render_pdf.py --previous` below.
 
@@ -103,8 +104,8 @@ The `brief_<dim>` and `signal_<dim>` slots are now deterministically transcluded
 ## Step 4 — Run the blocking §12 QC gate
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/report_qc.py --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> \
-  --report <path printed by render_report.py, e.g. ./<TICKER>_Trade_Report_<date>.md>
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/report_qc.py --bundle <BUNDLE> \
+  --report <REPORT>
 ```
 
 The gate prints a check table and exits 0 (pass) or 1 (fail). The checks: **number_provenance** (every report number traces to the bundle), composite_arithmetic, ev_consistency, invalidation_both_legs, sizing_within_cap, exit_ordering (QC6: profit_take must never sit at/above bull_target), strikes_in_chain, pop_method_labeled, expression_consistency, footer_integrity, **footer_completeness** (every `snapshot.meta.api_tier_notes` entry appears in the footer), word_cap (≤2100, prose + headings only), **no_empty_slots**.
@@ -128,7 +129,7 @@ The consolidated `module_decision.json` (contract **v2.0.0**) that `render_repor
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/report_qc.py \
-  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> --decision-gates
+  --bundle <BUNDLE> --decision-gates
 ```
 
 Three blocking checks: **schema_version_present** (every scorer + decision module carries a top-level `schema_version`), **decision_subset_of_bundle** (every non-derived numeric leaf in `module_decision.json` equals a bundle value — nothing fabricated), **decision_schema_valid** (validates against `docs/decision.schema.json`). Exit 0 to proceed. A failure is an upstream module/emitter bug — a missing `schema_version` stamp, or a decision leaf with no bundle source — **fix the module and re-render; never hand-edit `module_decision.json`**.
@@ -148,7 +149,7 @@ Exit 0 prints `READY <venv-python>` — capture that interpreter path for steps 
 **(b) Render the deterministic chart pack** (use the venv python from step (a)):
 ```bash
 <venv-python> ${CLAUDE_PLUGIN_ROOT}/scripts/render_charts.py \
-  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> --set all
+  --bundle <BUNDLE> --set all
 ```
 Writes the PNGs + `charts/charts_manifest.json`. A chart with a missing input is SKIPPED (recorded with a reason) — the renderer simply omits it; you fabricate nothing.
 
@@ -165,26 +166,29 @@ Writes the PNGs + `charts/charts_manifest.json`. A chart with a missing input is
 - `thesis_bullets` — exactly **3**, each in the **"Lead — rest"** bold-lead form (em-dash separator).
 - `desk_read` — the four keys `setup / edge / trigger / risk`.
 - `positioning` — the four keys `entry_discipline / sizing_kelly / path_dependency / monitoring`.
-- `delta_interpretation` — **null** for exec/detail (it belongs to the delta note; the refresh-analysis skill fills it).
+- `delta_interpretation` — **REQUIRED (1-2 sentences) whenever a prior bundle resolved** (`--prev-dir` given, or a prior sits beside the bundle): what drove the composite / EV / level moves, citing ONLY numbers in the delta report or the module JSONs. **`null` when there is no prior** — then the docket is exec + detail only, which is a normal two-PDF pass, not a degradation to disclose.
 - **Prose rules:** cite ONLY numbers that already appear in the gated md report or the module JSONs; **≤2 sentences per field**. This is the same number-provenance discipline as the md slots — a number with no bundle source fails the slots gate.
 
 **(d) Run the BLOCKING slots provenance gate** (stamps `qc_passed=true` INTO the file on pass; `render_pdf` refuses exec/detail without that stamp):
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/report_qc.py \
-  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> \
-  --pdf-slots ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>/pdf_slots.json
+  --bundle <BUNDLE> --pdf-slots <BUNDLE>/pdf_slots.json [--previous <PREV_BUNDLE>]
 ```
 Exit 0 = pass (stamp written). On fail (orphan number), **fix the PROSE, never the numbers** — rephrase to a figure the bundle carries, exactly as with the md gate.
 
+Pass **`--previous <PREV_BUNDLE>`** whenever a prior bundle resolved — it admits the Δ values `delta_interpretation` cites into the allowed provenance set. Without it, legitimate delta numbers orphan.
+
 **(e) Render the PDFs** (venv python from step (a)). Add `--previous <prev_bundle>` to `exec` when a prior bundle exists → the exec page shows a **What-Changed** box:
 ```bash
+# delta FIRST when a prior resolved -- it REQUIRES --previous
 <venv-python> ${CLAUDE_PLUGIN_ROOT}/scripts/render_pdf.py \
-  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> --doc exec \
-  [--previous <previous_bundle>]
+  --bundle <BUNDLE> --doc delta --previous <PREV_BUNDLE>
 <venv-python> ${CLAUDE_PLUGIN_ROOT}/scripts/render_pdf.py \
-  --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD> --doc detail
+  --bundle <BUNDLE> --doc exec [--previous <PREV_BUNDLE>]
+<venv-python> ${CLAUDE_PLUGIN_ROOT}/scripts/render_pdf.py \
+  --bundle <BUNDLE> --doc detail
 ```
-The PDFs land in the **ticker parent** (same location rule as the md report): `<TICKER>_Trade_Report_<date>.pdf` (exec) and `<TICKER>_Detail_<date>.pdf` (detail), path printed to stdout. `render_pdf` exits 3 with a bootstrap line if the venv disappeared between steps — treat that exactly like the (a) exit-3 md-only fallback.
+The PDFs land in the **ticker parent** (same location rule as the md report): `<TICKER>_Trade_Report_<date>.pdf` (exec), `<TICKER>_Detail_<date>.pdf` (detail), and `<TICKER>_Delta_Note_<date>.pdf` (delta), path printed to stdout. **The delta note is conditional on a resolvable prior bundle** — with no prior, a two-PDF docket is a complete pass. `render_pdf` exits 3 with a bootstrap line if the venv disappeared between steps — treat that exactly like the (a) exit-3 md-only fallback.
 
 **METHODOLOGY appendix (fully scripted — nothing to author).** Every `--doc detail` PDF ends with a `METHODOLOGY` appendix page: rubric versions, the composite weight table actually used (with the standard column shown for comparison when a CUSTOM weight set applies), the fundamental valuation formula set (anchored vs snapshot component maxima + the DCF-vs-comps disagreement rule + the display-only PEG line), the active sector scale (name/version/basis/formula/parameters/evidence/falsifiers/prior — or "No sector scale active"), the EV-hurdle/grade-band/horizon/judgment-flag conventions, and the governance rules. It is rendered **100% from the module JSONs + the active scale JSON** — the convention constants are imported from the scorers, so it can never drift. **There is NO slot for it and nothing for you to write** — do not attempt to author or edit the methodology page; `pdf_slots.json` authoring is **unchanged** (the four prose blocks above), because the methodology page is out of slots scope by construction.
 
@@ -197,14 +201,14 @@ The PDFs land in the **ticker parent** (same location rule as the md report): `<
 When the user wants a change-report vs a prior bundle:
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_report.py --bundle ./<new_bundle> --delta --previous ./<old_bundle>
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_report.py --bundle <BUNDLE> --delta --previous <PREV_BUNDLE>
 ```
 
 Both bundles need `module_composite`. Output: `<TICKER>_Delta_Report_<date>.md` — written to the **same location rule as the full report** (the bundle's parent under the `detail_reports_<date>/` layout, inside the bundle for legacy) and printed to stdout. It carries a composite delta table (old/new/Δ, grade change bolded), EV delta, level changes, structures added/removed, and a `delta_interpretation` slot. Fill that one slot, then QC the delta (auto-detected by filename — it runs checks number_provenance / footer_integrity / footer_completeness / no_empty_slots only; the delta renders the same Data-Integrity footer, so the completeness check applies unchanged). **Pass `--previous` to the QC too** so the Δ columns (which are script-computed differences, not bundle leaves) and the old-value columns are recognized as in-bundle:
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/report_qc.py --bundle ./<new_bundle> \
-  --report <path printed by render_report.py --delta> --previous ./<old_bundle>
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/report_qc.py --bundle <BUNDLE> \
+  --report <path printed by render_report.py --delta> --previous <PREV_BUNDLE>
 ```
 
 A module absent in either bundle → that section reads "n/a (module absent in {which})".
@@ -227,4 +231,5 @@ If the **financial-analysis docx skill** is available, offer to convert the pass
 - **The docket is a render of the SAME bundle; md stays the source of truth.** The PDFs (exec/detail, + delta on a refresh) carry only script-minted numbers + gated `pdf_slots.json` prose. If the render venv is not built, `render_env.py --check` exits 3 → announce md-only with the one-line bootstrap and skip the PDF steps; **the docket never blocks the md report.**
 - **The slots gate is blocking and cannot be bypassed.** `render_pdf` refuses exec/detail unless `report_qc.py --pdf-slots` stamped `qc_passed=true`. Fix slot PROSE, never numbers — the same discipline as the md gate.
 - **The METHODOLOGY appendix, footer stamps, and scale banners are fully scripted — nothing to author.** The methodology page keeps every detail transparent (rubric versions, weights, valuation formulas, active scale, conventions, governance) rendered purely from the module + scale JSONs; it is **out of `pdf_slots.json` scope** — do not try to write or edit it. Slot authoring is unchanged (the four prose blocks). Weight-set / scale footer stamps and the scale-review / pending-proposal banners likewise come from the module and refresh-plan JSONs, never from prose.
-- **Read-only over the bundle (except the two authored artifacts).** This skill writes the report `.md` and — for the docket — `pdf_slots.json` + the `charts/` PNGs + the PDFs; it never edits the snapshot or any module JSON.
+- **Read-only over the bundle (except the authored artifacts).** This skill writes the report `.md` and — for the docket — `pdf_slots.json` + the `charts/` PNGs + the PDFs. It **never** edits the snapshot or any evidence module JSON. `module_decision.json` is written by `render_report.py` on a **fresh render only** (Step 2); on the **resume** path nothing in the bundle is touched at all. `<PREV_BUNDLE>` is read-only in every mode.
+- **No implicit re-analysis.** A missing module file exits 2 naming it. Never invoke an upstream skill to fill the gap — that turns a cheap recovery into an unaudited partial re-run.
