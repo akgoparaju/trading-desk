@@ -88,6 +88,14 @@ def test_parity_with_report_qc_page_sections():
     assert wb.page_sections(REPORT) == rq._page_sections(REPORT)
 
 
+def test_report_qc_aliases_are_the_same_objects():
+    # The parity tests above are f(x) == f(x) post-aliasing and can never fail on
+    # their own; this pins the STRONGER fact -- there is exactly one implementation,
+    # not two that happen to agree on the fixture.
+    assert rq._page_sections is wb.page_sections
+    assert rq._countable_prose is wb.countable_prose
+
+
 def test_parity_with_report_qc_countable_prose():
     # The flat fixture alone never exercises the nested-Data-Integrity branch (a
     # delta report nests "### Data Integrity" inside "## Data Integrity"); include
@@ -271,5 +279,6 @@ def test_render_report_prints_the_budget_block_before_the_path(tmp_path, capsys,
 
     assert rc == 0
     lines = capsys.readouterr().out.strip().splitlines()
-    assert "WORD BUDGET" in "\n".join(lines)
     assert lines[-1] == str(out), "the report path must remain the LAST stdout line"
+    # The block must describe the report that was WRITTEN -- not merely exist.
+    assert "\n".join(lines[:-1]) == wb.format_budget_block(wb.budget(REPORT))

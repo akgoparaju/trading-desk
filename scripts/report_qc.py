@@ -78,9 +78,7 @@ from scripts._artifact import emit_json
 # the SAME budget before the prose is authored that this gate enforces after.
 # Aliased rather than re-declared: one definition, no drift.
 _WORD_CAP = word_budget.WORD_CAP
-# Overshoot the trim by this much rather than converging onto the cap exactly. The
-# measured tail on a real run was 2103 -> 2101 -> 2100, three QC cycles to recover
-# three words. This changes only the TRIM INSTRUCTION, never the cap that is enforced.
+# WHY 40: see word_budget.WORD_TRIM_MARGIN
 _WORD_TRIM_MARGIN = word_budget.WORD_TRIM_MARGIN
 _ORPHAN_CAP = 20
 
@@ -506,8 +504,8 @@ def is_allowed_formatted(token, allowed, match_precision):
 # --------------------------------------------------------------------------- #
 # Report section splitting -- MOVED to scripts/word_budget.py so render_report
 # can count the skeleton with the same code this gate enforces with. Aliased
-# under the old private names: callers and tests inside this module are
-# unchanged, and there is exactly one implementation.
+# under the old private names: callers here and the tests that reach in by these
+# private names are unchanged, and there is exactly one implementation.
 # --------------------------------------------------------------------------- #
 
 _page_sections = word_budget.page_sections

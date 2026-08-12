@@ -21,6 +21,9 @@ import re
 # The cap the gate enforces and the overshoot margin its trim instruction uses.
 # report_qc aliases these, so there is exactly one definition of each.
 WORD_CAP = 2100
+# Overshoot the trim by this much rather than converging onto the cap exactly. The
+# measured tail on a real run was 2103 -> 2101 -> 2100, three QC cycles to recover
+# three words. This changes only the TRIM INSTRUCTION, never the cap that is enforced.
 WORD_TRIM_MARGIN = 40
 
 # Per-slot authoring budgets. Two numbers mirror skills/report-renderer/SKILL.md:
