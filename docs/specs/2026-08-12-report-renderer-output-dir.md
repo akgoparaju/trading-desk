@@ -73,8 +73,33 @@ ls -dt <WORKROOT>/trading_desk_<TICKER>/detail_reports_* <WORKROOT>/td_bundle_<T
 ```
 
 Flat-first, with the nested/legacy fallback ordered *after* it rather than merged into one `ls`, so a
-stray legacy sibling can never win on mtime over the flat bundle the caller meant. The absent branch
-keeps today's two globs byte-for-byte.
+stray legacy sibling can never win on mtime over the flat bundle the caller meant — a merged glob
+would make a silent wrong-bundle render possible, the worst available failure on a path whose whole
+purpose is recovery. The absent branch keeps today's two globs byte-for-byte.
+
+The fallback is **not** hypothetical tolerance: real pre-v1.2.0 nested workspaces exist on the
+requester's disk (`…/ORCL/2026-07-23/trading_desk_ORCL/detail_reports_2026-07-24/`, from the incident
+that prompted the 2026-07-24 flatten handoff). Point the recovery path at one of those and flat misses
+while the fallback resolves correctly. That directory holds **two** nested bundles (`…_2026-07-23`
+and `…_2026-07-24`), so it also exercises newest-wins *inside* the fallback branch.
+
+**Three guardrails on the fallback (G1 is non-negotiable — the fallback does not ship without it):**
+
+- **G1 — the fallback fires ONLY on "no bundle found at all", never on "bundle found but
+  incomplete."** Once a path resolves, that IS the bundle: run the completeness check on it, and on
+  failure exit 2 naming the missing module exactly as today. Never re-enter discovery and render from
+  a different bundle. **Discovery success is terminal; completeness is a separate, later gate.**
+- **G2 — announce which branch resolved**, alongside the bundle path: `flat under --output-dir`,
+  `legacy nested fallback under --output-dir`, or `CWD`. A fallback that fires silently is
+  indistinguishable from one that never fired, and the operator needs to know which bundle they
+  actually rendered.
+- **G3 — the not-found message must not assert absence.** Under the host fault a denied `readdir`
+  returns **empty rather than erroring**, so `glob` swallows it and "no bundle here" is
+  indistinguishable from "I cannot read this directory" (the requester has been bitten by exactly
+  this — a bogus "no snapshot in bundle" that was really a permission fault). Word it *"no bundle
+  found at `<path>`"*, name the globs searched, and when the path is outside the home volume add the
+  remedy: verify readability with a **real byte-read**, not `stat` — `stat` succeeds against a dead
+  volume.
 
 **`--prev-dir <ABS_DIR>` (delta only), tolerant:**
 
@@ -104,6 +129,16 @@ prior bundle exists, a delta note"), but step (e) shows only `--doc exec` and `-
 - `--previous <PREV_BUNDLE>` on the `--pdf-slots` gate, so the Δ values are admitted to the
   provenance set;
 - `--previous <PREV_BUNDLE>` on `--doc exec`, giving the What-Changed box.
+
+**Conditional, as the preamble already says:** render the delta only when a prior bundle is
+resolvable. **No prior ⇒ a two-PDF docket is a PASS**, not a degradation to disclose. (Acceptance
+criterion 3 names three PDFs only because the PLTR fixture genuinely has a 2026-08-11 prior.)
+
+**The layer translation, stated once and explicitly** — this is where D1 earns itself: the *skill*
+boundary takes `--prev-dir <PREV_WORKROOT>` (a workspace root), the *script* boundary takes
+`--previous <previous_bundle>` (a bundle dir). The skill resolves prev-dir → prior bundle **once**,
+then passes the **bundle** to `render_pdf.py --doc delta --previous`, to `render_report.py --delta
+--previous`, and to every `report_qc.py --previous`. One name per layer, translated at one place.
 
 **Preserved verbatim (the requester's §5 non-negotiables), restated in Important Notes:**
 
@@ -164,10 +199,13 @@ block. Named here rather than left to be discovered.
 - `tests/test_word_budget.py` — parity (the new counter returns exactly `report_qc`'s existing numbers
   on the same fixture), contributor ranking and ordering, the ⚠ threshold and its absence, the
   open-slot count, and a zero-open-slots case.
-- `tests/test_output_dir_workspace.py` — a doc-contract test over `skills/report-renderer/SKILL.md`:
-  asserts `--output-dir` and `--prev-dir` are present and that the redirected discovery branch carries
-  no bare `./trading_desk_` glob. Cheap guard against the stale-doc-string class that recurred often
-  enough that 1.5.1 made a sweep for it a standing release-procedure step.
+- `tests/test_output_dir_workspace.py` — doc-contract tests over `skills/report-renderer/SKILL.md`:
+  `--output-dir` and `--prev-dir` present; the redirected discovery branch carries no bare
+  `./trading_desk_` glob; and the three guardrails are actually written down (G1's
+  discovery-is-terminal rule, G2's branch announcement, G3's non-absence wording plus the byte-read
+  remedy). Discovery is skill prose rather than code, so the doc IS the implementation — asserting on
+  it is the only available regression test, and it doubles as a guard against the stale-doc-string
+  class that recurred often enough that 1.5.1 made a sweep for it a standing release-procedure step.
 - Full suite green: baseline **2483 passed / 9 skipped**.
 
 ### Unit 4 — acceptance
@@ -182,6 +220,12 @@ freshness-blind downstream gate — the exact "unreachable success" that gate ex
   `/Volumes` during the run.
 - Invoke from the plugin repo root — a CWD that is not the workspace.
 - Record live-workspace mtimes before and after.
+
+**Second acceptance case — the fallback branch (D4/G2).** Copy
+`…/ORCL/2026-07-23/` (nested layout, two bundles inside `trading_desk_ORCL/`) to scratch and invoke
+with `--output-dir <SCRATCH>/ORCL/2026-07-23`. Flat must miss, the fallback must resolve
+`detail_reports_2026-07-24` (newest wins *inside* the fallback), and the run must announce that the
+legacy branch resolved. Discovery only — this case is not carried through to a full docket.
 
 **Pass criteria:**
 
@@ -209,7 +253,7 @@ resolved plugin cache tree → fill the handoff status block in place.
 | D1 | `--prev-dir`, not `--previous` | `--previous` collides with the script-level bundle argument; `--prev-dir` matches `refresh-analysis` |
 | D2 | Tolerant `--prev-dir` (accepts a bundle path too) | Costs nothing, removes a class of caller error; the contract is still "workspace root" |
 | D3 | One spelling only | Two names for one concept is documentation debt that outlives its author |
-| D4 | Flat-first discovery, nested/legacy as an ordered fallback | A merged `ls -dt` could let a stray legacy sibling win on mtime |
+| D4 | Flat-first discovery, nested/legacy as an ordered fallback | A merged `ls -dt` could let a stray legacy sibling win on mtime; real pre-v1.2.0 nested workspaces exist on the caller's disk. Ships **only** with G1/G2/G3 |
 | D5 | stdout budget block, not in-mark budgets | The author controls 4 small slots; skeleton bulk is the real lever, and the mark format stays untouched |
 | D6 | Shared `word_budget.py` rather than a duplicated counter | `report_qc` → `render_report` import direction forbids the reverse; one counter cannot drift |
 | D7 | `--doc delta` added to Step 5 | Step 5 already promises a three-PDF docket; only `refresh-analysis` could produce one |
