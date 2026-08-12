@@ -140,25 +140,68 @@ boundary takes `--prev-dir <PREV_WORKROOT>` (a workspace root), the *script* bou
 then passes the **bundle** to `render_pdf.py --doc delta --previous`, to `render_report.py --delta
 --previous`, and to every `report_qc.py --previous`. One name per layer, translated at one place.
 
+### Unit 1b — resume an already-rendered report (D-R)
+
+Step 2 today re-renders unconditionally, which on a recovery is wrong twice over: it discards the
+authored prose (~1,736 words across 14 slots on this fixture) and it rewrites `module_decision.json`
+in the bundle. A recovery path that expensive would not get used, and the alternative people reach
+for is hand-driving the pipeline tail — the exact behavior the caller's no-resume rule exists to
+prevent. **A recovery path has to be cheap or it is theatre.**
+
+- **Report already exists at the output location ⇒ skip Step 2 and QC it as-is**, announcing loudly:
+  `resumed existing report at <path>; skeleton not re-rendered`. **Touch nothing in the bundle on
+  this path** — no `module_decision.json` rewrite.
+- **Report absent ⇒ render normally.** Unchanged. On a genuine fresh render, writing
+  `module_decision.json` is Step 2's job and is not a violation.
+- **`--fresh-skeleton`** forces a re-render even when a report exists. Explicit, never automatic:
+  discarding ~1,700 words of authored analysis is not a call a machine makes unprompted.
+- **Drift is a hard fail with a named remedy.** If `report_qc` fails a numeric/structural check
+  (`number_provenance`, `composite_arithmetic`, `ev_consistency`, `strikes_in_chain`, …) on a
+  **resumed** report, that is report/bundle drift: fail, and name `--fresh-skeleton` in the error so
+  the operator chooses to discard the prose. Never auto-recover.
+- **`word_cap` is not drift** — that is the trim-and-retry path, and it stays exactly as it is.
+- **Open slots are not drift** — fill them; `no_empty_slots` already gates that. No re-render.
+
+Safe by construction: `number_provenance` re-verifies every figure in a resumed report against the
+bundle, so a resumed report that passes QC carries the same numeric guarantee as a freshly rendered
+one. The gate already *is* the drift detector — it only needed to fail loudly with a named remedy
+instead of being quietly pre-empted by a re-render.
+
 **Preserved verbatim (the requester's §5 non-negotiables), restated in Important Notes:**
 
 - `report_qc.py` stays blocking — no `--force`, no `--skip-qc`, no `word_cap` override, not behind a flag.
 - The `--pdf-slots` provenance gate stays blocking.
 - Read-only over the bundle except the two artifacts the skill already authors (`pdf_slots.json`,
-  `charts/`), and read-only over `<PREV_BUNDLE>` entirely.
+  `charts/`) — plus `module_decision.json` on a **fresh render only**, never on a resume — and
+  read-only over `<PREV_BUNDLE>` entirely.
 - No implicit re-analysis: a missing module file exits 2 naming it. Never silently invoke an upstream
   skill to fill a gap.
 
 ### Unit 2 — `scripts/word_budget.py` (new) + a render-time budget block
 
-**Why not the requested per-slot budgets.** The request assumed the render-time author has meaningful
-room to allocate. It does not: five of the prose slots (`brief_<dim>`) are **transcluded verbatim**
-from `brief_<dim>.md` and capped upstream at authoring time, so the author controls only `tension`,
-`event_playbook`, `catalyst_notes`, `monitoring_notes`. When the skeleton is near cap the author is
-close to powerless — which is the trap the 2026-08-12 run fell into. Per-slot allowances would not
-have helped; **surfacing the skeleton's own count at render time** does. In-mark budgets would also
-change the slot-mark format and disturb `no_empty_slots` plus a large renderer test body, for a
-secondary ask.
+**Measured first, on the real fixture** (an earlier draft of this spec argued from an assumption and
+got it backwards; the numbers below are the correction):
+
+| | countable words | open slots |
+|---|---|---|
+| fresh skeleton, re-rendered from the bundle | **397** / cap 2100 | **14** |
+| the authored report, as the run died | **2133** | 0 |
+
+The skeleton is nowhere near the cap. The author had `2100 − 40 − 397 = 1663` words of room and spent
+**1736**, against the SKILL's own stated target of ≤1,000 words of authored prose. **Authored prose is
+the entire overage**, so the original request's instinct — budgets surfaced *before* authoring — is
+right, and the "the skeleton is the mass" reframing was wrong.
+
+Why the earlier draft got it wrong: it assumed the five `brief_<dim>` slots transclude from
+`brief_<dim>.md`. **That bundle contains no `brief_*.md` at all**, so nothing transcluded and all 14
+slots came back open. (Root cause is caller-side and now gated there: those files are authored by the
+module *skills*, and the runs that lack them drove `run_pipeline.py` / the `score_*.py` scripts
+directly instead. Not a plugin defect — but the silent degradation is on this side of the line, and
+Unit 2 is what makes it visible.)
+
+So the block carries **both** levers. In-mark budgets stay declined: they would change the slot-mark
+format and disturb `no_empty_slots` plus a large renderer test body, for a secondary ask, and the
+block delivers the same information at the same moment.
 
 **Import direction forces the shape.** `report_qc` already imports `render_report`, so
 `render_report` cannot import `report_qc` back. A new stdlib-only `scripts/word_budget.py` owns the
@@ -173,26 +216,37 @@ primitives:
 behavior, its messages, and the tests that call those private names are untouched. **One counter,
 which is the property that matters — the render-time number and the gate's number can never drift.**
 
-`render_report.main` prints after the path line:
+`render_report.main` prints the block for a **full report** (not the delta — `check_word_cap` does not
+run on deltas), immediately **before** the path line, so the path stays the last line of stdout for
+any consumer that reads it that way. On the real fixture:
 
 ```
-WORD BUDGET: skeleton 2041 / cap 2100  (prose+headings; table rows and Data Integrity excluded)
-  remaining for open slots: 19   (cap 2100 − margin 40 − skeleton 2041)
-  open slots: 4 → ~4 words each
-  ⚠ NEAR CAP — largest contributors: brief_fundamental 148, brief_risk 141, brief_sentiment 139
+WORD BUDGET  skeleton 397 / cap 2100   (prose+headings; table rows and Data Integrity excluded)
+  room for authored prose: 1663        (cap 2100 - margin 40 - skeleton 397)
+  14 open slots, budgeted 985:
+    brief_{technical,fundamental,sentiment,risk,thesis}   150 each = 750
+    signal_{technical,fundamental,sentiment,risk,thesis}   15 each =  75
+    tension 30 | event_playbook 60 | catalyst_notes 35 | monitoring_notes 35
+  NOTE  5 brief slots are OPEN -- brief_*.md absent or missing its delimiters, so
+        ~750 words that normally transclude must be authored here.
 ```
 
-- Contributors are ranked `###`-section counts, so the **dominant transcluded brief is named** — the
-  author learns where the mass is instead of trimming four small slots to the bone against an overage
-  they did not cause.
-- The ⚠ fires when `skeleton > cap − margin` (2060), i.e. when the open slots cannot absorb normal
-  prose. Cap (2100) and margin (40) are imported from the same constants the gate enforces.
-- Open-slot count comes from the `<!-- SLOT:` marks actually left in the rendered text, so a bundle
-  whose briefs all transcluded reports 4, and one missing its brief files reports more.
+Three notices, each firing on its own condition:
 
-**Known and accepted:** this block prints on **every** render, redirected or not. The requester's
-byte-for-byte clause covers artifacts and paths — no file output changes — but stdout does gain the
-block. Named here rather than left to be discovered.
+- **over-subscribed** — budgeted total > room. The author cannot win by writing to budget; the fix is
+  upstream, not a tighter slot.
+- **skeleton near cap** — `skeleton > cap − margin`. The transcluded-bundle case the earlier draft
+  assumed; kept as the backstop it should always have been.
+- **brief slots open** — any `brief_*` slot unfilled means transclusion did not happen. On this
+  fixture that one line makes the whole causal chain visible before a word is authored.
+
+Each warning **names the largest contributors** (ranked `###`-section counts over the *countable*
+text, so the excluded Data Integrity footer cannot dominate the ranking — it is 1,192 words on this
+fixture and would otherwise top every list). Cap and margin are the same constants the gate enforces.
+
+**Known and accepted:** the block prints on every full render, redirected or not. The byte-for-byte
+clause covers artifacts and paths — no file output changes, and the path line stays last — but stdout
+does gain the block.
 
 ### Unit 3 — tests
 
@@ -235,8 +289,12 @@ legacy branch resolved. Discovery only — this case is not carried through to a
    report through.)
 3. `PLTR_Trade_Report_2026-08-12.pdf`, `PLTR_Detail_2026-08-12.pdf`, `PLTR_Delta_Note_2026-08-12.pdf`
    land in the scratch workroot, non-empty.
-4. Nothing under `detail_reports_2026-08-12/` is mutated except `pdf_slots.json` and `charts/`.
-5. kurama's live workspace is untouched — mtimes unchanged.
+4. Nothing under `detail_reports_2026-08-12/` is mutated except `pdf_slots.json` and `charts/`. On
+   the resume path that includes `module_decision.json` — it must **not** be rewritten (amended per
+   D-R; on a fresh render it legitimately is).
+5. kurama's live workspace is untouched — mtimes unchanged against the baseline captured before any
+   copy was taken.
+6. The resume path announces itself, and `--fresh-skeleton` re-renders when asked.
 
 ### Unit 5 — release
 
@@ -254,7 +312,10 @@ resolved plugin cache tree → fill the handoff status block in place.
 | D2 | Tolerant `--prev-dir` (accepts a bundle path too) | Costs nothing, removes a class of caller error; the contract is still "workspace root" |
 | D3 | One spelling only | Two names for one concept is documentation debt that outlives its author |
 | D4 | Flat-first discovery, nested/legacy as an ordered fallback | A merged `ls -dt` could let a stray legacy sibling win on mtime; real pre-v1.2.0 nested workspaces exist on the caller's disk. Ships **only** with G1/G2/G3 |
-| D5 | stdout budget block, not in-mark budgets | The author controls 4 small slots; skeleton bulk is the real lever, and the mark format stays untouched |
+| D5 | stdout budget block, not in-mark budgets | Same information at the same moment without touching the slot-mark contract or the renderer test body |
+| D5a | **CORRECTED** — the block carries per-slot budgets, not just a skeleton count | Measured: skeleton 397/2100, 14 open slots, 1,736 authored words against 1,663 of room. Authored prose is the whole overage; the earlier "skeleton is the mass" argument was assumption, not evidence |
+| D9 (D-R) | Resume an existing report by default; `--fresh-skeleton` to force | A re-render discards ~1,700 authored words and rewrites a module JSON; an expensive recovery path does not get used, and the fallback behavior is hand-driving the tail |
+| D10 | Drift fails loudly naming `--fresh-skeleton`; `word_cap` and open slots are not drift | Discarding authored analysis is an operator decision, not an automatic one; `number_provenance` already guarantees a resumed report numerically |
 | D6 | Shared `word_budget.py` rather than a duplicated counter | `report_qc` → `render_report` import direction forbids the reverse; one counter cannot drift |
 | D7 | `--doc delta` added to Step 5 | Step 5 already promises a three-PDF docket; only `refresh-analysis` could produce one |
 | D8 | Acceptance on a scratch copy, internal disk; live workspace never written | A fresh docket on a stale bundle would read green to a freshness-blind gate; recovery value zero, hazard real |
@@ -266,3 +327,15 @@ resolved plugin cache tree → fill the handoff status block in place.
   run into a new dated workspace.
 - Any relaxation of the blocking gates, and any `--bundle`-style direct-path flag on the skill
   (`--output-dir` was chosen for one mental model across the three skills).
+- Chasing the caller's missing `brief_*.md` — root-caused to their side (driving `run_pipeline.py` /
+  `score_*.py` directly instead of the module skills) and gated there.
+
+## 6. Noted for the backlog, not this release
+
+- **`run_pipeline.py` is referenced by no SKILL**, yet it is discoverable, self-documents via
+  `--help`, and produces a bundle that passes the plugin's own QC while missing artifacts the report
+  layer expects (`brief_*.md`). That is a sharp edge for any orchestrator. Worth considering whether
+  it should refuse to run without a marker, or stamp the bundle with which rail produced it.
+- **An output-layer skill writing a module JSON** (`render_report` → `module_decision.json`) is
+  surprising. Idempotent today — verified byte-identical across a re-render — but that is the kind of
+  property that stops holding quietly.
