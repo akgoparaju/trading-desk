@@ -185,7 +185,11 @@ def budget(report_text):
         "capped": bool(per_page),
         "open_slots": slots,
         "budgeted": budgeted,
-        "oversubscribed": budgeted > room,
+        # False when there is nothing left to allocate: with 0 open slots,
+        # "budgets (0) exceed the room" is true but says nothing, and its
+        # "fix upstream" advice is wrong -- the fix is a trim, not a tighter
+        # slot. SKELETON NEAR CAP already carries the correct message then.
+        "oversubscribed": budgeted > room and bool(slots),
         "skeleton_near_cap": room < 0,
         "brief_slots_open": [s for s in slots if s.startswith("brief_")],
         "contributors": section_contributors(report_text, top_n=3),

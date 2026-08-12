@@ -197,6 +197,21 @@ def test_budget_flags_a_skeleton_that_is_already_near_cap():
     assert wb.budget(fat)["skeleton_near_cap"] is True
 
 
+def test_budget_is_not_oversubscribed_when_no_slots_remain():
+    """A fully-authored report over cap is a TRIM problem, not an
+    over-subscription one -- 'budgets (0) exceed the room' is noise, and its
+    'fix it upstream' advice is wrong once there is nothing left to allocate."""
+    over = REPORT.replace("Constructive but sub-hurdle.", "word " * 2200)
+    filled = over.replace("<!-- SLOT:", "<!-- FILLED:")
+    info = wb.budget(filled)
+    assert info["open_slots"] == []
+    assert info["room"] < 0
+    assert info["oversubscribed"] is False
+    assert info["skeleton_near_cap"] is True
+    assert "OVER-SUBSCRIBED" not in wb.format_budget_block(info)
+    assert "SKELETON NEAR CAP" in wb.format_budget_block(info)
+
+
 def test_format_budget_block_names_every_open_slot_and_its_budget():
     block = wb.format_budget_block(wb.budget(REPORT))
     assert "WORD BUDGET" in block
