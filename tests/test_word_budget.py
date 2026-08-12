@@ -282,3 +282,25 @@ def test_render_report_prints_the_budget_block_before_the_path(tmp_path, capsys,
     assert lines[-1] == str(out), "the report path must remain the LAST stdout line"
     # The block must describe the report that was WRITTEN -- not merely exist.
     assert "\n".join(lines[:-1]) == wb.format_budget_block(wb.budget(REPORT))
+
+
+# --------------------------------------------------------------------------- #
+# CLI -- the resume path in report-renderer QCs an existing report without
+# re-rendering it, so it needs a way to print the budget for a file on disk.
+# --------------------------------------------------------------------------- #
+
+def test_cli_prints_the_block_for_a_report_file(tmp_path, capsys):
+    path = tmp_path / "T_Trade_Report_2026-08-12.md"
+    path.write_text(REPORT)
+
+    rc = wb.main(["--report", str(path)])
+
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == wb.format_budget_block(wb.budget(REPORT))
+
+
+def test_cli_reports_a_missing_report_without_traceback(tmp_path, capsys):
+    rc = wb.main(["--report", str(tmp_path / "nope.md")])
+
+    assert rc == 2
+    assert "not found" in capsys.readouterr().err

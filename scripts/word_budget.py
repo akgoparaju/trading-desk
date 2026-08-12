@@ -16,7 +16,10 @@ WHY IT IS A SEPARATE MODULE: ``report_qc`` imports ``render_report``, so
 stdlib-only. No I/O.
 """
 
+import argparse
+import os
 import re
+import sys
 
 # The cap the gate enforces and the overshoot margin its trim instruction uses.
 # report_qc aliases these, so there is exactly one definition of each.
@@ -239,3 +242,43 @@ def format_budget_block(info):
             f"was not found, so ~{n * BRIEF_SLOT_BUDGET} words that normally "
             f"transclude must be authored here.")
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# CLI.
+# --------------------------------------------------------------------------- #
+
+def main(argv=None):
+    """Print the budget block for an already-rendered report file.
+
+    WHY: ``render_report.main`` prints this block as a side effect of rendering
+    the skeleton, but the report-renderer SKILL's RESUME path QCs a report that
+    is already fully authored, without re-rendering it -- so there is no render
+    step to print anything. This is that missing statement, computed straight
+    off the file on disk.
+
+    On a resumed, fully-authored report every open slot is filled, so
+    ``skeleton_words`` in the block is the report's FULL current word count, and
+    ``room`` (cap - margin - skeleton) is no longer "room to author" but the TRIM
+    OWED -- negative when the report is over cap. That negative number is exactly
+    what an author trimming a failed report acts on.
+    """
+    parser = argparse.ArgumentParser(
+        description="Print the word-budget block for an existing report file "
+                    "(the resume path has no render step to print it).")
+    parser.add_argument("--report", required=True, help="path to the report file")
+    args = parser.parse_args(argv)
+
+    if not os.path.isfile(args.report):
+        print(f"ERROR: report not found: {args.report}", file=sys.stderr)
+        return 2
+
+    with open(args.report) as fh:
+        text = fh.read()
+
+    print(format_budget_block(budget(text)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
