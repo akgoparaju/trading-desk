@@ -9,18 +9,19 @@ Turn a completed bundle into the final **3-page trade decision report**. **Every
 
 This is the **L4 output layer**. It consumes the entire bundle (snapshot + `module_{technical,risk,sentiment,fundamental,composite,tradeplan,options}.json`) and emits `<TICKER>_Trade_Report_<date>.md`. After the md QC gate passes it OPTIONALLY renders the **docket** — the exec/detail (and, when a prior bundle resolves, delta) PDFs — when the render venv is present; if it is not, the report ships md-only and the degradation is disclosed (Step 5).
 
-**Output location:** if the bundle directory's basename starts with `detail_reports` (the `trading_desk_<T>/detail_reports_<date>/` layout), the report is written to the bundle's **parent** directory (a sibling of the data folder); otherwise it is written **inside** the bundle (legacy layout). The exact path is always printed to stdout — use that path for QC. `--out` overrides.
+**Output location:** if the bundle directory's basename starts with `detail_reports` (the `trading_desk_<T>/detail_reports_<date>/` layout), the report is written to the bundle's **parent** directory (a sibling of the data folder); otherwise it is written **inside** the bundle (legacy layout). The exact path is always printed to stdout — use that path for QC. `--out` overrides. **Do not pass `--out`** — the resume check and the QC `--report` both assume the default location.
 
 **Workspace root (`--output-dir`) + prior workspace (`--prev-dir`).** This skill accepts an optional **`--output-dir <ABS_DIR>`** and, for a delta note, an optional **`--prev-dir <ABS_DIR>`** (e.g. `report-renderer PLTR --output-dir /abs/workspace --prev-dir /abs/prior`). Resolve them FIRST:
 
 - **`--output-dir <ABS_DIR>` given** → `WORKROOT = <ABS_DIR>` (MUST be absolute) and — **FLAT under `--output-dir` (v1.2.0)** — `TICKER_WS = <WORKROOT>`: the ticker workspace IS `<WORKROOT>`, so drop the `trading_desk_<TICKER>/` segment (the caller passes a per-ticker dir). All I/O is rooted here, decoupled from the process CWD.
 - **`--output-dir` absent** → `WORKROOT = .` and `TICKER_WS = ./trading_desk_<TICKER>` (the human/CWD layout — byte-for-byte unchanged).
 - **`--prev-dir <ABS_DIR>`** (delta only) → the PRIOR **workspace root**; `<PREV_BUNDLE>` = the newest `detail_reports_*` under it. **Tolerant:** if the given path's own basename starts with `detail_reports`, it IS `<PREV_BUNDLE>` — a caller who handed you a bundle instead of a root is right, not wrong. **`--prev-dir` is READ-ONLY**; never write into it.
-- **`--fresh-skeleton`** (no value) → re-render the skeleton even when a report already exists, **discarding its authored prose**. Never take this branch on your own initiative — see Step 2.
+- **`--prev-dir` absent** → resolve a prior ONLY from bundles sitting BESIDE `<BUNDLE>`: `ls -dt <TICKER_WS>/detail_reports_*`, then **discard `<BUNDLE>` itself** and take the next. **`<BUNDLE>` can never be `<PREV_BUNDLE>`** — unlike refresh-analysis, the bundle already exists when this skill runs, so "newest under the workspace" IS `<BUNDLE>`, and no script rejects `--previous <BUNDLE>`: it renders an all-zero Delta Note that reads as a real one. Nothing beside it ⇒ **no prior resolved**: `delta_interpretation` is `null`, no `--previous` anywhere, two-PDF docket, PASS.
+- **`--fresh-skeleton`** (no value) → re-render the skeleton even when a report already exists, **discarding its authored prose**. Never take this branch on your own initiative — see Step 2. **Set in prose too** — "fresh skeleton", "re-render from scratch", "discard the draft and re-render" all mean `--fresh-skeleton`. Nothing you infer from a QC failure ever sets it.
 
 **One name per layer, translated exactly once.** The SKILL boundary takes `--prev-dir <workspace root>`; the SCRIPT boundary takes `--previous <bundle dir>`. Resolve `--prev-dir` → `<PREV_BUNDLE>` here, once, then pass the **bundle** to every `render_report.py --previous`, `report_qc.py --previous`, and `render_pdf.py --previous` below.
 
-**Fan it out.** Give every `python3 scripts/…` path argument (`--bundle`, `--report`, `--previous`, `--pdf-slots`, `--out`) as an **absolute path** built from `<BUNDLE>` / `<TICKER_WS>`. The scripts then never fall back to the CWD: `render_report.py` writes the report to the bundle's parent per the output-location rule above, and config/scale discovery walks up from the absolute bundle path.
+**Fan it out.** Give every `python3 scripts/…` path argument (`--bundle`, `--report`, `--previous`, `--pdf-slots`) as an **absolute path** built from `<BUNDLE>` / `<TICKER_WS>`. The scripts then never fall back to the CWD: `render_report.py` writes the report to the bundle's parent per the output-location rule above, and config/scale discovery walks up from the absolute bundle path.
 
 **Why this architecture (kills number leakage BY CONSTRUCTION):** the renderer writes the whole skeleton — every table, header, and figure — from the bundle. LLM prose goes ONLY into `<!-- SLOT:... -->` marks. `report_qc.py` then extracts every numeric token from the finished document and checks it against the bundle's numeric values. A number you invent in a slot has no bundle source and **fails the gate**.
 
@@ -41,17 +42,20 @@ ls -dt <WORKROOT>/detail_reports_* 2>/dev/null | head -1
 ```bash
 ls -dt <WORKROOT>/trading_desk_<TICKER>/detail_reports_* <WORKROOT>/td_bundle_<TICKER>_* 2>/dev/null | head -1
 ```
+Merging the nested and legacy globs here is fine — unlike (a) vs (b), these two are both pre-v1.2.0 layouts with no authority relationship between them, so newest-wins is correct.
 
 **(c) `--output-dir` absent — the invoker's CWD (unchanged):**
 ```bash
 ls -dt ./trading_desk_<TICKER>/detail_reports_* ./td_bundle_<TICKER>_* 2>/dev/null | head -1
 ```
 
+The path the winning branch printed is `<BUNDLE>` for the rest of this document.
+
 Keep (a) and (b) as SEPARATE commands in that order — **never merge them into one `ls -dt`**. A merged glob sorts by mtime across layouts, so a stale legacy sibling can outrank the flat bundle the caller meant and you would silently render the wrong bundle. Flat is authoritative; (b) is last resort.
 
-**ANNOUNCE which branch resolved**, with the path: `bundle: <BUNDLE> (discovery: flat under --output-dir | legacy nested fallback under --output-dir | CWD)`. A fallback that fires silently is indistinguishable from one that never fired, and on a recovery path the operator needs to know which bundle was actually rendered.
+**ANNOUNCE which branch resolved**, with the path: `bundle: <BUNDLE> (discovery: flat under --output-dir | legacy nested fallback under --output-dir | CWD)` — pick ONE parenthetical, do not print the menu. A fallback that fires silently is indistinguishable from one that never fired, and on a recovery path the operator needs to know which bundle was actually rendered.
 
-**If nothing matched, do NOT assert absence.** Say `no bundle found at <WORKROOT> (searched detail_reports_*, then trading_desk_<TICKER>/detail_reports_* and td_bundle_<TICKER>_*)`. A denied `readdir` returns EMPTY rather than erroring, so `ls` cannot tell "nothing here" from "I cannot read this directory". When `<WORKROOT>` is outside the home volume, add: verify readability with a **real byte-read** (e.g. `head -c 1 <WORKROOT>/trading_desk_config.json`) — **`stat` succeeds against a dead volume** and proves nothing.
+**If nothing matched, do NOT assert absence.** Name only the globs THIS run actually searched. With `--output-dir`: `no bundle found at <WORKROOT> (searched detail_reports_*, then trading_desk_<TICKER>/detail_reports_* and td_bundle_<TICKER>_*)`. Without it (CWD mode): `no bundle found in CWD (searched trading_desk_<TICKER>/detail_reports_* and td_bundle_<TICKER>_*)`. A denied `readdir` returns EMPTY rather than erroring, so `ls` cannot tell "nothing here" from "I cannot read this directory". When `<WORKROOT>` is outside the home volume, add: verify readability with a **real byte-read** (e.g. `head -c 1 <WORKROOT>/trading_desk_config.json`) — **`stat` succeeds against a dead volume** and proves nothing — if that file is legitimately absent, byte-read any regular file under the root (`find <WORKROOT> -maxdepth 2 -type f | head -1`). Distinguish `No such file` (root readable, really empty) from `Input/output error` / `Permission denied` (root unreadable — absence unproven).
 
 **Completeness is a SEPARATE, LATER gate — never a reason to resume discovery.** Once a bundle resolves, that IS the bundle. A **full report requires all seven module files plus a snapshot**: `module_technical`, `module_risk`, `module_sentiment`, `module_fundamental`, `module_composite`, `module_tradeplan`, `module_options`. If any is missing, the renderer exits 2 naming it — report that and **STOP**. **Never fall back to a different bundle because this one is incomplete**; run the missing upstream skill first (composite-score runs the four evidence skills; trade-plan runs composite then options-strategy; then synthesize). Renormalized absences *inside* a module are fine; the **files** must exist.
 
@@ -59,9 +63,19 @@ Keep (a) and (b) as SEPARATE commands in that order — **never merge them into 
 
 ## Step 2 — Render the skeleton (SKIPPED when a report already exists)
 
-**Check for an existing report FIRST.** It lives at `<REPORT> = <TICKER_WS>/<TICKER>_Trade_Report_<date>.md` (the bundle's parent under the `detail_reports_<date>/` layout; inside the bundle for legacy).
+**Check for an existing report FIRST. Bind its date from the BUNDLE, never from today.** `<DATE>` = the `<date>` in the resolved `<BUNDLE>`'s `detail_reports_<date>` basename; for a legacy `td_bundle_*` bundle, `<DATE>` = the bundle's `snapshot.meta.as_of_utc[:10]`. `render_report.py` names the report from that same field, so **any other date is a miss against a file that exists**.
 
-- **`<REPORT>` exists → SKIP the render.** Announce it loudly: `resumed existing report at <REPORT>; skeleton not re-rendered.` Go straight to Step 3 (fill any open slots) and Step 4 (QC). **Touch NOTHING in the bundle on this path.** This is the recovery entry point — a bundle can be complete and QC-passing while the report is a trim away from shipping, and re-rendering would discard every authored word and rewrite `module_decision.json` for nothing.
+`<REPORT> = <REPORT_DIR>/<TICKER>_Trade_Report_<DATE>.md`, where `<REPORT_DIR>` = `<TICKER_WS>` when `<BUNDLE>`'s basename starts with `detail_reports`, else `<BUNDLE>` itself (the legacy layout puts the report inside the bundle).
+
+**Confirm by listing, not by constructing:** `ls -1 <REPORT_DIR>/<TICKER>_Trade_Report_*.md 2>/dev/null`. The one matching `<DATE>` is yours to resume. A report at any **other** date belongs to a different bundle — never resume it, never overwrite it.
+
+- **`<REPORT>` exists → SKIP the render.** Announce it loudly: `resumed existing report at <REPORT>; skeleton not re-rendered.` Go straight to Step 3 (fill any open slots) and Step 4 (QC). **Do not write into the bundle at this step** — in particular `module_decision.json` stays exactly as the original render left it. (Step 5 still writes `pdf_slots.json` and `charts/` normally; the prohibition is on re-rendering, not on the docket.) This is the recovery entry point — a bundle can be complete and QC-passing while the report is a trim away from shipping, and re-rendering would discard every authored word and rewrite `module_decision.json` for nothing.
+
+  Print the budget for the report you resumed:
+  ```bash
+  python3 ${CLAUDE_PLUGIN_ROOT}/scripts/word_budget.py --report <REPORT>
+  ```
+  On a resumed report the block's `skeleton` figure is the **full current** word count, so `room` is literally the trim you owe (negative = over cap). Read it before you touch a word.
 - **`<REPORT>` absent → render it:**
 
 ```bash
@@ -86,7 +100,7 @@ The report contains three pages, all tables and numbers already filled from the 
 
 Read the rendered report. Replace each `<!-- SLOT:name -->` with prose. **The slot-fill rule: no new numbers.** Every figure you mention must already be printed in a scripted table on that page — QC will catch any number that is not in the bundle. If a *table* is wrong, that is a module/bundle bug — fix the module and re-render; never edit a scripted number in the report.
 
-Word budgets (the whole report has a 2100-word cap, **prose and headings only** — pipe-table rows and the `### Data Integrity` section are excluded by `report_qc`, so the budget is entirely yours to spend on prose. **Target ≤1,000 words of authored prose across all slots; a small overage is acceptable — the gate's margin handles it.**): **Step 2 printed the real numbers for THIS bundle** — the per-slot budgets, the room actually left, and any warning that the budgets over-subscribe it. Write to those, not to the abstract targets below.
+Word budgets (the whole report has a 2100-word cap, **prose and headings only** — pipe-table rows and the `### Data Integrity` section are excluded by `report_qc`, so the budget is entirely yours to spend on prose. **Target ≤1,000 words of authored prose across all slots; a small overage is acceptable — the gate's margin handles it.**): **Step 2 printed the real numbers for THIS bundle** (on a resume, the `word_budget.py --report` block above) — the per-slot budgets, the room actually left, and any warning that the budgets over-subscribe it. Write to those, not to the abstract targets below.
 
 | Slot | Budget | Content |
 |------|--------|---------|
@@ -116,7 +130,7 @@ The gate prints a check table and exits 0 (pass) or 1 (fail). The checks: **numb
 - `word_cap` fail → a slot is too long. Tighten (the count is prose + headings only — no table row or the Data Integrity section is inflating it, so an overage is yours to fix).
 - `footer_completeness` fail → you (or a prior edit) dropped an `api_tier_notes` entry from the footer. **RESTORE** the deleted note(s) verbatim. **Never** condense or paraphrase the `### Data Integrity` section — it is mandated disclosure, and since it no longer counts against the word cap there is no reason to touch it.
 - A **table**-driven check fails (composite_arithmetic / ev_consistency / sizing / strikes / pop_method) → this is a bundle/module bug, not a prose bug. Fix the module and **re-render** (Step 2), then re-fill and re-run.
-- **On a RESUMED report, a numeric/structural failure means DRIFT.** If `number_provenance`, `composite_arithmetic`, `ev_consistency`, `sizing_within_cap`, `exit_ordering`, `strikes_in_chain`, `pop_method_labeled` or `expression_consistency` fails on a report you **resumed** rather than rendered, the report no longer matches the bundle. **STOP and report it, naming the remedy:** re-run with `--fresh-skeleton` to discard the prose and render a current skeleton. **Never auto-re-render** — that silently destroys authored analysis, and the choice belongs to the operator.
+- **On a RESUMED report, a numeric/structural failure means DRIFT.** If `number_provenance`, `composite_arithmetic`, `ev_consistency`, `invalidation_both_legs`, `sizing_within_cap`, `exit_ordering`, `strikes_in_chain`, `pop_method_labeled` or `expression_consistency` fails on a report you **resumed** rather than rendered, the report no longer matches the bundle. **STOP and report it, naming the remedy:** re-run with `--fresh-skeleton` to discard the prose and render a current skeleton. **Never auto-re-render** — that silently destroys authored analysis, and the choice belongs to the operator.
 - **`word_cap` and `no_empty_slots` are NOT drift.** An over-cap resumed report gets trimmed; one with open slots gets them filled. Neither is a reason to re-render.
 
 Re-run until exit 0. Then print the QC verdict and the report path to the user.
@@ -134,7 +148,11 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/report_qc.py \
 
 Three blocking checks: **schema_version_present** (every scorer + decision module carries a top-level `schema_version`), **decision_subset_of_bundle** (every non-derived numeric leaf in `module_decision.json` equals a bundle value — nothing fabricated), **decision_schema_valid** (validates against `docs/decision.schema.json`). Exit 0 to proceed. A failure is an upstream module/emitter bug — a missing `schema_version` stamp, or a decision leaf with no bundle source — **fix the module and re-render; never hand-edit `module_decision.json`**.
 
+**On a RESUMED report this is DRIFT, not an emitter bug.** A `decision_subset_of_bundle` or `schema_version_present` failure against a `module_decision.json` the original render wrote means the bundle moved underneath it. **STOP and name the remedy (`--fresh-skeleton`)** — never re-render to refresh the contract, for the same reason Step 4 forbids it.
+
 ---
+
+**When `<PREV_BUNDLE>` resolved, render and QC the md delta report (Delta mode, below) BEFORE Step 5** — `delta_interpretation` then cites figures the delta report actually prints. With no prior, skip that section entirely.
 
 ## Step 5 — Docket (PDF) rendering (AFTER the md QC gate passes)
 
@@ -198,7 +216,7 @@ The PDFs land in the **ticker parent** (same location rule as the md report): `<
 
 ## Delta mode
 
-When the user wants a change-report vs a prior bundle:
+When the user wants a change-report vs a prior bundle. **Unlike Step 2, there is no resume check here** — the delta report is always re-rendered, never resumed: it carries exactly one authored slot (`delta_interpretation`), so re-authoring it is cheap, and re-rendering guarantees the Δ figures match the current bundle instead of risking the same staleness Step 2 exists to prevent for the much larger full report.
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_report.py --bundle <BUNDLE> --delta --previous <PREV_BUNDLE>
@@ -231,5 +249,5 @@ If the **financial-analysis docx skill** is available, offer to convert the pass
 - **The docket is a render of the SAME bundle; md stays the source of truth.** The PDFs (exec/detail, + delta when a prior bundle resolves) carry only script-minted numbers + gated `pdf_slots.json` prose. If the render venv is not built, `render_env.py --check` exits 3 → announce md-only with the one-line bootstrap and skip the PDF steps; **the docket never blocks the md report.**
 - **The slots gate is blocking and cannot be bypassed.** `render_pdf` refuses exec/detail unless `report_qc.py --pdf-slots` stamped `qc_passed=true`. Fix slot PROSE, never numbers — the same discipline as the md gate.
 - **The METHODOLOGY appendix, footer stamps, and scale banners are fully scripted — nothing to author.** The methodology page keeps every detail transparent (rubric versions, weights, valuation formulas, active scale, conventions, governance) rendered purely from the module + scale JSONs; it is **out of `pdf_slots.json` scope** — do not try to write or edit it. Slot authoring is unchanged (the four prose blocks). Weight-set / scale footer stamps and the scale-review / pending-proposal banners likewise come from the module and refresh-plan JSONs, never from prose.
-- **Read-only over the bundle (except the authored artifacts).** This skill writes the report `.md` and — for the docket — `pdf_slots.json` + the `charts/` PNGs + the PDFs. It **never** edits the snapshot or any evidence module JSON. `module_decision.json` is written by `render_report.py` on a **fresh render only** (Step 2); on the **resume** path nothing in the bundle is touched at all. `<PREV_BUNDLE>` is read-only in every mode.
+- **Read-only over the bundle (except the authored artifacts).** This skill writes the report `.md` and — for the docket — `pdf_slots.json` + the `charts/` PNGs + the PDFs. It **never** edits the snapshot or any evidence module JSON. `module_decision.json` is written by `render_report.py` on a **fresh render only** (Step 2); the **resume** path never rewrites it, the snapshot, or any evidence module JSON. The docket's own authored artifacts (`<BUNDLE>/pdf_slots.json`, `<BUNDLE>/charts/`) are written on the resume path exactly as on a fresh one. `<PREV_BUNDLE>` is read-only in every mode.
 - **No implicit re-analysis.** A missing module file exits 2 naming it. Never invoke an upstream skill to fill the gap — that turns a cheap recovery into an unaudited partial re-run.
