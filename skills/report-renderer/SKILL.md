@@ -7,7 +7,7 @@ description: Render the final 3-page trade decision report (or a delta report) f
 
 Turn a completed bundle into the final **3-page trade decision report**. **Every number is script-written** by `scripts/render_report.py` from the module JSONs — you never type a level, a strike, an EV, a score, or a percent into the report. Your only job is to fill the prose slots the script leaves for you, then run the blocking QC gate until it is green.
 
-This is the **L4 output layer**. It consumes the entire bundle (snapshot + `module_{technical,risk,sentiment,fundamental,composite,tradeplan,options}.json`) and emits `<TICKER>_Trade_Report_<date>.md`. After the md QC gate passes it OPTIONALLY renders the **docket** — the exec/detail (and, on a refresh, delta) PDFs — when the render venv is present; if it is not, the report ships md-only and the degradation is disclosed (Step 5).
+This is the **L4 output layer**. It consumes the entire bundle (snapshot + `module_{technical,risk,sentiment,fundamental,composite,tradeplan,options}.json`) and emits `<TICKER>_Trade_Report_<date>.md`. After the md QC gate passes it OPTIONALLY renders the **docket** — the exec/detail (and, when a prior bundle resolves, delta) PDFs — when the render venv is present; if it is not, the report ships md-only and the degradation is disclosed (Step 5).
 
 **Output location:** if the bundle directory's basename starts with `detail_reports` (the `trading_desk_<T>/detail_reports_<date>/` layout), the report is written to the bundle's **parent** directory (a sibling of the data folder); otherwise it is written **inside** the bundle (legacy layout). The exact path is always printed to stdout — use that path for QC. `--out` overrides.
 
@@ -92,7 +92,7 @@ Word budgets (the whole report has a 2100-word cap, **prose and headings only** 
 |------|--------|---------|
 | `tension` | 1 sentence | the one real tension in the call (e.g. "constructive score, but the print is a coin-flip and IV is cheap") |
 | `event_playbook` | 3 bullets | beat / inline / miss → the pre-committed action for each, vs the printed implied move |
-| `brief_<dim>` (×5) | ≤150 words each (aim ~120) | **transcluded verbatim** by `render_report.py` from `<bundle>/brief_<dim>.md` (the `<!-- BRIEF:START -->`…`<!-- BRIEF:END -->` span) — you do NOT re-condense; the word cap is enforced upstream at module-brief authoring time. If the file or markers are absent the slot mark is left open; fill it manually as before. |
+| `brief_<dim>` (×5) | ≤150 words each (aim ~120) | **transcluded verbatim** by `render_report.py` from `<BUNDLE>/brief_<dim>.md` (the `<!-- BRIEF:START -->`…`<!-- BRIEF:END -->` span) — you do NOT re-condense; the word cap is enforced upstream at module-brief authoring time. If the file or markers are absent the slot mark is left open; fill it manually as before. |
 | `signal_<dim>` (×5) | 1 line each | **transcluded verbatim** by `render_report.py` from the `<!-- SIGNAL:START -->`…`<!-- SIGNAL:END -->` span in `brief_<dim>.md`. If absent, fill manually. |
 | `catalyst_notes` | 1-2 lines | context on the scheduled catalysts |
 | `monitoring_notes` | 1-2 lines | what would change the call between now and the next review |
@@ -153,7 +153,7 @@ Exit 0 prints `READY <venv-python>` — capture that interpreter path for steps 
 ```
 Writes the PNGs + `charts/charts_manifest.json`. A chart with a missing input is SKIPPED (recorded with a reason) — the renderer simply omits it; you fabricate nothing.
 
-**(c) Author `<bundle>/pdf_slots.json`** — the ONLY LLM content in the docket. Shape (per `render_pdf.py`):
+**(c) Author `<BUNDLE>/pdf_slots.json`** — the ONLY LLM content in the docket. Shape (per `render_pdf.py`):
 ```json
 {
   "thesis_bullets": ["Lead — rest", "Lead — rest", "Lead — rest"],
@@ -178,7 +178,7 @@ Exit 0 = pass (stamp written). On fail (orphan number), **fix the PROSE, never t
 
 Pass **`--previous <PREV_BUNDLE>`** whenever a prior bundle resolved — it admits the Δ values `delta_interpretation` cites into the allowed provenance set. Without it, legitimate delta numbers orphan.
 
-**(e) Render the PDFs** (venv python from step (a)). Add `--previous <prev_bundle>` to `exec` when a prior bundle exists → the exec page shows a **What-Changed** box:
+**(e) Render the PDFs** (venv python from step (a)). When a prior bundle resolved, render `delta` FIRST — it REQUIRES `--previous <PREV_BUNDLE>`; then `exec`, which also takes `--previous <PREV_BUNDLE>` to show the **What-Changed** box; then `detail`:
 ```bash
 # delta FIRST when a prior resolved -- it REQUIRES --previous
 <venv-python> ${CLAUDE_PLUGIN_ROOT}/scripts/render_pdf.py \
@@ -228,7 +228,7 @@ If the **financial-analysis docx skill** is available, offer to convert the pass
 - **Fix tables in the module, not the report.** If a scripted figure is wrong, the fix is upstream (re-run the module, re-render) — editing a number in the `.md` would pass a wrong figure past the gate on the next run and defeats the whole architecture.
 - **Waivers are disclosed, not silent.** A genuinely justified failure can be waived (`--waive "check:reason"`, same mechanics as the snapshot gate) — the report table then shows WAIVED with the reason. Use this only for a real, disclosed exception, never to hide a fabricated number.
 - **Word cap ~2100, prose and headings only.** The three pages together must stay under the cap, but `report_qc` counts prose and headings only — pipe-table rows and the `### Data Integrity` section are excluded, so the whole budget is the author's to spend on prose. **Target ≤1,000 words of authored prose across all slots; a small overage is acceptable — the gate's margin handles it.** The `brief_<dim>` word cap (≤150 words each, aim ~120) is enforced upstream at module-brief authoring time — each module SKILL instructs the LLM to stay within that budget when it writes `brief_<dim>.md`. The render-time LLM does not re-condense transcluded briefs; the lever is authoring discipline in the upstream module step.
-- **The docket is a render of the SAME bundle; md stays the source of truth.** The PDFs (exec/detail, + delta on a refresh) carry only script-minted numbers + gated `pdf_slots.json` prose. If the render venv is not built, `render_env.py --check` exits 3 → announce md-only with the one-line bootstrap and skip the PDF steps; **the docket never blocks the md report.**
+- **The docket is a render of the SAME bundle; md stays the source of truth.** The PDFs (exec/detail, + delta when a prior bundle resolves) carry only script-minted numbers + gated `pdf_slots.json` prose. If the render venv is not built, `render_env.py --check` exits 3 → announce md-only with the one-line bootstrap and skip the PDF steps; **the docket never blocks the md report.**
 - **The slots gate is blocking and cannot be bypassed.** `render_pdf` refuses exec/detail unless `report_qc.py --pdf-slots` stamped `qc_passed=true`. Fix slot PROSE, never numbers — the same discipline as the md gate.
 - **The METHODOLOGY appendix, footer stamps, and scale banners are fully scripted — nothing to author.** The methodology page keeps every detail transparent (rubric versions, weights, valuation formulas, active scale, conventions, governance) rendered purely from the module + scale JSONs; it is **out of `pdf_slots.json` scope** — do not try to write or edit it. Slot authoring is unchanged (the four prose blocks). Weight-set / scale footer stamps and the scale-review / pending-proposal banners likewise come from the module and refresh-plan JSONs, never from prose.
 - **Read-only over the bundle (except the authored artifacts).** This skill writes the report `.md` and — for the docket — `pdf_slots.json` + the `charts/` PNGs + the PDFs. It **never** edits the snapshot or any evidence module JSON. `module_decision.json` is written by `render_report.py` on a **fresh render only** (Step 2); on the **resume** path nothing in the bundle is touched at all. `<PREV_BUNDLE>` is read-only in every mode.
