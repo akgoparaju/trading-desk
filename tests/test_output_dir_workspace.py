@@ -279,13 +279,15 @@ def test_renderer_skill_documents_all_three_flags():
 
 
 def test_renderer_skill_discovery_is_flat_before_the_fallback():
-    """ORDERED, never merged -- a merged `ls -dt` sorts by mtime ACROSS layouts,
-    so a stale legacy sibling can outrank the flat bundle the caller meant. That
-    is a silent wrong-bundle render, the worst failure available on a path whose
+    """ORDERED, never merged -- (a)'s flat find must be checked, and win, before
+    (b)'s nested/legacy fallback runs. A caller who checked (b) first could
+    resolve a stale legacy sibling over the flat bundle the caller meant -- a
+    silent wrong-bundle render, the worst failure available on a path whose
     entire purpose is recovery."""
     text = _renderer_skill()
-    flat = text.index("<WORKROOT>/detail_reports_*")
-    nested = text.index("<WORKROOT>/trading_desk_<TICKER>/detail_reports_*")
+    flat = text.index("find <WORKROOT> -maxdepth 1 -type d -name 'detail_reports_*'")
+    nested = text.index(
+        "find <WORKROOT>/trading_desk_<TICKER> -maxdepth 1 -type d -name 'detail_reports_*'")
     assert flat < nested
 
 
@@ -380,21 +382,42 @@ def test_full_trade_analysis_hands_the_workspace_root_to_report_renderer():
 
 
 def test_renderer_skill_flat_discovery_ranks_by_date_not_mtime():
-    """The spec says "newest by DATE if several", and that is not `ls -dt`.
+    """The spec says "newest by DATE if several", and that is not mtime order.
 
     mtime and the date in the name diverge the moment a workspace is copied,
     restored from a backup, or rsync'd without -t -- and a recovered workspace
     is exactly what this entry point serves. Caught while staging the acceptance
     fixture: a plain `cp -RL` collapsed two real bundles to one timestamp, and
-    `ls -dt` then ranked the OLDER-dated bundle first. Ranking by mtime would
-    silently resolve the wrong bundle precisely on the recovery path.
+    an mtime-ordered listing then ranked the OLDER-dated bundle first. Ranking
+    by mtime would silently resolve the wrong bundle precisely on the recovery
+    path.
 
-    Only branch (a) is name-sorted: branch (b) mixes `detail_reports_<date>`
-    with `td_bundle_<TICKER>_<date>`, which no single lexicographic sort orders
-    meaningfully, and branch (c) is the untouched human/CWD path.
+    Every branch is now name-sorted with its own `find ... | sort -r`: branch
+    (b) runs the nested and legacy shapes as two SEPARATE find+sort commands
+    (nested first, legacy only as a fallback) rather than mixing them in one
+    mtime-ordered listing, and branch (c) gets the same two-command treatment
+    for the human/CWD path.
     """
     text = _renderer_skill()
-    flat = text.index("<WORKROOT>/detail_reports_* 2>/dev/null")
-    assert text[flat - 6:flat] == "ls -d ", text[flat - 20:flat + 40]
-    assert "sort -r | head -1" in text[flat:flat + 80]
+    flat = text.index("find <WORKROOT> -maxdepth 1 -type d -name 'detail_reports_*'")
+    assert "sort -r | head -1" in text[flat:flat + 100]
     assert "not by mtime" in text
+
+
+def test_renderer_skill_discovery_is_shell_portable():
+    """Discovery must not depend on bash glob semantics.
+
+    Under zsh -- the default macOS shell -- an unmatched glob is a NOMATCH
+    error that aborts the WHOLE command before `ls` runs, so pairing two globs
+    on one line makes an existing bundle invisible whenever the other glob has
+    no match (the normal case: no legacy td_bundle_*). `2>/dev/null` hides the
+    message, not the abort. `find` with a quoted -name pattern does its own
+    matching, so it behaves identically in both shells.
+
+    This was live in shipped 1.5.1 and defeated discovery in the human path.
+    """
+    text = _renderer_skill()
+    discovery = text[text.index("Discovery is ORDERED"):text.index("Completeness is a SEPARATE")]
+    assert "ls -d" not in discovery, "discovery must use find, not shell globs"
+    assert discovery.count("find ") >= 5
+    assert "-name 'detail_reports_*'" in discovery

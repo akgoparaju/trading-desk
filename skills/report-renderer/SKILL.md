@@ -16,7 +16,7 @@ This is the **L4 output layer**. It consumes the entire bundle (snapshot + `modu
 - **`--output-dir <ABS_DIR>` given** → `WORKROOT = <ABS_DIR>` (MUST be absolute) and — **FLAT under `--output-dir` (v1.2.0)** — `TICKER_WS = <WORKROOT>`: the ticker workspace IS `<WORKROOT>`, so drop the `trading_desk_<TICKER>/` segment (the caller passes a per-ticker dir). All I/O is rooted here, decoupled from the process CWD.
 - **`--output-dir` absent** → `WORKROOT = .` and `TICKER_WS = ./trading_desk_<TICKER>` (the human/CWD layout — byte-for-byte unchanged).
 - **`--prev-dir <ABS_DIR>`** (delta only) → the PRIOR **workspace root**; `<PREV_BUNDLE>` = the newest `detail_reports_*` under it. **Tolerant:** if the given path's own basename starts with `detail_reports`, it IS `<PREV_BUNDLE>` — a caller who handed you a bundle instead of a root is right, not wrong. **`--prev-dir` is READ-ONLY**; never write into it.
-- **`--prev-dir` absent** → resolve a prior ONLY from bundles sitting BESIDE `<BUNDLE>`: `ls -dt <TICKER_WS>/detail_reports_* <TICKER_WS>/td_bundle_<TICKER>_* 2>/dev/null`, then **discard `<BUNDLE>` itself** and take the next. **`<BUNDLE>` can never be `<PREV_BUNDLE>`** — unlike refresh-analysis, the bundle already exists when this skill runs, so "newest under the workspace" IS `<BUNDLE>`, and no script rejects `--previous <BUNDLE>`: it renders an all-zero Delta Note that reads as a real one. Nothing beside it ⇒ **no prior resolved**: `delta_interpretation` is `null`, no `--previous` anywhere, two-PDF docket, PASS.
+- **`--prev-dir` absent** → resolve a prior ONLY from bundles sitting BESIDE `<BUNDLE>`: `find <TICKER_WS> -maxdepth 1 -type d -name 'detail_reports_*' 2>/dev/null | sort -r`, falling back to `find <TICKER_WS> -maxdepth 1 -type d -name 'td_bundle_<TICKER>_*' 2>/dev/null | sort -r` only when that is empty, then **discard `<BUNDLE>` itself** and take the next. **`<BUNDLE>` can never be `<PREV_BUNDLE>`** — unlike refresh-analysis, the bundle already exists when this skill runs, so "newest under the workspace" IS `<BUNDLE>`, and no script rejects `--previous <BUNDLE>`: it renders an all-zero Delta Note that reads as a real one. Nothing beside it ⇒ **no prior resolved**: `delta_interpretation` is `null`, no `--previous` anywhere, two-PDF docket, PASS.
 - **`--fresh-skeleton`** (no value) → re-render the skeleton even when a report already exists, **discarding its authored prose**. Never take this branch on your own initiative — see Step 2. **Set in prose too** — "fresh skeleton", "re-render from scratch", "discard the draft and re-render" all mean `--fresh-skeleton`. Nothing you infer from a QC failure ever sets it.
 
 **One name per layer, translated exactly once.** The SKILL boundary takes `--prev-dir <workspace root>`; the SCRIPT boundary takes `--previous <bundle dir>`. Resolve `--prev-dir` → `<PREV_BUNDLE>` here, once, then pass the **bundle** to every `render_report.py --previous`, `report_qc.py --previous`, and `render_pdf.py --previous` below.
@@ -35,25 +35,34 @@ Trigger phrases: "render report for MU", "trade decision report AAPL", "delta re
 
 **(a) `--output-dir` given — flat (v1.2.0), the programmatic caller's layout:**
 ```bash
-ls -d <WORKROOT>/detail_reports_* 2>/dev/null | sort -r | head -1
+find <WORKROOT> -maxdepth 1 -type d -name 'detail_reports_*' 2>/dev/null | sort -r | head -1
 ```
 
-Newest **by the date in the name**, not by mtime. `detail_reports_<date>` carries an ISO date and two bundles cannot share one in this layout, so a reverse lexicographic sort is exact and cannot tie. Deliberately NOT `ls -dt`: mtime and date diverge the moment a workspace is copied, restored from a backup, or rsync'd without `-t` — and a recovered workspace is exactly what this entry point serves, so ranking by mtime would silently resolve the wrong bundle precisely when it matters most. (Branch (b) keeps `ls -dt` because it mixes two name shapes, `detail_reports_<date>` and `td_bundle_<TICKER>_<date>`, which no single lexicographic sort orders meaningfully.)
+Newest **by the date in the name**, not by mtime. `detail_reports_<date>` carries an ISO date and two bundles cannot share one in this layout, so a reverse lexicographic sort is exact and cannot tie. Deliberately not ranked by mtime: mtime and date diverge the moment a workspace is copied, restored from a backup, or rsync'd without `-t` — and a recovered workspace is exactly what this entry point serves, so ranking by mtime would silently resolve the wrong bundle precisely when it matters most. (Branch (b) now runs the nested and legacy shapes as two SEPARATE `find` commands rather than one merged listing — each ranked newest-by-date within its own shape, the same `sort -r` logic as (a). No cross-shape lexicographic ordering is needed: nested is tried first and wins outright whenever it has a match, because it is the newer convention, and legacy is consulted only when nested is empty.)
 
 **(b) ONLY if (a) matched nothing — a pre-v1.2.0 nested workspace, or a legacy bundle, sitting under the given root:**
 ```bash
-ls -dt <WORKROOT>/trading_desk_<TICKER>/detail_reports_* <WORKROOT>/td_bundle_<TICKER>_* 2>/dev/null | head -1
+find <WORKROOT>/trading_desk_<TICKER> -maxdepth 1 -type d -name 'detail_reports_*' 2>/dev/null | sort -r | head -1
 ```
-Merging the nested and legacy globs here is fine — unlike (a) vs (b), these two are both pre-v1.2.0 layouts with no authority relationship between them, so newest-wins is correct.
-
-**(c) `--output-dir` absent — the invoker's CWD (unchanged):**
+If that prints nothing, fall back to the legacy shape:
 ```bash
-ls -dt ./trading_desk_<TICKER>/detail_reports_* ./td_bundle_<TICKER>_* 2>/dev/null | head -1
+find <WORKROOT> -maxdepth 1 -type d -name 'td_bundle_<TICKER>_*' 2>/dev/null | sort -r | head -1
 ```
+Two separate commands, nested tried first: the nested layout takes precedence over the legacy one because it is the newer convention — not because of any cross-shape sort — so there is nothing to merge.
+
+**(c) `--output-dir` absent — the invoker's CWD:**
+```bash
+find ./trading_desk_<TICKER> -maxdepth 1 -type d -name 'detail_reports_*' 2>/dev/null | sort -r | head -1
+```
+If that prints nothing, fall back to the legacy shape:
+```bash
+find . -maxdepth 1 -type d -name 'td_bundle_<TICKER>_*' 2>/dev/null | sort -r | head -1
+```
+Same two-command, nested-first treatment as (b), relative to `.` instead of `<WORKROOT>`.
 
 The path the winning branch printed is `<BUNDLE>` for the rest of this document.
 
-Keep (a) and (b) as SEPARATE commands in that order — **never merge them into one `ls -dt`**. A merged glob sorts by mtime across layouts, so a stale legacy sibling can outrank the flat bundle the caller meant and you would silently render the wrong bundle. Flat is authoritative; (b) is last resort.
+Keep (a) and (b) as SEPARATE commands in that order — **never merge them into one command**. A merged listing would have to rank two different name shapes with no single sort that orders them correctly, and a stale legacy sibling could outrank the flat bundle the caller meant — you would silently render the wrong bundle. Flat is authoritative; (b) is last resort.
 
 **ANNOUNCE which branch resolved**, with the path: `bundle: <BUNDLE> (discovery: flat under --output-dir | legacy nested fallback under --output-dir | CWD)` — pick ONE parenthetical, do not print the menu. A fallback that fires silently is indistinguishable from one that never fired, and on a recovery path the operator needs to know which bundle was actually rendered.
 
@@ -69,7 +78,7 @@ Keep (a) and (b) as SEPARATE commands in that order — **never merge them into 
 
 `<REPORT> = <REPORT_DIR>/<TICKER>_Trade_Report_<DATE>.md`, where `<REPORT_DIR>` = `<TICKER_WS>` when `<BUNDLE>`'s basename starts with `detail_reports`, else `<BUNDLE>` itself (the legacy layout puts the report inside the bundle).
 
-**Confirm by listing, not by constructing:** `ls -1 <REPORT_DIR>/<TICKER>_Trade_Report_*.md 2>/dev/null`. The one matching `<DATE>` is yours to resume. A report at any **other** date belongs to a different bundle — never resume it, never overwrite it.
+**Confirm by listing, not by constructing:** `find <REPORT_DIR> -maxdepth 1 -type f -name '<TICKER>_Trade_Report_*.md' 2>/dev/null`. The one matching `<DATE>` is yours to resume. A report at any **other** date belongs to a different bundle — never resume it, never overwrite it.
 
 - **`<REPORT>` exists → SKIP the render.** Announce it loudly: `resumed existing report at <REPORT>; skeleton not re-rendered.` Go straight to Step 3 (fill any open slots) and Step 4 (QC). **Do not write into the bundle at this step** — in particular `module_decision.json` stays exactly as the original render left it. (Step 5 still writes `pdf_slots.json` and `charts/` normally; the prohibition is on re-rendering, not on the docket.) This is the recovery entry point — a bundle can be complete and QC-passing while the report is a trim away from shipping, and re-rendering would discard every authored word and rewrite `module_decision.json` for nothing.
 
