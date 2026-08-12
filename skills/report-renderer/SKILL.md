@@ -56,13 +56,24 @@ Keep (a) and (b) as SEPARATE commands in that order — **never merge them into 
 
 ---
 
-## Step 2 — Render the skeleton
+## Step 2 — Render the skeleton (SKIPPED when a report already exists)
+
+**Check for an existing report FIRST.** It lives at `<REPORT> = <TICKER_WS>/<TICKER>_Trade_Report_<date>.md` (the bundle's parent under the `detail_reports_<date>/` layout; inside the bundle for legacy).
+
+- **`<REPORT>` exists → SKIP the render.** Announce it loudly: `resumed existing report at <REPORT>; skeleton not re-rendered.` Go straight to Step 3 (fill any open slots) and Step 4 (QC). **Touch NOTHING in the bundle on this path.** This is the recovery entry point — a bundle can be complete and QC-passing while the report is a trim away from shipping, and re-rendering would discard every authored word and rewrite `module_decision.json` for nothing.
+- **`<REPORT>` absent → render it:**
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_report.py --bundle ./trading_desk_<TICKER>/detail_reports_<YYYY-MM-DD>
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_report.py --bundle <BUNDLE>
 ```
 
-The script writes `<TICKER>_Trade_Report_<date>.md` (exact path — bundle or parent per the output-location rule above — printed to stdout). It contains three pages, all tables and numbers already filled from the bundle, with empty `<!-- SLOT:name -->` marks for your prose:
+- **`--fresh-skeleton` given → render even though `<REPORT>` exists**, discarding the authored prose. State plainly that you are doing so and what is being discarded. **Never choose this branch on your own initiative**: throwing away authored analysis is an operator's call.
+
+A fresh render also (re)writes `<BUNDLE>/module_decision.json` — that is Step 2's job and is expected here. It must not happen on the resume path, which is exactly why the resume path does not render.
+
+The script writes `<TICKER>_Trade_Report_<date>.md` (exact path — bundle or parent per the output-location rule above — printed to stdout as the LAST line) and, before it, a **WORD BUDGET** block: the skeleton's own word count, the room left under the cap, and a per-slot budget for every open slot. **Read it before you author** — it is the only place the budget appears before the prose is written. `!! OVER-SUBSCRIBED` means writing to budget still fails the cap and the fix is upstream, not a tighter slot. `NOTE n brief slot(s) OPEN` means the `brief_<dim>.md` transclusion did not happen, so ~150 words per open brief that normally arrive for free must be authored here.
+
+The report contains three pages, all tables and numbers already filled from the bundle, with empty `<!-- SLOT:name -->` marks for your prose:
 
 - **Page 1 — Decision:** header block, the call (`grade — action`, composite score), composite table (+ sensitivity), trade-plan table (entries/exits/invalidation/size/hedge/expression), event-playbook skeleton.
 - **Page 2 — Evidence:** per dimension a scripted score headline + a mini-table (ladder / subscores / positioning / downside map / EV scenarios).
@@ -74,7 +85,7 @@ The script writes `<TICKER>_Trade_Report_<date>.md` (exact path — bundle or pa
 
 Read the rendered report. Replace each `<!-- SLOT:name -->` with prose. **The slot-fill rule: no new numbers.** Every figure you mention must already be printed in a scripted table on that page — QC will catch any number that is not in the bundle. If a *table* is wrong, that is a module/bundle bug — fix the module and re-render; never edit a scripted number in the report.
 
-Word budgets (the whole report has a 2100-word cap, **prose and headings only** — pipe-table rows and the `### Data Integrity` section are excluded by `report_qc`, so the budget is entirely yours to spend on prose. **Target ≤1,000 words of authored prose across all slots; a small overage is acceptable — the gate's margin handles it.**):
+Word budgets (the whole report has a 2100-word cap, **prose and headings only** — pipe-table rows and the `### Data Integrity` section are excluded by `report_qc`, so the budget is entirely yours to spend on prose. **Target ≤1,000 words of authored prose across all slots; a small overage is acceptable — the gate's margin handles it.**): **Step 2 printed the real numbers for THIS bundle** — the per-slot budgets, the room actually left, and any warning that the budgets over-subscribe it. Write to those, not to the abstract targets below.
 
 | Slot | Budget | Content |
 |------|--------|---------|
@@ -104,6 +115,8 @@ The gate prints a check table and exits 0 (pass) or 1 (fail). The checks: **numb
 - `word_cap` fail → a slot is too long. Tighten (the count is prose + headings only — no table row or the Data Integrity section is inflating it, so an overage is yours to fix).
 - `footer_completeness` fail → you (or a prior edit) dropped an `api_tier_notes` entry from the footer. **RESTORE** the deleted note(s) verbatim. **Never** condense or paraphrase the `### Data Integrity` section — it is mandated disclosure, and since it no longer counts against the word cap there is no reason to touch it.
 - A **table**-driven check fails (composite_arithmetic / ev_consistency / sizing / strikes / pop_method) → this is a bundle/module bug, not a prose bug. Fix the module and **re-render** (Step 2), then re-fill and re-run.
+- **On a RESUMED report, a numeric/structural failure means DRIFT.** If `number_provenance`, `composite_arithmetic`, `ev_consistency`, `sizing_within_cap`, `exit_ordering`, `strikes_in_chain`, `pop_method_labeled` or `expression_consistency` fails on a report you **resumed** rather than rendered, the report no longer matches the bundle. **STOP and report it, naming the remedy:** re-run with `--fresh-skeleton` to discard the prose and render a current skeleton. **Never auto-re-render** — that silently destroys authored analysis, and the choice belongs to the operator.
+- **`word_cap` and `no_empty_slots` are NOT drift.** An over-cap resumed report gets trimmed; one with open slots gets them filled. Neither is a reason to re-render.
 
 Re-run until exit 0. Then print the QC verdict and the report path to the user.
 
