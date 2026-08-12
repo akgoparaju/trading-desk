@@ -11,23 +11,48 @@ This is the **L4 output layer**. It consumes the entire bundle (snapshot + `modu
 
 **Output location:** if the bundle directory's basename starts with `detail_reports` (the `trading_desk_<T>/detail_reports_<date>/` layout), the report is written to the bundle's **parent** directory (a sibling of the data folder); otherwise it is written **inside** the bundle (legacy layout). The exact path is always printed to stdout — use that path for QC. `--out` overrides.
 
+**Workspace root (`--output-dir`) + prior workspace (`--prev-dir`).** This skill accepts an optional **`--output-dir <ABS_DIR>`** and, for a delta note, an optional **`--prev-dir <ABS_DIR>`** (e.g. `report-renderer PLTR --output-dir /abs/workspace --prev-dir /abs/prior`). Resolve them FIRST:
+
+- **`--output-dir <ABS_DIR>` given** → `WORKROOT = <ABS_DIR>` (MUST be absolute) and — **FLAT under `--output-dir` (v1.2.0)** — `TICKER_WS = <WORKROOT>`: the ticker workspace IS `<WORKROOT>`, so drop the `trading_desk_<TICKER>/` segment (the caller passes a per-ticker dir). All I/O is rooted here, decoupled from the process CWD.
+- **`--output-dir` absent** → `WORKROOT = .` and `TICKER_WS = ./trading_desk_<TICKER>` (the human/CWD layout — byte-for-byte unchanged).
+- **`--prev-dir <ABS_DIR>`** (delta only) → the PRIOR **workspace root**; `<PREV_BUNDLE>` = the newest `detail_reports_*` under it. **Tolerant:** if the given path's own basename starts with `detail_reports`, it IS `<PREV_BUNDLE>` — a caller who handed you a bundle instead of a root is right, not wrong. **`--prev-dir` is READ-ONLY**; never write into it.
+
+**One name per layer, translated exactly once.** The SKILL boundary takes `--prev-dir <workspace root>`; the SCRIPT boundary takes `--previous <bundle dir>`. Resolve `--prev-dir` → `<PREV_BUNDLE>` here, once, then pass the **bundle** to every `render_report.py --previous`, `report_qc.py --previous`, and `render_pdf.py --previous` below.
+
+**Fan it out.** Give every `python3 scripts/…` path argument (`--bundle`, `--report`, `--previous`, `--pdf-slots`, `--out`) as an **absolute path** built from `<BUNDLE>` / `<TICKER_WS>`. The scripts then never fall back to the CWD: `render_report.py` writes the report to the bundle's parent per the output-location rule above, and config/scale discovery walks up from the absolute bundle path.
+
 **Why this architecture (kills number leakage BY CONSTRUCTION):** the renderer writes the whole skeleton — every table, header, and figure — from the bundle. LLM prose goes ONLY into `<!-- SLOT:... -->` marks. `report_qc.py` then extracts every numeric token from the finished document and checks it against the bundle's numeric values. A number you invent in a slot has no bundle source and **fails the gate**.
 
 Trigger phrases: "render report for MU", "trade decision report AAPL", "delta report vs last week".
 
 ---
 
-## Step 1 — Verify bundle completeness
+## Step 1 — Locate the bundle, then verify completeness
 
-In the invoker's CWD, find the newest bundle for the ticker:
+**Discovery is ORDERED, and its result is TERMINAL.** Take the first branch that matches, then stop looking:
 
+**(a) `--output-dir` given — flat (v1.2.0), the programmatic caller's layout:**
+```bash
+ls -dt <WORKROOT>/detail_reports_* 2>/dev/null | head -1
+```
+
+**(b) ONLY if (a) matched nothing — a pre-v1.2.0 nested workspace, or a legacy bundle, sitting under the given root:**
+```bash
+ls -dt <WORKROOT>/trading_desk_<TICKER>/detail_reports_* <WORKROOT>/td_bundle_<TICKER>_* 2>/dev/null | head -1
+```
+
+**(c) `--output-dir` absent — the invoker's CWD (unchanged):**
 ```bash
 ls -dt ./trading_desk_<TICKER>/detail_reports_* ./td_bundle_<TICKER>_* 2>/dev/null | head -1
 ```
 
-Newest first across both layouts: the new `./trading_desk_<TICKER>/detail_reports_<date>/` bundles and the legacy `./td_bundle_<TICKER>_<date>/` bundles (fallback for old runs).
+Keep (a) and (b) as SEPARATE commands in that order — **never merge them into one `ls -dt`**. A merged glob sorts by mtime across layouts, so a stale legacy sibling can outrank the flat bundle the caller meant and you would silently render the wrong bundle. Flat is authoritative; (b) is last resort.
 
-A **full report requires all seven module files plus a snapshot**: `module_technical`, `module_risk`, `module_sentiment`, `module_fundamental`, `module_composite`, `module_tradeplan`, `module_options`. If any is missing, the renderer exits 2 naming it — run the missing upstream skill first (composite-score runs the four evidence skills; trade-plan runs composite then options-strategy; then synthesize). Renormalized absences *inside* a module are fine; the **files** must exist.
+**ANNOUNCE which branch resolved**, with the path: `bundle: <BUNDLE> (discovery: flat under --output-dir | legacy nested fallback under --output-dir | CWD)`. A fallback that fires silently is indistinguishable from one that never fired, and on a recovery path the operator needs to know which bundle was actually rendered.
+
+**If nothing matched, do NOT assert absence.** Say `no bundle found at <WORKROOT> (searched detail_reports_*, then trading_desk_<TICKER>/detail_reports_* and td_bundle_<TICKER>_*)`. A denied `readdir` returns EMPTY rather than erroring, so `ls` cannot tell "nothing here" from "I cannot read this directory". When `<WORKROOT>` is outside the home volume, add: verify readability with a **real byte-read** (e.g. `head -c 1 <WORKROOT>/trading_desk_config.json`) — **`stat` succeeds against a dead volume** and proves nothing.
+
+**Completeness is a SEPARATE, LATER gate — never a reason to resume discovery.** Once a bundle resolves, that IS the bundle. A **full report requires all seven module files plus a snapshot**: `module_technical`, `module_risk`, `module_sentiment`, `module_fundamental`, `module_composite`, `module_tradeplan`, `module_options`. If any is missing, the renderer exits 2 naming it — report that and **STOP**. **Never fall back to a different bundle because this one is incomplete**; run the missing upstream skill first (composite-score runs the four evidence skills; trade-plan runs composite then options-strategy; then synthesize). Renormalized absences *inside* a module are fine; the **files** must exist.
 
 ---
 
