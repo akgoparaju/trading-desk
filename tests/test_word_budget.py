@@ -243,3 +243,33 @@ def test_budget_reports_not_capped_when_there_are_no_page_sections():
 def test_format_budget_block_says_the_cap_does_not_apply_for_a_delta():
     block = wb.format_budget_block(wb.budget(DELTA))
     assert "does not apply" in block
+
+
+# --------------------------------------------------------------------------- #
+# render_report prints the block -- BEFORE the path, so the path stays the last
+# line of stdout for anything that reads it that way (the SKILL does).
+# --------------------------------------------------------------------------- #
+
+def test_render_report_prints_the_budget_block_before_the_path(tmp_path, capsys,
+                                                               monkeypatch):
+    from scripts import render_report
+
+    bundle = tmp_path / "detail_reports_2026-08-12"
+    bundle.mkdir()
+    out = tmp_path / "T_Trade_Report_2026-08-12.md"
+
+    monkeypatch.setattr(render_report, "_require_full_modules", lambda b: None)
+    monkeypatch.setattr(render_report, "load_bundle",
+                        lambda b: {"snapshot": {"meta": {"ticker": "T",
+                                                         "as_of_utc": "2026-08-12"}}})
+    monkeypatch.setattr(render_report, "build_full_report",
+                        lambda docs, bundle=None: REPORT)
+    monkeypatch.setattr(render_report.decision_contract, "build_contract",
+                        lambda docs: {"ok": True})
+
+    rc = render_report.main(["--bundle", str(bundle), "--out", str(out)])
+
+    assert rc == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert "WORD BUDGET" in "\n".join(lines)
+    assert lines[-1] == str(out), "the report path must remain the LAST stdout line"
