@@ -35,8 +35,10 @@ Trigger phrases: "render report for MU", "trade decision report AAPL", "delta re
 
 **(a) `--output-dir` given — flat (v1.2.0), the programmatic caller's layout:**
 ```bash
-ls -dt <WORKROOT>/detail_reports_* 2>/dev/null | head -1
+ls -d <WORKROOT>/detail_reports_* 2>/dev/null | sort -r | head -1
 ```
+
+Newest **by the date in the name**, not by mtime. `detail_reports_<date>` carries an ISO date and two bundles cannot share one in this layout, so a reverse lexicographic sort is exact and cannot tie. Deliberately NOT `ls -dt`: mtime and date diverge the moment a workspace is copied, restored from a backup, or rsync'd without `-t` — and a recovered workspace is exactly what this entry point serves, so ranking by mtime would silently resolve the wrong bundle precisely when it matters most. (Branch (b) keeps `ls -dt` because it mixes two name shapes, `detail_reports_<date>` and `td_bundle_<TICKER>_<date>`, which no single lexicographic sort orders meaningfully.)
 
 **(b) ONLY if (a) matched nothing — a pre-v1.2.0 nested workspace, or a legacy bundle, sitting under the given root:**
 ```bash

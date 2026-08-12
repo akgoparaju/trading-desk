@@ -377,3 +377,24 @@ def test_full_trade_analysis_hands_the_workspace_root_to_report_renderer():
         text = fh.read()
     invoke = text.index("Invoke the **report-renderer** skill")
     assert "--output-dir <WORKROOT>" in text[invoke:invoke + 300]
+
+
+def test_renderer_skill_flat_discovery_ranks_by_date_not_mtime():
+    """The spec says "newest by DATE if several", and that is not `ls -dt`.
+
+    mtime and the date in the name diverge the moment a workspace is copied,
+    restored from a backup, or rsync'd without -t -- and a recovered workspace
+    is exactly what this entry point serves. Caught while staging the acceptance
+    fixture: a plain `cp -RL` collapsed two real bundles to one timestamp, and
+    `ls -dt` then ranked the OLDER-dated bundle first. Ranking by mtime would
+    silently resolve the wrong bundle precisely on the recovery path.
+
+    Only branch (a) is name-sorted: branch (b) mixes `detail_reports_<date>`
+    with `td_bundle_<TICKER>_<date>`, which no single lexicographic sort orders
+    meaningfully, and branch (c) is the untouched human/CWD path.
+    """
+    text = _renderer_skill()
+    flat = text.index("<WORKROOT>/detail_reports_* 2>/dev/null")
+    assert text[flat - 6:flat] == "ls -d ", text[flat - 20:flat + 40]
+    assert "sort -r | head -1" in text[flat:flat + 80]
+    assert "not by mtime" in text
