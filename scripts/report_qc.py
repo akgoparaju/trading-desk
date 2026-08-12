@@ -71,13 +71,17 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from scripts import render_report, chain as chain_mod, decision_contract, ev_kelly
+from scripts import word_budget
 from scripts._artifact import emit_json
 
-_WORD_CAP = 2100
+# The cap and the trim margin now live in word_budget, so render_report can print
+# the SAME budget before the prose is authored that this gate enforces after.
+# Aliased rather than re-declared: one definition, no drift.
+_WORD_CAP = word_budget.WORD_CAP
 # Overshoot the trim by this much rather than converging onto the cap exactly. The
 # measured tail on a real run was 2103 -> 2101 -> 2100, three QC cycles to recover
 # three words. This changes only the TRIM INSTRUCTION, never the cap that is enforced.
-_WORD_TRIM_MARGIN = 40
+_WORD_TRIM_MARGIN = word_budget.WORD_TRIM_MARGIN
 _ORPHAN_CAP = 20
 
 # A numeric token: optional leading $, digits with optional thousands separators
@@ -500,73 +504,14 @@ def is_allowed_formatted(token, allowed, match_precision):
 
 
 # --------------------------------------------------------------------------- #
-# Report section splitting.
+# Report section splitting -- MOVED to scripts/word_budget.py so render_report
+# can count the skeleton with the same code this gate enforces with. Aliased
+# under the old private names: callers and tests inside this module are
+# unchanged, and there is exactly one implementation.
 # --------------------------------------------------------------------------- #
 
-def _page_sections(report_text):
-    """Split the report into the Page-1/2/3 section bodies (list of strings).
-
-    Splits on the ``## Page`` headers. Returns the section bodies (excluding any
-    preamble before the first Page header).
-    """
-    parts = re.split(r"^## Page ", report_text, flags=re.MULTILINE)
-    # parts[0] is the preamble (title); the rest are the three pages.
-    return parts[1:]
-
-
-# A markdown pipe-table row (header, separator, or data): its stripped form starts
-# with "|". Every one of these is SCRIPT-minted by render_report from the bundle --
-# the author cannot shorten a table without deleting a scripted number.
-_TABLE_ROW_RE = re.compile(r"^\|")
-# Any ATX heading, with its level captured.
-_HEADING_RE = re.compile(r"^(#{1,6})\s")
-# The mandated disclosure footer's heading. Everything from here to the next
-# heading of the SAME OR HIGHER level (or the end of the page) is the footer.
-_DATA_INTEGRITY_RE = re.compile(r"^(#{1,6})\s+Data Integrity\s*$")
-
-
-def _countable_prose(section_text):
-    """A page body with the UNCOUNTABLE parts removed, for the word cap.
-
-    Two things are dropped:
-
-      * every markdown pipe-table row -- the tables are minted by render_report
-        from the bundle, so their words are not a budget the author can spend;
-      * the whole ``### Data Integrity`` section (heading through to the next
-        heading of the same or higher level, or the end of the page) -- mandated
-        disclosure whose length is set by the snapshot's api_tier_notes, not by
-        the author.
-
-    WHY: measured on four production bundles the ZERO-PROSE skeleton alone ran
-    2,816-3,935 words, so a cap of 2100 over the raw text was unsatisfiable by any
-    amount of prose editing. The one way to "pass" was to delete scripted content
-    -- and in production an author did exactly that, cutting 78% of the mandated
-    footer. Counting only what an author can actually influence makes the cap a
-    prose budget again and removes the incentive to shrink disclosure.
-    """
-    out = []
-    skip_level = None
-    for line in section_text.splitlines():
-        stripped = line.strip()
-        heading = _HEADING_RE.match(stripped)
-        if heading:
-            level = len(heading.group(1))
-            if skip_level is not None and level <= skip_level:
-                skip_level = None          # the footer section ended here
-            if _DATA_INTEGRITY_RE.match(stripped):
-                # Never DOWNGRADE an active skip to a deeper level: a delta report
-                # nests "### Data Integrity" (the footer builder's own heading)
-                # inside "## Data Integrity" (the page heading), and taking the
-                # inner level would let the next "###" end the skip early. The
-                # shallowest active heading owns the section.
-                skip_level = level if skip_level is None else min(skip_level, level)
-                continue
-        if skip_level is not None:
-            continue
-        if _TABLE_ROW_RE.match(stripped):
-            continue
-        out.append(line)
-    return "\n".join(out)
+_page_sections = word_budget.page_sections
+_countable_prose = word_budget.countable_prose
 
 
 # --------------------------------------------------------------------------- #
@@ -1289,7 +1234,7 @@ def check_word_cap(report_text):
 
 
 def check_no_empty_slots(report_text):
-    slots = re.findall(r"<!-- SLOT:([a-z_]+) -->", report_text)
+    slots = word_budget.SLOT_RE.findall(report_text)
     if slots:
         shown = slots[:_ORPHAN_CAP]
         return _result("no_empty_slots", False,
