@@ -421,3 +421,37 @@ def test_renderer_skill_discovery_is_shell_portable():
     assert "ls -d" not in discovery, "discovery must use find, not shell globs"
     assert discovery.count("find ") >= 5
     assert "-name 'detail_reports_*'" in discovery
+
+
+def test_no_skill_relies_on_bash_glob_semantics():
+    """No SKILL.md may put an unquoted glob in a bash block.
+
+    Under zsh -- the macOS default -- an unmatched glob is a NOMATCH error that
+    aborts the command BEFORE it runs, and `2>/dev/null` cannot suppress it
+    (the shell emits it, not the command). Piped into `head`, the pipeline then
+    exits 0: empty output with a success status, which reads as a legitimate
+    "nothing found". For a DISCOVERY command that is the exact case being
+    tested for, so the command fails precisely when it is doing its job.
+
+    Nine such lines shipped across nine skills in 1.5.1. `find` with a QUOTED
+    -name pattern does its own matching and behaves identically in both shells.
+    """
+    import glob as _glob
+    import re as _re
+
+    skills_dir = os.path.join(os.path.dirname(_SKILL_MD), "..")
+    offenders = []
+    for path in sorted(_glob.glob(os.path.join(skills_dir, "*", "SKILL.md"))):
+        with open(path) as fh:
+            text = fh.read()
+        for block in _re.findall(r"```bash\n(.*?)```", text, _re.S):
+            for line in block.splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                unquoted = _re.sub(r"'[^']*'|\"[^\"]*\"", "", stripped)
+                if "*" in unquoted:
+                    offenders.append(f"{os.path.basename(os.path.dirname(path))}: {stripped}")
+    assert offenders == [], (
+        "unquoted glob in a SKILL bash block -- use find with a quoted -name:\n"
+        + "\n".join(offenders))
