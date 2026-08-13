@@ -23,13 +23,19 @@ Trigger phrases: "options strategy for MU bullish", "options play NVDA", "what o
 
 ## Step 1 — Locate the bundle (need a snapshot with a chain)
 
-In the invoker's CWD, find the newest bundle for the ticker:
+In the invoker's CWD, find the newest bundle for the ticker. Two separate commands, the new layout tried first:
 
 ```bash
-ls -dt ./trading_desk_<TICKER>/detail_reports_* ./td_bundle_<TICKER>_* 2>/dev/null | head -1
+find ./trading_desk_<TICKER> -maxdepth 1 -type d -name 'detail_reports_*' 2>/dev/null | sort -r | head -1
 ```
 
-Newest first across both layouts: the new `./trading_desk_<TICKER>/detail_reports_<date>/` bundles and the legacy `./td_bundle_<TICKER>_<date>/` bundles (fallback for old runs).
+If that prints nothing, fall back to the legacy shape:
+
+```bash
+find . -maxdepth 1 -type d -name 'td_bundle_<TICKER>_*' 2>/dev/null | sort -r | head -1
+```
+
+The new `./trading_desk_<TICKER>/detail_reports_<date>/` layout wins whenever it has a match; the legacy `./td_bundle_<TICKER>_<date>/` layout (fallback for old runs) is consulted only when it's empty — never a merged cross-shape sort.
 
 - **If NO bundle (or no snapshot with a chain) exists**, invoke the **market-snapshot** skill for `<TICKER>` first — options-strategy needs the on-disk chain that market-snapshot writes and references at `snapshot.options.chain_file_path`.
 - The script resolves that chain file **relative to the bundle** and loads it **only** through `chain.load_contracts`. If the chain is missing or unreadable, the script exits 2.

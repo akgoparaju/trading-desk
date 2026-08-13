@@ -21,13 +21,19 @@ Trigger phrases: "risk profile MU", "downside map for AAPL", "how risky is this 
 
 ## Step 1 — Locate the snapshot bundle and require the technical module
 
-In the invoker's CWD, find the newest bundle for the ticker:
+In the invoker's CWD, find the newest bundle for the ticker. Two separate commands, the new layout tried first:
 
 ```bash
-ls -dt ./trading_desk_<TICKER>/detail_reports_* ./td_bundle_<TICKER>_* 2>/dev/null | head -1
+find ./trading_desk_<TICKER> -maxdepth 1 -type d -name 'detail_reports_*' 2>/dev/null | sort -r | head -1
 ```
 
-Newest first across both layouts: the new `./trading_desk_<TICKER>/detail_reports_<date>/` bundles and the legacy `./td_bundle_<TICKER>_<date>/` bundles (fallback for old runs).
+If that prints nothing, fall back to the legacy shape:
+
+```bash
+find . -maxdepth 1 -type d -name 'td_bundle_<TICKER>_*' 2>/dev/null | sort -r | head -1
+```
+
+The new `./trading_desk_<TICKER>/detail_reports_<date>/` layout wins whenever it has a match; the legacy `./td_bundle_<TICKER>_<date>/` layout (fallback for old runs) is consulted only when it's empty — never a merged cross-shape sort.
 
 - **If a bundle exists**, confirm it holds a `snapshot_<TICKER>_*.json`.
 - **If NO bundle exists**, invoke the `market-snapshot` skill for `<TICKER>` first, then continue with the bundle it produces. Do not attempt to fetch data here yourself.

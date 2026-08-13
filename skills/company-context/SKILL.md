@@ -31,13 +31,19 @@ Everywhere below that reads `./trading_desk_<TICKER>/…` (the bundle glob, `cov
 
 ## Step 1 — Locate the ticker workspace + bundle
 
-Under `<WORKROOT>` (or the absolute bundle path the orchestrator handed you), find the newest bundle for the ticker:
+Under `<WORKROOT>` (or the absolute bundle path the orchestrator handed you), find the newest bundle for the ticker. Two separate commands, the new layout tried first:
 
 ```bash
-ls -dt <TICKER_WS>/detail_reports_* <WORKROOT>/td_bundle_<TICKER>_* 2>/dev/null | head -1
+find <TICKER_WS> -maxdepth 1 -type d -name 'detail_reports_*' 2>/dev/null | sort -r | head -1
 ```
 
-Newest first across both layouts (the new `trading_desk_<TICKER>/detail_reports_<date>/` bundle and the legacy `td_bundle_<TICKER>_<date>/`). **If NO bundle exists**, invoke the `market-snapshot` skill for `<TICKER>` first, then continue with the bundle it produces. The bundle's `snapshot.json` (single source of truth) supplies `meta.ticker` / `meta.as_of_utc` and every number the prose may cite; its `raw/news_sentiment.json` and `snapshot.events` feed the live tape.
+If that prints nothing, fall back to the legacy shape:
+
+```bash
+find <WORKROOT> -maxdepth 1 -type d -name 'td_bundle_<TICKER>_*' 2>/dev/null | sort -r | head -1
+```
+
+The nested `<TICKER_WS>/detail_reports_<date>/` bundle wins whenever it has a match (the newer convention); the legacy `<WORKROOT>/td_bundle_<TICKER>_<date>/` shape is consulted only when it's empty — never a merged cross-shape sort. **If NO bundle exists**, invoke the `market-snapshot` skill for `<TICKER>` first, then continue with the bundle it produces. The bundle's `snapshot.json` (single source of truth) supplies `meta.ticker` / `meta.as_of_utc` and every number the prose may cite; its `raw/news_sentiment.json` and `snapshot.events` feed the live tape.
 
 ---
 

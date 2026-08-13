@@ -45,6 +45,7 @@ if _REPO_ROOT not in sys.path:
 
 from scripts import decision_contract  # noqa: E402  (after sys.path setup)
 from scripts._artifact import emit_json  # noqa: E402  (after sys.path setup)
+from scripts import word_budget  # noqa: E402  (after sys.path setup)
 
 # Required module files for a FULL report (each missing -> exit 2 naming it).
 _REQUIRED_MODULES = [
@@ -1576,6 +1577,11 @@ def main(argv=None):
     contract = decision_contract.build_contract(docs)
     decision_path = os.path.join(args.bundle, "module_decision.json")
     emit_json(contract, decision_path)
+
+    # The authoring budget, stated BEFORE a word of prose is written -- the gate
+    # states it after, and by then an overage costs a trim plus a full QC cycle.
+    # Printed before the path so the path stays the LAST line of stdout.
+    print(word_budget.format_budget_block(word_budget.budget(report)))
 
     print(out)
     return 0

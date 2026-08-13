@@ -25,8 +25,8 @@ Trigger phrases: "review scales", "scale review", "re-examine the sector scales"
 In the invoker's CWD:
 
 ```bash
-ls trading_desk_config/scales/*.json 2>/dev/null
-ls trading_desk_config/scales/proposals/*.json 2>/dev/null   # already-pending drafts
+find trading_desk_config/scales -maxdepth 1 -name '*.json' 2>/dev/null
+find trading_desk_config/scales/proposals -maxdepth 1 -name '*.json' 2>/dev/null   # already-pending drafts
 ```
 
 For each active scale, read it (`scale`, `version`, `formula`, `parameters`, `evidence`, `falsifiers`, `prior`, `on_trip`) and **map its consumers** — the tickers/workspaces whose fundamental score used it. Scan `./trading_desk_*/detail_reports_*/module_fundamental.json` for a `justified_band` / scale reference matching the scale name. A scale with live consumers is higher-stakes; note the count.
